@@ -1,20 +1,18 @@
 #!/usr/bin/env node
 
 import process from "node:process";
-import { bootstrapRuntime } from "./runtime/bootstrap.js";
+import { bootstrapRuntime, createRuntimeState } from "./runtime/bootstrap.js";
 import { createRuntimeSession } from "./runtime/session.js";
 
 async function main(): Promise<void> {
   const runtime = await bootstrapRuntime(process.cwd());
   const session = createRuntimeSession(runtime);
+  const state = createRuntimeState(runtime);
 
   process.stdout.write(
     `${JSON.stringify(
       {
-        product: runtime.config.productName,
-        provider: session.provider,
-        cwd: session.cwd,
-        mcpServers: session.mcpServers,
+        ...state,
         sessionId: session.id,
       },
       null,

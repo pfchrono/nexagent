@@ -1,20 +1,15 @@
-import type { RuntimeBootstrap } from "./bootstrap.js";
+import { createRuntimeState, type RuntimeBootstrap, type RuntimeState } from "./bootstrap.js";
 
-export interface RuntimeSession {
+export interface RuntimeSession extends RuntimeState {
   id: string;
-  provider: string;
-  cwd: string;
   startedAt: string;
-  mcpServers: string[];
 }
 
 export function createRuntimeSession(runtime: RuntimeBootstrap): RuntimeSession {
   return {
     id: createSessionId(),
-    provider: runtime.config.defaultProvider,
-    cwd: runtime.config.cwd,
     startedAt: new Date().toISOString(),
-    mcpServers: runtime.mcp.serverNames,
+    ...createRuntimeState(runtime),
   };
 }
 
