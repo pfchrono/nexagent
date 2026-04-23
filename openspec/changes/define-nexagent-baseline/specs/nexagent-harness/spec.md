@@ -4,11 +4,12 @@
 
 `nexagent` SHALL operate as a hybrid coding-agent harness assembled from the strongest donor implementations rather than as either a single-project fork or a blank-slate assistant implementation.
 
-#### Scenario: Runtime baseline is assembled from multiple donor implementations
+#### Scenario: Current runtime baseline stays honest while donor-guided assembly remains planned
 
 - **GIVEN** maintainers initialize or update `nexagent` using proven runtime code and patterns from donor projects
-- **WHEN** they adapt those inputs into a single harness
-- **THEN** they preserve the best available pathways for CLI execution, tool invocation, prompt assembly, transport, provider plumbing, and GUI integration unless an approved spec intentionally changes them
+- **WHEN** they evaluate the current local implementation against the documented baseline
+- **THEN** they MUST describe the existing runtime truthfully as a narrow local scaffold centered on the CLI entrypoint, configuration loading, MCP summary reporting, and lightweight session/runtime plumbing
+- **AND** they MUST treat broader donor pathways for tool invocation, prompt assembly, transport, provider plumbing, and GUI integration as planned implementation work until those subsystems actually exist locally
 - **AND** they treat donor compatibility as an implementation advantage, not as the final product identity.
 
 #### Scenario: Local comparative harness references inform implementation work
@@ -27,7 +28,9 @@
 - **GIVEN** a repo contains local instructions and configuration such as `AGENTS.md`, `CLAUDE.md` when present, `.claude/settings.json`, `.mcp.json`, OpenSpec artifacts, or other approved repo-local orchestration state
 - **WHEN** `nexagent` runs inside that repo
 - **THEN** those local artifacts are treated as primary configuration inputs for behavior, tooling, and workflow orchestration
-- **AND** the harness is able to combine model providers, MCP servers, ripgrep-class repo search, and local command execution within one session.
+- **AND** the current baseline MUST at minimum surface the configured provider, imported settings, and available plus enabled MCP server names in the session output
+- **AND** richer composition of model providers, MCP tools, ripgrep-class repo search, and local command execution remains planned harness behavior until implemented locally.
+- **AND** the first non-debug interactive surface MUST be a TUI that consumes shared runtime state before any GUI shell claims parity.
 
 ### Requirement: Tooling remains harness-oriented
 
@@ -36,10 +39,10 @@
 #### Scenario: Tooling remains harness-oriented
 
 - **GIVEN** `nexagent` is configured for local repository work
-- **WHEN** an agent session starts
-- **THEN** the harness MUST expose structured local tool use suitable for code navigation, editing, validation, and controlled automation
-- **AND** the baseline toolset MUST include strong repository search ergonomics equivalent to ripgrep-class search
-- **AND** these tools MUST remain composable with MCP-backed capabilities rather than assuming a provider-only interaction model.
+- **WHEN** maintainers evaluate the baseline harness contract against the current repository
+- **THEN** they MUST preserve the direction of structured local tool use suitable for code navigation, editing, validation, and controlled automation
+- **AND** they MUST not describe ripgrep-class search or broader local tool execution as already implemented unless those capabilities actually exist in the local runtime
+- **AND** future tool surfaces MUST remain composable with MCP-backed capabilities rather than assuming a provider-only interaction model.
 
 ### Requirement: Interactive workflow keeps upstream-inspired progress and extension surfaces
 
@@ -72,11 +75,18 @@
 - **THEN** the primary assistant runtime uses that configured provider by default
 - **AND** enabled MCP services remain available for complementary capabilities such as documentation lookup, code graph analysis, filesystem access, and remote API operations.
 
+#### Scenario: TUI precedes GUI parity work
+
+- **GIVEN** maintainers evaluate the baseline product surface for `nexagent`
+- **WHEN** they choose the first real interactive implementation slice beyond the debug CLI
+- **THEN** they MUST build a TUI on top of shared runtime state before starting GUI-shell parity work
+- **AND** that TUI MUST expose current runtime truth such as provider status, repo context, MCP state, session identifiers, and spinner-style progress reporting.
+
 #### Scenario: GUI parity direction is captured in the baseline
 
 - **GIVEN** maintainers evaluate the baseline product surface for `nexagent`
 - **WHEN** they define expected GUI behavior direction before implementation is complete
-- **THEN** the documented baseline MUST treat GUI parity as a blend of Hermes Agent, OpenClaude, and OpenCode patterns with a stronger lean toward Hermes-style workflow visibility and OpenClaude-style control-plane completeness
+- **THEN** the documented baseline MUST treat GUI parity as a later blend of Hermes Agent, OpenClaude, and OpenCode patterns with a stronger lean toward Hermes-style workflow visibility and OpenClaude-style control-plane completeness
 - **AND** they MUST preserve the ability to implement that direction without discarding the best available compatibility-critical runtime pathways retained in the hybrid baseline.
 
 #### Scenario: Hybrid harness planning preserves future feature tracks

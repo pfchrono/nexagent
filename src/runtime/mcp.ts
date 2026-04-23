@@ -15,13 +15,34 @@ export interface McpRegistrySummary {
   servers: Record<string, McpServerDefinition>;
 }
 
-export async function loadMcpRegistrySummary(filePath: string): Promise<McpRegistrySummary> {
-  const raw = await readFile(filePath, "utf8");
-  const parsed = JSON.parse(raw) as McpConfigFile;
-  const servers = parsed.mcpServers ?? {};
+export async function loadMcpRegistrySummary(
+  filePath: string,
+  enabledServers: string[] = [],
+): Promise<McpRegistrySummary> {
+  const parsed = await readMcpConfigFile(filePath);
+  const allServers = parsed?.mcpServers ?? {};
+  const servers =
+    enabledServers.length === 0
+      ? allServers
+      : Object.fromEntries(
+          Object.entries(allServers).filter(([name]) => enabledServers.includes(name)),
+        );
 
   return {
     serverNames: Object.keys(servers).sort(),
     servers,
   };
+}
+
+async function readMcpConfigFile(filePath: string): Promise<McpConfigFile | null> {
+  try {
+    const raw = await readFile(filePath, "utf8");
+    return JSON.parse(raw) as McpConfigFile;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return null;
+    }
+
+    throw error;
+  }
 }

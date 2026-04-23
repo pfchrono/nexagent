@@ -11,10 +11,11 @@ The goal of this design is to produce a best-of hybrid runtime for `nexagent`, n
 1. Define a best-of hybrid runtime for `nexagent` rather than treating any single upstream harness as the product boundary.
 2. Reuse proven subsystems from Free-Code, OpenClaude, Hermes Agent, Codex, OpenCode, and OpenClaw where they are clearly better than rebuilding them immediately.
 3. Make repo-local artifacts the primary source of behavioral control.
-4. Support sessions that combine one default assistant provider with multiple complementary MCP services, local tools, hooks, plugins, and internal runtime capabilities.
-5. Preserve strong interactive progress ergonomics, including Free-Code-style spinner verb updates, while adopting richer workflow visibility patterns from Hermes and OpenClaude.
+4. Support sessions that combine one default assistant provider with multiple complementary MCP services and future local harness capabilities without collapsing into provider-only chat.
+5. Preserve strong interactive progress ergonomics, including Free-Code-style spinner verb updates, while making the first real interactive surface a TUI that validates shared runtime state before any GUI shell is built.
 6. Keep the initialization path incremental so the repository can assemble the hybrid runtime in phases rather than attempting a one-shot rewrite.
-7. Treat local reference checkouts of Free-Code, Hermes Agent, Codex, OpenClaude, OpenCode, and OpenClaw as comparative implementation inputs during actual build work.
+7. Treat hooks, plugins, richer internal tools, and memory as planned follow-on capabilities that should be added after the shared runtime, TUI, provider transport, and prompt assembly layers are real.
+8. Treat local reference checkouts of Free-Code, Hermes Agent, Codex, OpenClaude, OpenCode, and OpenClaw as comparative implementation inputs during actual build work.
 
 ## Non-goals
 
@@ -25,19 +26,21 @@ The goal of this design is to produce a best-of hybrid runtime for `nexagent`, n
 
 ## Architectural stance
 
+The current repository does not yet implement the full hybrid runtime described here. Today it exposes a narrow local baseline centered on the existing CLI entrypoint, local configuration loading, MCP summary reporting, and a lightweight session/runtime scaffold. This design document therefore describes both the real current baseline and the intended hybrid direction, without pretending that donor transport, prompt, or GUI subsystems are already integrated.
+
 The system is intentionally split into two layers:
 
 ### 1. Runtime subsystem layer
 
-This layer is assembled from the strongest donor implementations available at baseline time and should remain structurally familiar to those source runtimes during initial integration.
+At the current baseline, this layer is intentionally narrow and local. In this repo today it includes:
 
-It includes:
+- the CLI entrypoint and command execution flow in `src/cli.ts`
+- runtime bootstrap orchestration in `src/runtime/bootstrap.ts`
+- configuration loading and merge behavior in `src/runtime/config.ts`
+- MCP registry summary loading in `src/runtime/mcp.ts`
+- lightweight session materialization in `src/runtime/session.ts`
 
-- CLI entrypoints and command execution flow
-- prompt assembly and instruction loading
-- tool invocation and tool result handling
-- transport/runtime plumbing for the default provider
-- GUI integration and control-plane paths proven in donor runtimes
+Prompt assembly, tool invocation, provider transport, and GUI control-plane paths are not yet implemented here beyond this scaffold. Those remain donor-guided follow-up work.
 
 The purpose of this layer is operational leverage. `nexagent` should not rewrite these pathways casually. Changes here should be driven by a concrete product requirement or a clearly superior donor pattern, not by a desire to rebrand internals.
 
@@ -61,17 +64,18 @@ This layer is where `nexagent` should differ from upstream when local workflows,
 
 ## Core decision: preserve flow, change defaults
 
-The baseline decision is to keep the upstream execution flow wherever possible and change defaults, configuration precedence, and product-facing wording first.
+The baseline decision is to preserve the current working CLI/runtime flow, change defaults and product-facing wording first, and only pull in broader donor execution pathways when the local implementation is ready to absorb them.
 
 That means early implementation should prefer:
 
-- importing upstream runtime modules with minimal structural edits,
-- preserving existing invocation order for instructions, tools, and transport,
+- keeping the existing local CLI entrypoint and runtime scaffold coherent,
+- preserving the compatibility-critical invocation path that already works locally,
 - adapting configuration so the default assistant provider is `codex`,
 - retaining MCP support as a first-class part of normal sessions,
-- updating only the text and defaults that misstate `nexagent` intent.
+- updating only the text and defaults that misstate `nexagent` intent,
+- deferring claims of imported prompt assembly, transport, tool-execution, or GUI parity until those subsystems are actually present in this repo.
 
-This is the lowest-risk path to a working repository because it reuses the tested runtime shape while still making the harness identity explicit.
+This is the lowest-risk path to a working repository because it keeps the real local baseline honest while leaving room to reuse tested donor runtime shapes later.
 
 ## Configuration precedence
 
@@ -103,21 +107,27 @@ The baseline should preserve these boundaries:
 
 ### Prompt and instruction assembly
 
-Responsible for combining system behavior, repo-local instructions, and task context into the prompt seen by the active assistant provider.
+Responsible in the future for combining system behavior, repo-local instructions, and task context into the prompt seen by the active assistant provider.
 
-Constraint: preserve upstream assembly flow unless a later spec requires new repo-local ordering rules.
+Current baseline note: this repository does not yet implement prompt assembly beyond surfacing config-derived session metadata.
+
+Constraint: defer detailed ordering rules until a later spec defines the local prompt pathway.
 
 ### Tool execution surface
 
-Responsible for exposing local commands, filesystem actions, MCP-backed tools, and future harness actions.
+Responsible in the future for exposing local commands, filesystem actions, MCP-backed tools, and future harness actions.
 
-Constraint: keep tool execution generic and composable rather than hard-coding provider-specific assumptions.
+Current baseline note: the current implementation only reports configured and available MCP servers; it does not yet execute a broader harness tool surface.
+
+Constraint: keep future tool execution generic and composable rather than hard-coding provider-specific assumptions.
 
 ### Provider transport
 
-Responsible for sending requests to the default assistant provider and receiving streamed or structured responses.
+Responsible in the future for sending requests to the default assistant provider and receiving streamed or structured responses.
 
-Constraint: provider transport should be adaptable, but baseline work should avoid redesigning it beyond what is needed to support the configured `codex` default.
+Current baseline note: this repository currently infers the configured provider and reports it, but does not yet implement provider transport.
+
+Constraint: provider transport should be adaptable, but baseline work should avoid redesigning it before a real transport pathway exists.
 
 ### Repo-local control plane
 
@@ -125,11 +135,11 @@ Responsible for reading and applying local instructions, settings, specs, and fu
 
 Constraint: this is the main place where `nexagent` behavior should evolve. New product decisions should prefer extending this control plane before rewriting lower runtime layers.
 
-### GUI and interactive surfaces
+### TUI and GUI surfaces
 
-Responsible for preserving and recombining the strongest donor interactive workflows.
+Responsible for exposing shared runtime state through real interactive surfaces without forking the underlying truth model.
 
-Constraint: the workflow should lean heavily toward Hermes-style visibility and operator flow, retain Free-Code's useful per-turn token usage and turn-info reporting, and preserve spinner-verb style progress updates from both Free-Code and Hermes-inspired surfaces. Detailed GUI changes should still be deferred to later specs.
+Constraint: the first interactive implementation beyond the debug CLI should be a TUI that shows provider status, repo context, MCP state, session identity, imports/references, and spinner-verb style progress updates. A later GUI shell may lean heavily toward Hermes-style visibility and operator flow, retain Free-Code's useful per-turn token usage and turn-info reporting, and preserve the same shared runtime contracts rather than inventing a GUI-only state path.
 
 ## Why this design fits the current repo
 
@@ -150,32 +160,42 @@ Baseline implementation should happen in phases.
 
 ### Phase 1: assemble runtime baseline
 
-Bring in the strongest donor runtime subsystems with the minimal edits needed to run them coherently inside this repository, using Free-Code as a major donor rather than the sole architectural source of truth.
+Keep the current local baseline coherent while identifying the first donor subsystems worth importing, using Free-Code as a major donor rather than the sole architectural source of truth.
 
 Acceptance focus:
 
-- CLI pathways exist
-- tool execution works
-- prompt assembly remains intact
-- transport layer is operational
-- GUI-compatible paths are preserved where present
+- the existing CLI pathway runs coherently
+- local configuration is loaded and surfaced correctly
+- MCP summary loading works
+- the lightweight session/runtime scaffold is explicit
+- donor imports for tool execution, prompt assembly, transport, and GUI remain future implementation work rather than implied current capabilities
 
-### Phase 2: apply harness defaults
+### Phase 2: stabilize shared runtime contracts
 
-Adapt configuration and wording so the imported runtime behaves like `nexagent`.
+Define and harden the shared runtime state that future interfaces and transports will consume.
 
 Acceptance focus:
 
-- default provider is `codex`
-- repo-local instructions are loaded as intended
-- `.mcp.json` backed workflows remain available
-- conflicting upstream product language is corrected
+- runtime state has a truthful shared model for provider identity, repo context, MCP status, session identifiers, and progress reporting
+- repo-local instructions and config-derived defaults are surfaced through that model
+- conflicting upstream product language is corrected without pretending missing subsystems already exist
 
-### Phase 3: add harness-specific specs
+### Phase 3: build the first TUI
+
+Add the first real interactive surface on top of the shared runtime.
+
+Acceptance focus:
+
+- the TUI reflects shared runtime truth instead of duplicating state
+- operators can inspect provider status, repo context, MCP state, session identity, and progress updates
+- the TUI validates interface boundaries needed later by a GUI shell
+
+### Phase 4: add harness-specific specs
 
 Extend the product deliberately through new OpenSpec changes for:
 
 - provider routing and fallback rules
+- prompt and instruction assembly rules
 - Archivist-backed memory behavior and storage boundaries
 - command surface evolution
 - GUI parity and repo-local automation hooks

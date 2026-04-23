@@ -2,7 +2,7 @@
 
 This file provides guidance for coding agents working in the `nexagent` repository.
 
-This repo is currently a baseline scaffold, not a full imported application runtime. Most of the useful source of truth lives in OpenSpec and repo-local configuration. Do not assume upstream Free-Code source files, binaries, transports, or build scripts already exist here.
+This repo is currently an early `nexagent` runtime baseline, not the full planned hybrid harness. Most of the useful source of truth still lives in OpenSpec and repo-local configuration. Do not assume upstream Free-Code transport, GUI, or broader compatibility surfaces already exist here just because a local runtime now does.
 
 ## What exists today
 
@@ -15,8 +15,10 @@ The repo currently centers on:
 - `.mcp.json` for MCP server configuration
 - `.omc/` for local harness state and agent artifacts
 - `.codesight/` for optional repo analysis/cache data
+- `src/` for the current TypeScript CLI/runtime baseline
+- `package.json`, `tsconfig.json`, and lockfiles for local build/run commands
 
-If you do not see `src/`, `package.json`, or a runtime toolchain, treat that as the current intended baseline.
+Assume the current baseline includes a runnable CLI and local runtime modules when those files are present. Do not assume provider transport, GUI, or upstream-complete compatibility paths exist unless you can point to the files implementing them.
 
 ## Current objective
 

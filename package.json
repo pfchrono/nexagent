@@ -19,5 +19,8 @@
     "@types/node": "^22.15.3",
     "ts-node": "^10.9.2",
     "typescript": "^5.8.3"
+  },
+  "dependencies": {
+    "get-shit-done-cc": "^1.38.3"
   }
 }

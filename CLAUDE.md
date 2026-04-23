@@ -2,19 +2,21 @@
 
 This file provides compatibility guidance for assistants that automatically look for `CLAUDE.md` in a repository.
 
-`nexagent` is currently a baseline repo scaffold. It is not yet the full imported Free-Code runtime. Keep instructions grounded in the files that actually exist.
+`nexagent` is currently an early runtime baseline, not the full planned hybrid harness. Keep instructions grounded in the files that actually exist.
 
 ## Current repository shape
 
-Today this repo primarily contains:
+Today this repo contains:
 
 - OpenSpec artifacts under `openspec/`
 - local assistant configuration under `.claude/`
 - MCP server configuration in `.mcp.json`
 - local harness state under `.omc/`
 - repo guidance files like `AGENTS.md` and this file
+- a minimal TypeScript runtime under `src/`
+- package/build metadata in `package.json`, `tsconfig.json`, and lockfiles
 
-Do not assume there is already a runnable CLI, GUI, transport server, or application source tree unless those files have been added.
+A runnable CLI entrypoint exists at `src/cli.ts` and builds to `dist/cli.js` or platform binaries via the package scripts. Do not assume provider transport, GUI, or richer upstream-compatible application surfaces exist yet unless those files have been added.
 
 ## Primary source of truth
 

@@ -19,10 +19,10 @@ This proposal establishes `nexagent` as a from-scratch hybrid coding-agent harne
 `nexagent` SHALL:
 
 - be defined as a hybrid harness assembled from the strongest donor implementations rather than by default inheritance from any single upstream project,
-- reuse proven Free-Code runtime pathways for CLI, tool execution, prompt assembly, transport, provider plumbing, and GUI integration where those remain the best available building blocks,
+- preserve the current compatibility-critical CLI/runtime baseline while future implementation work selectively imports donor runtime pathways for tool execution, prompt assembly, transport, provider plumbing, and GUI integration where those become real, justified building blocks,
 - adopt stronger control-plane, orchestration, and capability-surface patterns from OpenClaude where those exceed the current Free-Code baseline,
 - reuse OpenCode patterns selectively for LSP-oriented and client/server architecture where those are stronger than the current donor baseline,
-- treat MCP servers, local commands, ripgrep-powered search, structured tool execution, plugins, and hooks as first-class building blocks for agent orchestration,
+- treat MCP servers, local commands, ripgrep-powered search, and structured tool execution as first-class harness building blocks,
 - support repo-local behavioral control through `AGENTS.md`, `CLAUDE.md` when present, `.claude/`, `.mcp.json`, OpenSpec artifacts, and future session/state plumbing,
 - preserve the spinner-verb progress model used by Free-Code while allowing richer workflow visibility patterns inspired by Hermes Agent and OpenClaude,
 - remain compatible with upstream-inspired flows only where that compatibility does not block better hybrid `nexagent` product decisions.
@@ -34,6 +34,7 @@ This proposal establishes `nexagent` as a from-scratch hybrid coding-agent harne
 - Capture phased implementation tasks for initializing the repo from the chosen baseline.
 - Make explicit which current signals in the repo are intentional versus incidental scaffolding.
 - Name the hybrid harness features that are part of the baseline plan even if their detailed specs ship later.
+- Anchor the build order around a shared runtime core, then the first TUI, with GUI parity only later and with transport, prompt assembly, tool-surface, hook, and memory work added as explicit follow-on layers rather than implied present-tense capabilities.
 
 ### Hybrid harness features included in this baseline plan
 
@@ -41,21 +42,23 @@ The baseline change treats the following feature families as intentional parts o
 
 - provider/tool separation, where the default assistant runtime can differ from the documentation, code graph, filesystem, browser, GitHub, or other MCP-backed tools used in the same session,
 - repo-local control inputs from `AGENTS.md`, `CLAUDE.md` when present, `.claude/`, `.mcp.json`, and OpenSpec artifacts,
-- compatibility-preserving CLI, transport, and GUI pathways selectively carried forward from donor runtimes where they are still the best fit,
+- the existing compatibility-critical CLI pathway preserved now, with transport and GUI pathways only carried forward from donor runtimes when those surfaces actually exist locally and are still the best fit,
 - subsystem-by-subsystem donor selection rather than whole-repo inheritance,
-- GUI parity direction that blends Hermes Agent, OpenClaude, and OpenCode patterns with a stronger lean toward Hermes-style workflow visibility and OpenClaude-style control-plane completeness,
+- a TUI-first interface plan where the first real interactive surface validates the shared runtime before any GUI shell is built,
+- GUI parity direction that blends Hermes Agent, OpenClaude, and OpenCode patterns only as a later implementation track after the shared runtime and first TUI exist locally,
 - OpenCode as a selective donor for LSP-oriented and client/server architecture rather than as the primary plugin-compatibility model,
 - Free-Code-style spinner verbs as part of the baseline interactive progress model,
-- plugin and marketplace compatibility goals aligned primarily with Claude and OpenClaude ecosystems,
-- hook support aligned with Claude and OpenClaude-style repo and session automation,
-- Archivist (`token-savior`) as the intended persistent memory and code-recall system for `nexagent`,
-- future command-surface and automation-hook expansion for repo-specific agent workflows,
+- later plugin and marketplace compatibility goals aligned primarily with Claude and OpenClaude ecosystems,
+- later hook support aligned with Claude and OpenClaude-style repo and session automation,
+- Archivist (`token-savior`) as the intended persistent memory and code-recall system for `nexagent` after core runtime layers are real,
+- future command-surface and automation-hook expansion for repo-specific agent workflows after the shared runtime, TUI, provider transport, and prompt assembly are in place,
 - local reference checkouts of Free-Code, Hermes Agent, Codex, OpenClaude, OpenCode, and OpenClaw as intentional implementation inputs for comparative review during actual build work,
 - superior internal editing, search, and system-tool workflows including ripgrep-class repo search as a baseline harness capability.
 
 ### Out of scope
 
 - Rebranding every upstream naming artifact immediately.
+- Claiming that donor transport, prompt, tool, or GUI subsystems are already implemented locally when this repo still only exposes a narrow CLI/runtime baseline.
 - Locking in a final provider matrix beyond the current default of `codex` plus MCP-based augmentation.
 - Defining every slash command, GUI workflow, or transport protocol in this change.
 - Shipping code changes outside the documentation/spec baseline required to guide implementation.

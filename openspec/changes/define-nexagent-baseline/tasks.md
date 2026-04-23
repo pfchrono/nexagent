@@ -7,13 +7,20 @@
 
 ## 2. Repo initialization follow-up
 
-- [ ] 2.1 Import or adapt the upstream Free-Code runtime into this repository using the harness baseline as the acceptance contract.
-- [ ] 2.2 Preserve or reintroduce compatibility-critical CLI, transport, and GUI pathways before making `nexagent`-specific behavior changes.
+- [x] 2.1 Complete the current runtime baseline by verifying the local CLI and runtime modules are coherent, documented, and aligned with the harness baseline as the acceptance contract for the current repo truth.
+- [x] 2.2 Preserve the compatibility-critical CLI pathway that already exists, and treat transport or GUI compatibility paths as later implementation work until those surfaces are actually present.
 - [x] 2.3 Wire the repo defaults so local configuration prefers the `codex` provider with MCP augmentation from `.mcp.json`.
 - [x] 2.4 Audit current repo naming, prompts, and docs; replace only the pieces that misstate `nexagent` product intent within the scaffolded baseline.
 
-## 3. Subsequent spec work
+## 3. Interface and runtime build order
 
-- [ ] 3.1 Add a provider-routing spec covering provider defaults, fallback rules, and model selection.
-- [ ] 3.2 Add an Archivist (`token-savior`) memory spec covering persistence boundaries, retrieval behavior, and other persisted local agent context.
-- [ ] 3.3 Add specs for command surface, GUI parity, and repo-local automation hooks as they become implementation priorities.
+- [ ] 3.1 Define and stabilize the shared runtime core contracts that future interfaces will consume.
+- [ ] 3.2 Build the first real TUI on top of that shared runtime core, initially focused on truthful runtime visibility rather than feature parity.
+- [ ] 3.3 Add a GUI shell only after the shared runtime core and first TUI are real and using the same state model.
+
+## 4. Subsequent spec work
+
+- [ ] 4.1 Add a provider-routing spec covering provider defaults, fallback rules, and model selection.
+- [ ] 4.2 Add an instruction-assembly spec covering system behavior, repo-local instructions, precedence, and provider-ready prompt construction.
+- [ ] 4.3 Add an Archivist (`token-savior`) memory spec covering persistence boundaries, retrieval behavior, and other persisted local agent context.
+- [ ] 4.4 Add specs for command surface and repo-local automation hooks as they become implementation priorities.
