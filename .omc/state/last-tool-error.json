@@ -1,7 +1,0 @@
-{
-  "tool_name": "Bash",
-  "tool_input_preview": "{\"command\":\"git status --short\",\"timeout\":120000,\"description\":\"Show working tree status\"}",
-  "error": "Exit code 128\nfatal: not a git repository (or any of the parent directories): .git",
-  "timestamp": "2026-04-23T17:53:41.693Z",
-  "retry_count": 1
-}
