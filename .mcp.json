@@ -1,0 +1,81 @@
+{
+  "mcpServers": {
+    "context7": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@upstash/context7-mcp@latest"
+      ],
+      "description": "Live documentation lookup for npm libraries and SDKs (Anthropic SDK, MCP SDK, AWS SDK, Azure, OpenTelemetry)"
+    },
+    "next-devtools": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "next-devtools-mcp@latest"
+      ]
+    },
+    "filesystem": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "/home/pfchrono/code"
+      ]
+    },
+    "fetch": {
+      "command": "uvx",
+      "args": [
+        "mcp-server-fetch"
+      ]
+    },
+    "sequential-thinking": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-sequential-thinking"
+      ]
+    },
+    "API specification": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "apidog-mcp-server@latest",
+        "--oas=<oas-url-or-path>"
+      ]
+    },
+    "github": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-github"
+      ],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"
+      },
+      "description": "GitHub MCP for issues, PRs, branches, and CI status \u2014 supports autofix-pr, commit-push-pr, and issue commands"
+    },
+    "code-review-graph": {
+      "command": "uvx",
+      "args": [
+        "code-review-graph",
+        "serve"
+      ],
+      "type": "stdio"
+    },
+    "token-savior": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "token-savior-recall[mcp,memory-vector]",
+        "token-savior"
+      ],
+      "env": {
+        "WORKSPACE_ROOTS": "/home/pfchrono/code/nexagent",
+        "TOKEN_SAVIOR_CLIENT": "codex"
+      },
+      "type": "stdio",
+      "description": "Archivist code navigation and persistent memory MCP server from Mibayy/token-savior"
+    }
+  }
+}

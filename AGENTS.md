@@ -1,0 +1,83 @@
+# AGENTS.md
+
+This file provides guidance for coding agents working in the `nexagent` repository.
+
+This repo is currently a baseline scaffold, not a full imported application runtime. Most of the useful source of truth lives in OpenSpec and repo-local configuration. Do not assume upstream Free-Code source files, binaries, transports, or build scripts already exist here.
+
+## What exists today
+
+The repo currently centers on:
+
+- `openspec/` for proposals, specs, design docs, and execution checklists
+- `AGENTS.md` for repo-local operating instructions
+- `CLAUDE.md` for assistant compatibility
+- `.claude/settings.json` for local assistant defaults
+- `.mcp.json` for MCP server configuration
+- `.omc/` for local harness state and agent artifacts
+- `.codesight/` for optional repo analysis/cache data
+
+If you do not see `src/`, `package.json`, or a runtime toolchain, treat that as the current intended baseline.
+
+## Current objective
+
+The immediate objective is to turn this repository into a working local `nexagent` AI harness while staying aligned with the baseline OpenSpec artifacts.
+
+Read these first before changing repo shape, runtime boundaries, or product behavior:
+
+- `openspec/changes/define-nexagent-baseline/proposal.md`
+- `openspec/changes/define-nexagent-baseline/specs/nexagent-harness/spec.md`
+- `openspec/changes/define-nexagent-baseline/design.md`
+- `openspec/changes/define-nexagent-baseline/tasks.md`
+
+## Repo rules
+
+- Prefer minimal, reversible changes.
+- Keep repository instructions aligned with files that actually exist.
+- Remove inherited upstream guidance when it describes code, commands, or architecture that is not present in this repo.
+- Do not invent build or test commands before the corresponding toolchain files exist.
+- Keep compatibility filenames like `CLAUDE.md` when they still help local assistant workflows.
+- Treat repo-local configuration as the current control plane.
+
+## Decision precedence
+
+When behavior is ambiguous, use this order:
+
+1. direct user request
+2. repo-local instructions (`AGENTS.md`, `CLAUDE.md`)
+3. repo-local configuration (`.claude/settings.json`, `.mcp.json`)
+4. OpenSpec baseline artifacts
+5. inherited assumptions from upstream projects or tools
+
+## Tooling guidance
+
+- Use read/search/edit tools for direct file work.
+- Use MCP tools when they provide better context than manual file scanning.
+- Use shell only for actions that genuinely require shell execution.
+- Do not install packages or bootstrap a runtime unless the task actually requires it.
+
+## Documentation hygiene
+
+When adapting inherited files for `nexagent`:
+
+- keep what is compatibility-critical,
+- rewrite what is misleading,
+- delete references to nonexistent source trees, providers, binaries, or transports,
+- prefer short accurate instructions over speculative architecture prose.
+
+## OpenSpec discipline
+
+If intent or scope changes, update the matching OpenSpec file instead of leaving it implicit.
+
+Typical mapping:
+
+- product direction or baseline intent → `proposal.md`
+- required behavior and acceptance criteria → `spec.md`
+- architecture, boundaries, and migration shape → `design.md`
+- execution checklist → `tasks.md`
+
+## Safety and scope
+
+- Keep edits tightly scoped to the request.
+- Avoid carrying over upstream branding or product claims unless they are still true for `nexagent`.
+- Before deleting or rewriting repo instructions, confirm they are not the last remaining record of important local behavior.
+- If you introduce a real runtime, add only the smallest accurate set of commands and paths needed for future agents to operate it.

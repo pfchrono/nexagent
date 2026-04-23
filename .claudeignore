@@ -1,0 +1,14 @@
+node_modules/
+dist/
+__pycache__/
+*.log
+bun.lock
+.claude/worktrees/
+.claude/plugins/
+.claude/agents/
+killbunfreecode.ps1
+.openspec/
+openspec/
+openspec/tmp/
+@openspec*/
+

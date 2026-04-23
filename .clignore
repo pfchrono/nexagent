@@ -1,0 +1,6 @@
+.openspec/
+openspec/
+openspec/tmp/
+@openspec*/
+.claude/agents/
+killbunfreecode.ps1

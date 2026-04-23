@@ -1,0 +1,23 @@
+{
+  "name": "nexagent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "nexagent": "./dist/nexagent-linux-x64"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/cli.js",
+    "dev": "node --loader ts-node/esm src/cli.ts",
+    "compile": "bun run compile:linux && bun run compile:macos && bun run compile:windows",
+    "compile:linux": "bun build ./src/cli.ts --compile --outfile ./dist/nexagent-linux-x64 --target=bun-linux-x64",
+    "compile:macos": "bun build ./src/cli.ts --compile --outfile ./dist/nexagent-darwin-arm64 --target=bun-darwin-arm64",
+    "compile:windows": "bun build ./src/cli.ts --compile --outfile ./dist/nexagent-windows-x64.exe --target=bun-windows-x64"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.3",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.8.3"
+  }
+}
