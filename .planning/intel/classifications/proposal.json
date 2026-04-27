@@ -1,0 +1,30 @@
+{
+  "source_path": "/home/pfchrono/code/nexagent/openspec/changes/define-nexagent-baseline/proposal.md",
+  "type": "PRD",
+  "confidence": "medium",
+  "manifest_override": false,
+  "title": "proposal",
+  "summary": "Defines the baseline product direction and scope for nexagent as a hybrid coding-agent harness assembled from selected donor systems.",
+  "scope": [
+    "nexagent",
+    "hybrid harness",
+    "CLI runtime",
+    "TUI",
+    "GUI parity",
+    "provider routing",
+    "prompt assembly",
+    "tool execution",
+    "MCP servers",
+    "Archivist memory"
+  ],
+  "cross_refs": [
+    ".claude/settings.json",
+    ".mcp.json",
+    "AGENTS.md",
+    "CLAUDE.md",
+    ".claude/"
+  ],
+  "locked": false,
+  "precedence": null,
+  "notes": "Classified as PRD because the document defines product intent, baseline scope, in-scope/out-of-scope boundaries, and requirement-like SHALL statements without ADR decision-record structure or implementation-contract detail."
+}

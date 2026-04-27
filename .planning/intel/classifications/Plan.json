@@ -1,0 +1,31 @@
+{
+  "source_path": "/home/pfchrono/code/nexagent/Plan.md",
+  "type": "DOC",
+  "confidence": "medium",
+  "manifest_override": false,
+  "title": "Nexagent Plan",
+  "summary": "Execution plan describing nexagent's current state, product stance, and phased build order for the hybrid harness.",
+  "scope": [
+    "nexagent",
+    "CLI",
+    "shared runtime core",
+    "TUI",
+    "GUI",
+    "provider transport",
+    "prompt assembly",
+    "tool execution",
+    "hooks",
+    "plugins",
+    "memory",
+    "command surface"
+  ],
+  "cross_refs": [
+    "AGENTS.md",
+    ".claude/",
+    ".mcp.json",
+    "OpenSpec docs"
+  ],
+  "locked": false,
+  "precedence": null,
+  "notes": "Classified as DOC because it is a prose-heavy internal execution roadmap and product-positioning plan, not a single architectural decision, user-focused requirements document, or implementation contract/spec."
+}

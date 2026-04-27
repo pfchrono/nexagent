@@ -1,0 +1,13 @@
+{
+  "source_path": "/home/pfchrono/code/nexagent/openspec/changes/define-nexagent-baseline/specs/archivist-memory/spec.md",
+  "type": "SPEC",
+  "confidence": "high",
+  "manifest_override": false,
+  "title": "spec",
+  "summary": "Defines requirements and constraints for Archivist persisted memory behavior and controls in nexagent.",
+  "scope": ["nexagent", "Archivist", "token-savior", "persisted memory", "runtime state", "CLI", "TUI", "GUI", "repo-local configuration"],
+  "cross_refs": [],
+  "locked": false,
+  "precedence": null,
+  "notes": ""
+}

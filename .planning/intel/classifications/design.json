@@ -1,0 +1,35 @@
+{
+  "source_path": "/home/pfchrono/code/nexagent/openspec/changes/define-nexagent-baseline/design.md",
+  "type": "DOC",
+  "confidence": "medium",
+  "manifest_override": false,
+  "title": "design",
+  "summary": "Describes the baseline nexagent hybrid harness architecture, goals, boundaries, migration phases, and deferred follow-up areas.",
+  "scope": [
+    "nexagent",
+    "hybrid runtime",
+    "CLI entrypoint",
+    "runtime bootstrap",
+    "configuration loading",
+    "MCP registry",
+    "session scaffold",
+    "repo-local control plane",
+    "TUI",
+    "GUI"
+  ],
+  "cross_refs": [
+    "src/cli.ts",
+    "src/runtime/bootstrap.ts",
+    "src/runtime/config.ts",
+    "src/runtime/mcp.ts",
+    "src/runtime/session.ts",
+    "AGENTS.md",
+    "CLAUDE.md",
+    ".claude/",
+    ".mcp.json",
+    ".claude/settings.json"
+  ],
+  "locked": false,
+  "precedence": null,
+  "notes": "The document contains architectural guidance and a stated core decision, but it lacks ADR hallmarks such as status, formal decision record sections, or locked acceptance markers; it is better classified as general design documentation than ADR or SPEC."
+}

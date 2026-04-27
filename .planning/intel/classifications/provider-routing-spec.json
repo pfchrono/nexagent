@@ -1,0 +1,13 @@
+{
+  "source_path": "/home/pfchrono/code/nexagent/openspec/changes/define-nexagent-baseline/specs/provider-routing/spec.md",
+  "type": "SPEC",
+  "confidence": "high",
+  "manifest_override": false,
+  "title": "spec",
+  "summary": "Defines requirements for assistant-provider identity, tool/provider separation, fallback policy, and future routing semantics in nexagent.",
+  "scope": ["nexagent", "assistant provider", "tool provider", "MCP servers", "fallback policy", "routing matrix", "runtime state"],
+  "cross_refs": [".claude/settings.json", ".mcp.json"],
+  "locked": false,
+  "precedence": null,
+  "notes": "Path under specs and structured SHALL requirements indicate a technical specification despite lacking an H1 title."
+}

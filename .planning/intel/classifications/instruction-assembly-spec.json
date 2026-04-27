@@ -1,0 +1,13 @@
+{
+  "source_path": "/home/pfchrono/code/nexagent/openspec/changes/define-nexagent-baseline/specs/instruction-assembly/spec.md",
+  "type": "SPEC",
+  "confidence": "high",
+  "manifest_override": false,
+  "title": "spec",
+  "summary": "Defines requirements for instruction precedence, discovery, prompt construction, and truthful capability reporting in nexagent.",
+  "scope": ["nexagent", "instruction precedence", "repo-local instruction artifacts", "prompt assembly", "session context", "runtime state"],
+  "cross_refs": ["AGENTS.md", "CLAUDE.md", ".claude/", ".mcp.json"],
+  "locked": false,
+  "precedence": null,
+  "notes": "Path under specs and structured SHALL requirements indicate a technical specification despite lacking an H1 title."
+}
