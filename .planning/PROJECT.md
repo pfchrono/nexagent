@@ -17,11 +17,14 @@ Give operator confidence that every turn is truthful, actionable, and visibly pr
 - ✓ Continue/approval loop runs with local Codex/HTTP providers (v1.3)
 - ✓ Command surface includes `/status`, `/provider`, `/tools`, `/memory` and command persistence scaffolding
 - ✓ Basic workspace and trace outputs avoid hard crashes during normal agent runs
+- ✓ **TU-01** compact operator-first diagnostics output validated in Phase 40
+- ✓ **RUNT-01** continue/start/finish flow stays active until done or blocked (Phase 40.1)
+- ✓ **RUNT-02** completion claims gated by runtime evidence instead of response tone (Phase 40.1)
+- ✓ **RUNT-03** running/pending/blocked/finished state clarity implemented (Phase 40.1)
+- ✓ **RUNT-04** interruption recovery surfaced in status/transcript output (Phase 40.1)
 
 ### Active
 
-- [ ] **RUNT-01**: Add parity-informed diagnostics and progress surfacing so `/status` and `/memory` outputs are operator-first.
-- [ ] **RUNT-02**: Enforce truthful turn flow: continue until done or blocked, and never report completion when verification did not run.
 - [ ] **TU-01**: Refresh terminal operator experience via donor-informed TTY polish, scroll/completion behavior, and clearer stage feedback.
 - [ ] **CMD-01**: Deliver usable `/skill` and `$skill` command behavior for model-instructions and tool set selection.
 - [ ] **SYS-01**: Tune instructions and state model so long turns show real execution stages instead of static standby text.
@@ -44,6 +47,12 @@ Give operator confidence that every turn is truthful, actionable, and visibly pr
 - **Compatibility**: keep existing command model stable unless explicitly versioned.
 - **Quality**: avoid blind feature adds; every turn UX change needs clear behavior contract.
 - **Dependency budget**: prefer incremental architecture changes over broad dependency churn.
+
+## Current State
+
+- Phase 40 and 40.1 are complete in roadmap and requirements traceability.
+- Next roadmap target after completion update is Phase 43.1.
+- Runtime truth gates for `/continue` and `/finish` now rely on session/provider completion proof.
 
 ## Key Decisions
 
@@ -71,4 +80,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-04-27 after v1.4 planning consolidation*
+*Last updated: 2026-04-27 after Phase 40.1 execution completion*
