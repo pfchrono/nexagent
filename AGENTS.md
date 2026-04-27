@@ -2,13 +2,13 @@
 
 This file provides guidance for coding agents working in the `nexagent` repository.
 
-This repo is currently an early `nexagent` runtime baseline, not the full planned hybrid harness. Most of the useful source of truth still lives in OpenSpec and repo-local configuration. Do not assume upstream Free-Code transport, GUI, or broader compatibility surfaces already exist here just because a local runtime now does.
+This repo is currently an early `nexagent` runtime baseline, not the full planned hybrid harness. Current source of truth lives in repo-local docs, config, and code that actually exists here. Do not assume upstream Free-Code transport, GUI, or broader compatibility surfaces already exist here just because a local runtime now does.
 
 ## What exists today
 
 The repo currently centers on:
 
-- `openspec/` for proposals, specs, design docs, and execution checklists
+- `openspec/` for current OpenSpec config and future spec material when present
 - `AGENTS.md` for repo-local operating instructions
 - `CLAUDE.md` for assistant compatibility
 - `.claude/settings.json` for local assistant defaults
@@ -22,14 +22,15 @@ Assume the current baseline includes a runnable CLI and local runtime modules wh
 
 ## Current objective
 
-The immediate objective is to turn this repository into a working local `nexagent` AI harness while staying aligned with the baseline OpenSpec artifacts.
+The immediate objective is to turn this repository into a working local `nexagent` AI harness while staying aligned with current repo-local planning truth.
 
 Read these first before changing repo shape, runtime boundaries, or product behavior:
 
-- `openspec/changes/define-nexagent-baseline/proposal.md`
-- `openspec/changes/define-nexagent-baseline/specs/nexagent-harness/spec.md`
-- `openspec/changes/define-nexagent-baseline/design.md`
-- `openspec/changes/define-nexagent-baseline/tasks.md`
+- `Plan.md`
+- `.planning/ROADMAP.md`
+- `.planning/STATE.md`
+- `AGENTS.md`
+- `CLAUDE.md`
 
 ## Repo rules
 
@@ -47,7 +48,7 @@ When behavior is ambiguous, use this order:
 1. direct user request
 2. repo-local instructions (`AGENTS.md`, `CLAUDE.md`)
 3. repo-local configuration (`.claude/settings.json`, `.mcp.json`)
-4. OpenSpec baseline artifacts
+4. current OpenSpec files when present
 5. inherited assumptions from upstream projects or tools
 
 ## Tooling guidance
@@ -68,14 +69,14 @@ When adapting inherited files for `nexagent`:
 
 ## OpenSpec discipline
 
-If intent or scope changes, update the matching OpenSpec file instead of leaving it implicit.
+If intent or scope changes, update matching repo-local planning file instead of leaving it implicit.
 
 Typical mapping:
 
-- product direction or baseline intent → `proposal.md`
-- required behavior and acceptance criteria → `spec.md`
-- architecture, boundaries, and migration shape → `design.md`
-- execution checklist → `tasks.md`
+- product direction and build order → `Plan.md`
+- milestone and phase truth → `.planning/ROADMAP.md`
+- active handoff state → `.planning/STATE.md`
+- future OpenSpec requirements or specs → `openspec/` files that actually exist
 
 ## Safety and scope
 

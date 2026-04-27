@@ -1,17 +1,20 @@
 #!/usr/bin/env node
 
 import { execFileSync } from "node:child_process";
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import process from "node:process";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { executeProviderRequest } from "./provider.js";
+import { executeProviderRequest, type ImageAttachment } from "./provider.js";
 import { launchCodexLogin, probeCodexAuthStateSync } from "./runtime/auth.js";
+import { checkpointArchivistSession, saveArchivistMemory } from "./runtime/archivist.js";
 import { bootstrapRuntime } from "./runtime/bootstrap.js";
 import { buildPromptLayers, summarizePromptLayers } from "./runtime/instructions.js";
 import { loadPersistedPromptHistory, savePersistedPromptHistory, savePersistedRuntimeState } from "./runtime/persistence.js";
 import { executeInternalTool, getInternalToolDefinitions } from "./runtime/tools.js";
 import { CODEX_MODEL_CATALOG, DEFAULT_CODEX_MODEL, getCodexModelDefinition, normalizeCodexModel } from "./models.js";
+import { ANSI, padLine, padVisibleLine, renderRule, renderScreen, resetScreenRenderer, tintLine, truncateLine, wrapText } from "./tui/primitives.js";
 import {
   applyTransportMode,
   applyProviderSelection,
@@ -34,6 +37,17 @@ import {
 
 const SPINNER_FRAMES = ["-", "\\", "|", "/"] as const;
 const NEXAGENT_EMBLEM_FRAMES = ["◜◆◝", "◠◆◡", "◟◆◞", "◡◆◠"] as const;
+const PERIODIC_MEMORY_MIN_MS = 10 * 60 * 1000;
+const PERIODIC_MEMORY_MAX_MS = 20 * 60 * 1000;
+const PERIODIC_MEMORY_TICK_MS = 30 * 1000;
+const MAX_IMAGE_ATTACHMENT_BYTES = 8 * 1024 * 1024;
+const IMAGE_MIME_BY_EXTENSION: Record<string, string> = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".webp": "image/webp",
+  ".gif": "image/gif",
+};
 const SPINNER_VERBS = [
   "Accomplishing",
   "Actioning",
@@ -258,7 +272,7 @@ const SPINNER_VERBS = [
   "Salting",
 ] as const;
 const TUI_SECTIONS = ["overview", "routing", "auth", "instructions", "mcp", "hooks", "imports", "archivist", "agent"] as const;
-const KEY_HINT = "Keys: type prompt · Tab accept · ↑/↓ history · Ctrl+R picker · Ctrl+T trace · ←/→ move cursor · PgUp/PgDn scroll · Home/End jump · Esc cancel/clear · Enter send · use /reload or /quit";
+const KEY_HINT = "Keys: Enter send · Esc clear · Tab complete · Alt+V paste-image (Ctrl+Alt+V) · ↑/↓ history · Ctrl+R picker · Ctrl+T trace · Ctrl+Y/N approve/reject · Ctrl+L focus · Ctrl+C copy/exit · /reload · /quit";
 const COMMAND_CATALOG = [
   { name: "/help", usage: "/help", description: "show available runtime commands" },
   { name: "/reload", usage: "/reload", description: "reload runtime state from repo config" },
@@ -286,7 +300,9 @@ const COMMAND_CATALOG = [
   { name: "/rg", usage: "/rg <pattern> [path]", description: "search repo files with ripgrep" },
   { name: "/diff", usage: "/diff [path]", description: "show bounded git diff for repo or one path" },
   { name: "/hooks", usage: "/hooks", description: "inspect repo-local hook policy" },
-  { name: "/memory", usage: "/memory [--verbose]", description: "inspect memory boundary and persisted storage (compact default)" },
+  { name: "/memory", usage: "/memory [--verbose|save <text>|checkpoint [reason]|session [focus]]", description: "inspect or persist archivist memory/checkpoints" },
+  { name: "/attach", usage: "/attach <image-path>", description: "attach local image for next prompt (http transports only)" },
+  { name: "/detach", usage: "/detach", description: "clear queued image attachment" },
 ] as const;
 const PATH_COMPLETION_COMMANDS = new Set(["/ls", "/read", "/diff"]);
 const SECOND_ARG_PATH_COMMANDS = new Set(["/find", "/glob", "/rg"]);
@@ -316,9 +332,22 @@ interface RuntimeTuiState {
   modelPickerOpen: boolean;
   modelPickerIndex: number;
   modelPickerEntries: Array<{ id: string; description: string; current: boolean }>;
+  modelPickerQuery: string;
   chatScrollOffset: number;
   latestUserMessage: string | null;
   latestAssistantMessage: string | null;
+  copyStatus: string | null;
+  copyStatusExpiresAt: number;
+  lastCtrlCAt: number;
+  composerFocusMode: boolean;
+  pendingImageAttachment: ImageAttachment | null;
+  approvalRequired: boolean;
+  pendingApprovalTool: string | null;
+  pendingApprovalSummary: string | null;
+  lastDecision: "approved" | "rejected" | "canceled" | null;
+  cancelRequested: boolean;
+  steerState: string | null;
+  steerMessage: string | null;
 }
 
 interface TerminalSize {
@@ -637,6 +666,35 @@ async function readPipedStdin(stdin: NodeJS.ReadStream): Promise<string | null> 
 
 export async function runPromptCommand(session: RuntimeSession, prompt: string): Promise<void> {
   const trimmedPrompt = prompt.trim();
+  const memoryMutation = parseMemoryMutationCommand(trimmedPrompt);
+
+  if (memoryMutation) {
+    try {
+      const output = await applyMemoryMutationCommand(session, memoryMutation);
+      setRuntimeAction(session, "ready", "command complete");
+      recordRuntimeEvent(session, {
+        kind: "command",
+        status: "completed",
+        summary: `command ${trimmedPrompt.split(/\s+/)[0]} completed`,
+        detail: output,
+      });
+      process.stdout.write(`${output}\n`);
+      return;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setRuntimeAction(session, "error", message);
+      recordRuntimeEvent(session, {
+        kind: "command",
+        status: "failed",
+        summary: `command ${trimmedPrompt.split(/\s+/)[0]} failed`,
+        detail: message,
+      });
+      process.stderr.write(`${message}\n`);
+      process.exitCode = 1;
+      return;
+    }
+  }
+
   if (session.operationControls.pendingApproval && !trimmedPrompt.startsWith("/")) {
     const lowerPrompt = trimmedPrompt.toLowerCase();
     if (APPROVE_PROMPT_ALIASES.has(lowerPrompt)) {
@@ -672,18 +730,20 @@ export async function runPromptCommand(session: RuntimeSession, prompt: string):
       status: "completed",
       summary: "reload command completed",
     });
-    process.stdout.write("runtime reloaded\n");
+    process.stdout.write("runtime reloaded (config/state). code edits require restart.\n");
     return;
   }
 
   if (prompt.trim() === "/quit") {
+    const quitMemoryNote = await maybePersistSessionMemoryOnQuit(session, "quit command");
     setRuntimeAction(session, "ready", "command complete");
     recordRuntimeEvent(session, {
       kind: "command",
       status: "completed",
       summary: "quit command requested",
+      detail: quitMemoryNote ?? "no pre-quit memory save",
     });
-    process.stdout.write("quitting interactive session\n");
+    process.stdout.write(`quitting interactive session${quitMemoryNote ? `\n${quitMemoryNote}` : ""}\n`);
     return;
   }
 
@@ -822,6 +882,13 @@ export function runRuntimeCommand(session: RuntimeSession, input: string): Runti
       return handleMemoryCommand(session, args);
     case "/hooks":
       return handleHooksCommand(session, args);
+    case "/attach":
+    case "/detach":
+      return {
+        ok: false,
+        message: "image attachments are interactive-only; use /attach or /detach in TTY composer",
+        activity: "attachment command rejected",
+      };
     default:
       return {
         ok: false,
@@ -864,14 +931,9 @@ export function formatCommandBoundary(event: RuntimeSession["events"][number]): 
     return [base];
   }
 
-  const detailLines = event.detail.split("\n");
-  const previewLines = detailLines.slice(0, 2);
-  const hiddenLineCount = Math.max(0, detailLines.length - previewLines.length);
-
   return [
     base,
-    ...previewLines.map((line) => `  ${line}`),
-    ...(hiddenLineCount > 0 ? [`  (+${hiddenLineCount} hidden lines)`] : []),
+    ...event.detail.split("\n").map((line) => `  ${line}`),
   ];
 }
 
@@ -902,7 +964,7 @@ function handleReloadCommand(args: string[]): RuntimeCommandResult {
 
   return {
     ok: true,
-    output: "runtime reload requested",
+    output: "runtime reload requested (config/state only; code edits require restart)",
     activity: "reload requested",
   };
 }
@@ -1029,7 +1091,7 @@ function handleMemoryCommand(session: RuntimeSession, args: string[]): RuntimeCo
   if (normalizedArgs.length !== 0) {
     return {
       ok: false,
-      message: "usage: /memory [--verbose]",
+      message: "usage: /memory [--verbose] | /memory save <text> | /memory checkpoint [reason] | /memory session [focus]",
       activity: "command failed · /memory usage",
     };
   }
@@ -2302,13 +2364,24 @@ async function runRuntimeTui(session: RuntimeSession): Promise<void> {
     state.action = session.action;
     let finished = false;
     let rawModeChanged = false;
+    let periodicMemoryInFlight = false;
+    let lastFrame = "";
+    let nextPeriodicMemoryAt = scheduleNextPeriodicMemoryAutosave(Date.now());
     const priorRawMode = stdin.isRaw;
     const priorEncoding = stdin.readableEncoding;
 
     const render = () => {
+      if (state.copyStatus && Date.now() >= state.copyStatusExpiresAt) {
+        state.copyStatus = null;
+      }
       syncTuiEventBuffers(session, state);
       state.view = createRuntimeTuiView(session);
-      process.stdout.write(renderRuntimeTuiState(state));
+      const frame = renderRuntimeTuiState(state);
+      if (frame === lastFrame) {
+        return;
+      }
+      lastFrame = frame;
+      process.stdout.write(frame);
     };
 
     const pushActivity = (message: string) => {
@@ -2328,6 +2401,7 @@ async function runRuntimeTui(session: RuntimeSession): Promise<void> {
     const closeModelPicker = () => {
       state.modelPickerOpen = false;
       state.modelPickerIndex = 0;
+      state.modelPickerQuery = "";
     };
 
     const clampChatScroll = () => {
@@ -2356,6 +2430,7 @@ async function runRuntimeTui(session: RuntimeSession): Promise<void> {
       const currentModel = getCurrentProviderModel(session);
       const currentIndex = availableModels.findIndex((entry) => entry.id === currentModel);
       state.modelPickerIndex = currentIndex >= 0 ? currentIndex : 0;
+      state.modelPickerQuery = "";
       render();
     };
 
@@ -2429,7 +2504,7 @@ async function runRuntimeTui(session: RuntimeSession): Promise<void> {
       if (!state.modelPickerOpen) {
         return;
       }
-      const availableModels = getAvailableModelsForProvider(session, session.providerTransport.activeProvider);
+      const availableModels = getFilteredModelPickerEntries(state);
       if (availableModels.length === 0) {
         return;
       }
@@ -2456,7 +2531,7 @@ async function runRuntimeTui(session: RuntimeSession): Promise<void> {
         return false;
       }
       const provider = session.providerTransport.activeProvider;
-      const availableModels = getAvailableModelsForProvider(session, provider);
+      const availableModels = getFilteredModelPickerEntries(state);
       const selected = availableModels[state.modelPickerIndex];
       if (!selected) {
         return false;
@@ -2481,6 +2556,7 @@ async function runRuntimeTui(session: RuntimeSession): Promise<void> {
 
     const cleanup = () => {
       clearInterval(animationInterval);
+      clearInterval(periodicMemoryInterval);
       process.removeListener("SIGINT", onSigint);
       stdin.removeListener("data", onData);
       if (rawModeChanged) {
@@ -2569,6 +2645,75 @@ async function runRuntimeTui(session: RuntimeSession): Promise<void> {
         return;
       }
 
+      const memoryMutation = parseMemoryMutationCommand(prompt);
+      if (memoryMutation) {
+        state.promptBuffer = "";
+        state.promptCursor = 0;
+        resetHistoryNavigation();
+        closeHistoryPopup();
+        closeModelPicker();
+        try {
+          const output = await applyMemoryMutationCommand(session, memoryMutation);
+          setRuntimeAction(session, "ready", "command complete");
+          recordRuntimeEvent(session, {
+            kind: "command",
+            status: "completed",
+            summary: "memory command completed",
+            detail: output,
+          });
+          state.action = session.action;
+          pushActivity(memoryMutation.kind === "save" ? "memory saved" : "memory checkpoint saved");
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          setRuntimeAction(session, "error", message);
+          recordRuntimeEvent(session, {
+            kind: "command",
+            status: "failed",
+            summary: "memory command failed",
+            detail: message,
+          });
+          state.action = session.action;
+          pushActivity(`memory command failed · ${message}`);
+        }
+        render();
+        return;
+      }
+
+      const attachmentMutation = parseAttachmentMutationCommand(prompt);
+      if (attachmentMutation) {
+        state.promptBuffer = "";
+        state.promptCursor = 0;
+        resetHistoryNavigation();
+        closeHistoryPopup();
+        closeModelPicker();
+        try {
+          const applied = applyAttachmentMutationCommand(session, attachmentMutation);
+          state.pendingImageAttachment = applied.attachment;
+          setRuntimeAction(session, "ready", "attachment updated");
+          recordRuntimeEvent(session, {
+            kind: "command",
+            status: "completed",
+            summary: "attachment command completed",
+            detail: applied.output,
+          });
+          state.action = session.action;
+          pushActivity(applied.attachment ? "image attached" : "image detached");
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          setRuntimeAction(session, "error", message);
+          recordRuntimeEvent(session, {
+            kind: "command",
+            status: "failed",
+            summary: "attachment command failed",
+            detail: message,
+          });
+          state.action = session.action;
+          pushActivity(`attachment failed · ${message}`);
+        }
+        render();
+        return;
+      }
+
       if (prompt === "/model") {
         state.promptBuffer = "";
         state.promptCursor = 0;
@@ -2589,13 +2734,18 @@ async function runRuntimeTui(session: RuntimeSession): Promise<void> {
         }
 
         if (prompt === "/quit") {
+          const quitMemoryNote = await maybePersistSessionMemoryOnQuit(session, "quit command");
           state.promptBuffer = "";
           state.promptCursor = 0;
           recordRuntimeEvent(session, {
             kind: "command",
             status: "completed",
             summary: "quit command requested",
+            detail: quitMemoryNote ?? "no pre-quit memory save",
           });
+          if (quitMemoryNote) {
+            pushActivity("memory session saved · quit");
+          }
           pushActivity("quit requested");
           render();
           finish();
@@ -2636,21 +2786,35 @@ async function runRuntimeTui(session: RuntimeSession): Promise<void> {
       render();
 
       try {
+        await maybeAutoPersistMemory(session, prompt);
         const autoCompact = maybeCompactConversation(session, prompt);
         if (autoCompact.compacted) {
           setRuntimeAction(session, "running", `auto compact · ${autoCompact.beforeTokens} -> ${autoCompact.afterTokens}`);
           state.action = session.action;
           pushActivity(`auto compact · ${autoCompact.beforeTokens} -> ${autoCompact.afterTokens}`);
+          await maybePersistCompactionMemory(session, prompt, autoCompact.beforeTokens, autoCompact.afterTokens);
           render();
         }
-        const result = await executeProviderRequest({ session, prompt });
+        const queuedAttachment = state.pendingImageAttachment;
+        const result = await executeProviderRequest({
+          session,
+          prompt,
+          ...(queuedAttachment ? { attachments: [queuedAttachment] } : {}),
+        });
         if (result.ok) {
-          recordConversationTurn(session, "user", prompt);
+          const userTurn = queuedAttachment
+            ? `${prompt}\n[attachment] name=${queuedAttachment.name}; mime=${queuedAttachment.mimeType}; bytes=${String(queuedAttachment.bytes)}`
+            : prompt;
+          recordConversationTurn(session, "user", userTurn);
           recordConversationTurn(session, "assistant", result.output);
           recordTurnTelemetry(session, prompt, result.output);
           setRuntimeAction(session, "ready", `response received · ${result.provider}`);
           state.action = session.action;
           pushActivity(`request ok · ${result.provider}`);
+          if (queuedAttachment) {
+            state.pendingImageAttachment = null;
+            pushActivity(`image sent · ${queuedAttachment.name}`);
+          }
         } else {
           setRuntimeAction(session, "error", result.message);
           recordRuntimeEvent(session, {
@@ -2685,7 +2849,30 @@ async function runRuntimeTui(session: RuntimeSession): Promise<void> {
       const key = input.toString();
 
       if (key === "\u0003") {
-        finish();
+        const now = Date.now();
+        if (now - state.lastCtrlCAt <= 700) {
+          finish();
+          return;
+        }
+
+        const copyPayload = buildCopyPayload(state);
+        if (copyPayload) {
+          const copied = copyTextToClipboard(copyPayload.text);
+          const count = copyPayload.text.length;
+          const status = copied
+            ? `copied ${count} chars (${copyPayload.label})`
+            : `copy unavailable (${count} chars ready)`;
+          state.copyStatus = status;
+          state.copyStatusExpiresAt = now + 4000;
+          pushActivity(`${status} · Ctrl+C again exit`);
+        } else {
+          const status = "nothing to copy";
+          state.copyStatus = status;
+          state.copyStatusExpiresAt = now + 3000;
+          pushActivity(`${status} · Ctrl+C again exit`);
+        }
+        state.lastCtrlCAt = now;
+        render();
         return;
       }
 
@@ -2752,6 +2939,86 @@ async function runRuntimeTui(session: RuntimeSession): Promise<void> {
         return;
       }
 
+      if (key === "\u000c") {
+        state.composerFocusMode = !state.composerFocusMode;
+        pushActivity(`composer focus ${state.composerFocusMode ? "on" : "off"} · Ctrl+L`);
+        render();
+        return;
+      }
+
+      if (key === "\u0019") {
+        if (state.pendingApprovalTool) {
+          const commandResult = runRuntimeCommand(session, "/approval approve");
+          if (commandResult?.ok) {
+            setRuntimeAction(session, "ready", "approval granted");
+            recordRuntimeEvent(session, {
+              kind: "control",
+              status: "applied",
+              summary: "approval granted",
+              detail: commandResult.output,
+            });
+            state.action = session.action;
+            pushActivity("approval granted · Ctrl+Y");
+            render();
+          }
+        }
+        return;
+      }
+
+      if (key === "\u000e") {
+        if (state.pendingApprovalTool) {
+          const commandResult = runRuntimeCommand(session, "/approval reject");
+          if (commandResult?.ok) {
+            setRuntimeAction(session, "ready", "approval rejected");
+            recordRuntimeEvent(session, {
+              kind: "control",
+              status: "blocked",
+              summary: "approval rejected",
+              detail: commandResult.output,
+            });
+            state.action = session.action;
+            pushActivity("approval rejected · Ctrl+N");
+            render();
+          }
+        }
+        return;
+      }
+
+      if (key === "\u001b\u0016" || key === "\u001bv" || key === "\u001bV") {
+        closeHistoryPopup();
+        closeModelPicker();
+        try {
+          const pasted = extractClipboardImageToTempFile();
+          const applied = applyAttachmentMutationCommand(session, {
+            kind: "attach",
+            rawPath: pasted.path,
+          });
+          state.pendingImageAttachment = applied.attachment;
+          setRuntimeAction(session, "ready", "clipboard image attached");
+          recordRuntimeEvent(session, {
+            kind: "command",
+            status: "completed",
+            summary: "clipboard image paste completed",
+            detail: `${applied.output}; source=${pasted.source}`,
+          });
+          state.action = session.action;
+          pushActivity(`image pasted · ${applied.attachment?.name ?? "clipboard"} · ${pasted.source}`);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          setRuntimeAction(session, "error", message);
+          recordRuntimeEvent(session, {
+            kind: "command",
+            status: "failed",
+            summary: "clipboard image paste failed",
+            detail: message,
+          });
+          state.action = session.action;
+          pushActivity(`paste-image failed · ${message}`);
+        }
+        render();
+        return;
+      }
+
       if (key === "\t") {
         const completion = autocompletePromptBuffer(session, state.promptBuffer);
         if (completion.value !== state.promptBuffer) {
@@ -2764,6 +3031,14 @@ async function runRuntimeTui(session: RuntimeSession): Promise<void> {
       }
 
       if (key === "\u007f") {
+        if (state.modelPickerOpen) {
+          if (state.modelPickerQuery.length > 0) {
+            state.modelPickerQuery = state.modelPickerQuery.slice(0, -1);
+            state.modelPickerIndex = 0;
+            render();
+          }
+          return;
+        }
         if (state.promptCursor > 0) {
           state.promptBuffer = `${state.promptBuffer.slice(0, state.promptCursor - 1)}${state.promptBuffer.slice(state.promptCursor)}`;
           state.promptCursor -= 1;
@@ -2872,7 +3147,7 @@ async function runRuntimeTui(session: RuntimeSession): Promise<void> {
 
       if (key === "\u001b[F" || key === "\u001b[4~" || key === "\u001bOF") {
         if (state.modelPickerOpen) {
-          state.modelPickerIndex = Math.max(0, state.modelPickerEntries.length - 1);
+          state.modelPickerIndex = Math.max(0, getFilteredModelPickerEntries(state).length - 1);
           render();
           return;
         }
@@ -2924,7 +3199,10 @@ async function runRuntimeTui(session: RuntimeSession): Promise<void> {
 
       if (!key.startsWith("\u001b") && key >= " ") {
         if (state.modelPickerOpen) {
-          closeModelPicker();
+          state.modelPickerQuery += key;
+          state.modelPickerIndex = 0;
+          render();
+          return;
         }
         if (state.historyPopupOpen) {
           closeHistoryPopup();
@@ -2938,9 +3216,36 @@ async function runRuntimeTui(session: RuntimeSession): Promise<void> {
     };
 
     const animationInterval = setInterval(() => {
+      if (!state.action.pending) {
+        return;
+      }
       state.spinnerFrame += 1;
       render();
-    }, 120);
+    }, 180);
+
+    const periodicMemoryInterval = setInterval(() => {
+      if (finished || periodicMemoryInFlight) {
+        return;
+      }
+      if (Date.now() < nextPeriodicMemoryAt) {
+        return;
+      }
+      periodicMemoryInFlight = true;
+      void maybePersistPeriodicMemory(session)
+        .then((saved) => {
+          if (saved) {
+            pushActivity("memory checkpoint auto · periodic");
+          }
+        })
+        .catch((error) => {
+          const message = error instanceof Error ? error.message : String(error);
+          pushActivity(`memory periodic failed · ${message}`);
+        })
+        .finally(() => {
+          nextPeriodicMemoryAt = scheduleNextPeriodicMemoryAutosave(Date.now());
+          periodicMemoryInFlight = false;
+        });
+    }, PERIODIC_MEMORY_TICK_MS);
 
     try {
       recordRuntimeEvent(session, {
@@ -2991,14 +3296,27 @@ function createDefaultRuntimeTuiState(view: RuntimeTuiView): RuntimeTuiState {
     modelPickerOpen: false,
     modelPickerIndex: 0,
     modelPickerEntries: [],
+    modelPickerQuery: "",
     chatScrollOffset: 0,
     latestUserMessage: null,
     latestAssistantMessage: null,
+    copyStatus: null,
+    copyStatusExpiresAt: 0,
+    lastCtrlCAt: 0,
+    composerFocusMode: false,
+    pendingImageAttachment: null,
+    approvalRequired: false,
+    pendingApprovalTool: null,
+    pendingApprovalSummary: null,
+    lastDecision: null,
+    cancelRequested: false,
+    steerState: null,
+    steerMessage: null,
   };
 }
 
 function syncTuiEventBuffers(session: RuntimeSession, state: RuntimeTuiState): void {
-  const recent = session.events.slice(-8);
+  const recent = session.events.slice(-20);
   state.activity = recent
     .slice()
     .reverse()
@@ -3008,19 +3326,23 @@ function syncTuiEventBuffers(session: RuntimeSession, state: RuntimeTuiState): v
     ? recent.flatMap((event) => formatTranscriptEvent(event))
     : ["assistant: no messages yet"];
   state.chatHistory = buildChatHistoryFromSession(session).slice(-120);
-  state.currentTurnActivity = session.action.pending
-    ? recent
-      .filter((event) => event.kind !== "system")
-      .slice(-4)
-      .flatMap((event) => formatTranscriptEvent(event))
-      .slice(-8)
-    : [];
   const lastPromptIndex = [...session.events].map((event) => event.kind).lastIndexOf("prompt");
   const latestTurnEvents = (lastPromptIndex >= 0 ? session.events.slice(lastPromptIndex) : recent)
     .filter((event) => !["system", "prompt", "assistant"].includes(event.kind));
+  state.currentTurnActivity = latestTurnEvents
+    .slice(-16)
+    .flatMap((event) => formatTranscriptEvent(event))
+    .slice(-40);
   state.latestTurnTrace = summarizeTurnEvents(latestTurnEvents);
   state.latestUserMessage = [...session.conversation].reverse().find((turn) => turn.role === "user")?.content ?? null;
   state.latestAssistantMessage = [...session.conversation].reverse().find((turn) => turn.role === "assistant")?.content ?? null;
+  state.approvalRequired = session.operationControls.requireApprovalForGuarded;
+  state.pendingApprovalTool = session.operationControls.pendingApproval?.tool ?? null;
+  state.pendingApprovalSummary = session.operationControls.pendingApproval?.summary ?? null;
+  state.lastDecision = session.operationControls.lastDecision;
+  state.cancelRequested = session.operationControls.cancelRequested;
+  state.steerState = session.operationControls.steerState ?? null;
+  state.steerMessage = session.operationControls.steerMessage ?? null;
   const provider = session.providerTransport.activeProvider;
   const currentModel = getCurrentProviderModel(session);
   state.modelPickerEntries = getAvailableModelsForProvider(session, provider).map((entry) => ({
@@ -3104,13 +3426,11 @@ function renderRuntimeTuiState(state: RuntimeTuiState, terminalSize?: Partial<Te
     `provider ${lookupValue(state.view.metadata, "provider")} | session ${lookupValue(state.view.metadata, "session")}`,
     contentWidth,
   );
-  const progress = truncateLine(formatProgressChrome(state.spinnerFrame, state.action), contentWidth);
   const workspace = renderWorkspacePanel(state, contentWidth);
   const topPane = [
     tintLine(truncateLine(header, contentWidth), ANSI.header),
     tintLine(truncateLine("=".repeat(Math.min(header.length, contentWidth)), contentWidth), ANSI.dim),
     tintLine(summary, ANSI.dim),
-    tintLine(progress, ANSI.progress),
     "",
     ...workspace.top,
   ];
@@ -3162,7 +3482,9 @@ function renderActivity(activity: string[], width: number): string[] {
 }
 
 export function formatProgressChrome(spinnerTick: number, action: Pick<RuntimeSession["action"], "status" | "detail">): string {
-  const emblem = NEXAGENT_EMBLEM_FRAMES[((spinnerTick % NEXAGENT_EMBLEM_FRAMES.length) + NEXAGENT_EMBLEM_FRAMES.length) % NEXAGENT_EMBLEM_FRAMES.length];
+  const emblem = action.status === "running"
+    ? NEXAGENT_EMBLEM_FRAMES[((spinnerTick % NEXAGENT_EMBLEM_FRAMES.length) + NEXAGENT_EMBLEM_FRAMES.length) % NEXAGENT_EMBLEM_FRAMES.length]
+    : NEXAGENT_EMBLEM_FRAMES[0];
   const verb = selectProgressVerb(action);
   return `${emblem} ${verb} · ${action.status} · ${action.detail}`;
 }
@@ -3224,6 +3546,7 @@ function renderAgentPanel(state: RuntimeTuiState, width: number): string[] {
     ...wrapText(`runtime: ${state.action.status} · ${state.action.detail}`, width),
     ...wrapText(`last activity: ${state.action.lastActivity ?? "none"}`, width),
     ...wrapText(`panel: ${state.selectedSection} · activity: ${state.activity.length}`, width),
+    ...wrapText(`attachment: ${formatAttachmentLabel(state.pendingImageAttachment)}`, width),
     ...wrapText(`turns: ${lookupMetadataValue(state.view.metadata, "turns", "0")} · tokens: ${lookupMetadataValue(state.view.metadata, "lastTokens", "in~0 out~0")}`, width),
     "",
     padLine("composer", width),
@@ -3250,27 +3573,46 @@ function renderWorkspacePanel(
   const suggestion = completion && completion.value !== state.promptBuffer ? completion.value : null;
   const chatLines = renderConversationTranscript(state.chatHistory, width);
   const footerStatus = buildFooterStatus(state, width);
-  const fullTraceBlock = state.action.pending && state.traceExpanded
+  const hasTrace = state.latestTurnTrace.length > 0 || state.currentTurnActivity.length > 0;
+  const expandedTraceLines: string[] = [
+    "▾ trace open · Ctrl+T collapse",
+    ...(state.latestTurnTrace.length > 0 ? ["", ...state.latestTurnTrace] : []),
+    ...(state.currentTurnActivity.length > 0 ? ["", ...state.currentTurnActivity] : []),
+  ];
+  const fullTraceBlock = hasTrace && state.traceExpanded
     ? [
-      ...(state.latestTurnTrace.length > 0 ? renderMessageBox("trace", state.latestTurnTrace.join("\n"), width) : []),
-      ...(state.currentTurnActivity.length > 0 ? ["", ...renderMessageBox("working", state.currentTurnActivity.join("\n"), width)] : []),
+      ...renderMessageBox("trace", expandedTraceLines.join("\n"), width),
     ]
     : [];
-  const compactTraceBlock = state.action.pending && !state.traceExpanded
+  const compactTraceBlock = hasTrace && !state.traceExpanded
     ? renderCollapsedTraceSummary(state, width)
     : [];
+  const composerMeta = [
+    `chars ${state.promptBuffer.length}`,
+    `cursor ${Math.min(state.promptCursor + 1, Math.max(1, state.promptBuffer.length + 1))}`,
+    `focus ${state.composerFocusMode ? "on" : "off"}`,
+    ...(state.pendingImageAttachment ? [`img ${state.pendingImageAttachment.name} ${formatBytes(state.pendingImageAttachment.bytes)}`] : []),
+  ].join(" · ");
+  const composerBody = [
+    tintLine(truncateLine(`> ${composer}`, width), ANSI.prompt),
+    ...(state.pendingImageAttachment
+      ? wrapText(`image attached ${state.pendingImageAttachment.path}`, width).map((line) => tintLine(line, ANSI.preview))
+      : []),
+    ...(suggestion ? wrapText(`preview ${suggestion}`, width).map((line) => tintLine(line, ANSI.preview)) : []),
+    ...(!suggestion && composerHint ? wrapText(`hint ${composerHint}`, width).map((line) => tintLine(line, ANSI.dim)) : []),
+    tintLine(truncateLine(composerMeta, width), ANSI.footer),
+  ];
   const composerLines = [
     tintLine(renderRule(width), ANSI.rule),
     tintLine(footerStatus, ANSI.footer),
     tintLine(renderRule(width), ANSI.rule),
-    tintLine(truncateLine(`> ${composer}`, width), ANSI.prompt),
-    ...(suggestion ? wrapText(`preview ${suggestion}`, width).map((line) => tintLine(line, ANSI.preview)) : []),
-    ...(!suggestion && composerHint ? wrapText(`hint ${composerHint}`, width).map((line) => tintLine(line, ANSI.dim)) : []),
+    ...renderTuiBlock(state.composerFocusMode ? "composer (focus)" : "composer", composerBody, width),
   ];
 
   return {
     top: [],
     middle: [
+      ...renderControlCard(state, width),
       ...(state.modelPickerOpen
         ? renderModelPicker(state, width)
         : state.historyPopupOpen
@@ -3291,15 +3633,22 @@ function buildFooterStatus(state: RuntimeTuiState, width: number): string {
   const tokens = lookupMetadataValue(state.view.metadata, "lastTokens", "in~0 out~0");
   const cwd = lookupValue(state.view.metadata, "cwd");
   const model = lookupActiveModel(state) ?? "none";
-  const badge = state.action.pending
-    ? `${NEXAGENT_EMBLEM_FRAMES[((state.spinnerFrame % NEXAGENT_EMBLEM_FRAMES.length) + NEXAGENT_EMBLEM_FRAMES.length) % NEXAGENT_EMBLEM_FRAMES.length]} ${selectProgressVerb(state.action)}`
-    : "◆ ready";
+  const verb = selectProgressVerb(state.action);
+  const runBadge = state.action.pending
+    ? `${NEXAGENT_EMBLEM_FRAMES[((state.spinnerFrame % NEXAGENT_EMBLEM_FRAMES.length) + NEXAGENT_EMBLEM_FRAMES.length) % NEXAGENT_EMBLEM_FRAMES.length]} ${verb}`
+    : `${NEXAGENT_EMBLEM_FRAMES[0]} ${verb}`;
   const trace = state.latestTurnTrace.length > 0 || state.currentTurnActivity.length > 0
     ? ` │ trace ${state.traceExpanded ? "open" : "closed"}`
     : "";
   const scroll = formatScrollState(state, width);
   const scrollPart = scroll ? ` │ ${scroll}` : "";
-  return truncateLine(`${badge} │ ${model} │ ${provider} │ turns ${turns} │ ${tokens}${trace}${scrollPart} │ ${cwd}`, width);
+  const copyPart = state.copyStatus ? ` │ ${state.copyStatus}` : "";
+  const attachmentPart = state.pendingImageAttachment ? " │ image 1" : "";
+  const approvalPart = state.pendingApprovalTool ? ` │ approval ${state.pendingApprovalTool}` : "";
+  const steerPart = state.steerMessage ? ` │ steer ${state.steerState ?? "queued"}` : "";
+  const modePart = state.composerFocusMode ? " │ focus composer" : "";
+  const legacyStatusline = state.view.statusline ? ` │ ${state.view.statusline}` : "";
+  return truncateLine(`${runBadge} │ ${model}@${provider} │ turns ${turns} │ ${tokens}${trace}${scrollPart}${attachmentPart}${approvalPart}${steerPart}${copyPart}${modePart}${legacyStatusline} │ ${cwd}`, width);
 }
 
 function formatScrollState(state: RuntimeTuiState, width: number): string {
@@ -3308,8 +3657,8 @@ function formatScrollState(state: RuntimeTuiState, width: number): string {
   }
   const middle = [
     ...renderConversationTranscript(state.chatHistory, width),
-    ...(state.action.pending && !state.traceExpanded ? renderCollapsedTraceSummary(state, width) : []),
-    ...(state.action.pending && state.traceExpanded
+    ...((state.latestTurnTrace.length > 0 || state.currentTurnActivity.length > 0) && !state.traceExpanded ? renderCollapsedTraceSummary(state, width) : []),
+    ...((state.latestTurnTrace.length > 0 || state.currentTurnActivity.length > 0) && state.traceExpanded
       ? [
         ...(state.latestTurnTrace.length > 0 ? renderMessageBox("trace", state.latestTurnTrace.join("\n"), width) : []),
         ...(state.currentTurnActivity.length > 0 ? renderMessageBox("working", state.currentTurnActivity.join("\n"), width) : []),
@@ -3440,9 +3789,15 @@ function renderHistoryPopup(state: RuntimeTuiState, width: number): string[] {
 
 function renderModelPicker(state: RuntimeTuiState, width: number): string[] {
   const provider = lookupValue(state.view.metadata, "provider");
-  const entries = state.modelPickerEntries;
+  const entries = getFilteredModelPickerEntries(state);
   if (entries.length === 0) {
-    return renderMessageBox("model picker", "no catalog for current provider", Math.min(width, 96));
+    return renderMessageBox(
+      "model picker",
+      state.modelPickerQuery.trim().length > 0
+        ? `no matches for "${state.modelPickerQuery}"\n\nEsc close · Backspace edit filter`
+        : "no catalog for current provider",
+      Math.min(width, 96),
+    );
   }
   const boxWidth = Math.min(width, 104);
   const windowSize = 8;
@@ -3457,25 +3812,58 @@ function renderModelPicker(state: RuntimeTuiState, width: number): string[] {
 
   return renderMessageBox(
     "model picker",
-    `${provider} models · ${state.modelPickerIndex + 1}/${entries.length} · Enter apply · Esc close\n\n${lines.join("\n")}`,
+    `${provider} models · ${state.modelPickerIndex + 1}/${entries.length} · Enter apply · Esc close\nfilter: ${state.modelPickerQuery || "(none)"} · type to filter · Backspace delete · Home/End jump\n\n${lines.join("\n")}`,
     boxWidth,
   );
 }
 
 function renderCollapsedTraceSummary(state: RuntimeTuiState, width: number): string[] {
-  const lines: string[] = [`▸ trace · Ctrl+T expand`];
-  if (state.latestTurnTrace.length > 0) {
-    lines.push(...state.latestTurnTrace.map((line) => `  ${line}`));
+  const totalEntries = state.latestTurnTrace.length + state.currentTurnActivity.length;
+  return renderMessageBox("trace", `▸ trace closed · Ctrl+T expand · ${totalEntries} entries`, width);
+}
+
+function renderControlCard(state: RuntimeTuiState, width: number): string[] {
+  const hasPending = Boolean(state.pendingApprovalTool);
+  const hasCancel = state.cancelRequested;
+  const hasSteer = Boolean(state.steerMessage);
+  const hasRecentDecision = Boolean(state.lastDecision);
+  if (!hasPending && !hasCancel && !hasSteer && !hasRecentDecision) {
+    return [];
   }
-  const toolLine = state.currentTurnActivity.find((line) => line.startsWith("tool:"));
-  if (toolLine) {
-    lines.push(`  ${toolLine}`);
+
+  const lines: string[] = [];
+  lines.push(`approval required: ${state.approvalRequired ? "on" : "off"}`);
+
+  if (hasPending) {
+    lines.push("");
+    lines.push(`PENDING APPROVAL`);
+    lines.push(`tool: ${state.pendingApprovalTool}`);
+    if (state.pendingApprovalSummary) {
+      lines.push(`summary: ${state.pendingApprovalSummary}`);
+    }
+    lines.push("actions: Ctrl+Y approve · Ctrl+N reject");
+    lines.push("commands: /approval approve | /approval reject");
   }
-  const providerLine = state.currentTurnActivity.find((line) => line.startsWith("provider:"));
-  if (providerLine) {
-    lines.push(`  ${providerLine}`);
+
+  if (hasCancel) {
+    lines.push("");
+    lines.push("cancel: requested");
+    lines.push("command: /cancel");
   }
-  return renderMessageBox("trace", lines.join("\n"), width);
+
+  if (hasSteer) {
+    lines.push("");
+    lines.push(`steer: ${state.steerState ?? "queued"}`);
+    lines.push(`message: ${state.steerMessage}`);
+    lines.push("command: /steer <message>");
+  }
+
+  if (hasRecentDecision) {
+    lines.push("");
+    lines.push(`last decision: ${state.lastDecision}`);
+  }
+
+  return renderMessageBox("control", lines.join("\n"), width);
 }
 
 function renderConversationTranscript(lines: string[], width: number): string[] {
@@ -3545,7 +3933,9 @@ function wrapLabeledChatLine(label: string, value: string, width: number, tint: 
 
 function renderMessageBox(title: string, value: string, width: number): string[] {
   const titleText = ` ${title} `;
-  const boxWidth = title === "agent" ? Math.min(width, 104) : width;
+  const boxWidth = title === "agent"
+    ? Math.min(width, Math.max(104, Math.floor(width * 0.92)))
+    : width;
   const innerWidth = Math.max(12, boxWidth - 4);
   const style = title === "agent" ? ANSI.agent : title === "trace" ? ANSI.trace : ANSI.working;
   const top = tintLine(`╭${titleText}${"─".repeat(Math.max(0, innerWidth + 2 - titleText.length))}╮`, style);
@@ -3569,6 +3959,8 @@ function normalizeAgentReply(value: string): string {
   return value
     .split("\n")
     .filter((line) => !/^```[\w-]*\s*$/.test(line.trim()))
+    .map((line) => line.trim() === "\\[" || line.trim() === "\\]" || line.trim() === "\\(" || line.trim() === "\\)" ? "" : line)
+    .map((line) => normalizeInlineLatex(line))
     .map((line) => line
       .replace(/\*\*(.*?)\*\*/g, "$1")
       .replace(/`([^`]+)`/g, "$1")
@@ -3578,12 +3970,471 @@ function normalizeAgentReply(value: string): string {
     .trim();
 }
 
+function normalizeInlineLatex(value: string): string {
+  return value
+    .replace(/\\\((.*?)\\\)/g, "$1")
+    .replace(/\\\[(.*?)\\\]/g, "$1")
+    .replace(/\\frac\{([^{}]+)\}\{([^{}]+)\}/g, "($1)/($2)")
+    .replace(/\\cdot/g, "*")
+    .replace(/\\times/g, "*")
+    .replace(/\\infty/g, "inf")
+    .replace(/\\pi/g, "pi")
+    .replace(/\\zeta/g, "zeta")
+    .replace(/\\Gamma/g, "Gamma")
+    .replace(/\\sum/g, "sum")
+    .replace(/\\int/g, "int")
+    .replace(/\\left|\\right/g, "")
+    .replace(/[{}]/g, "")
+    .replace(/\\([a-zA-Z]+)/g, "$1")
+    .replace(/\s{2,}/g, " ")
+    .trimEnd();
+}
+
+type MemoryMutationCommand =
+  | { kind: "save"; text: string }
+  | { kind: "checkpoint"; reason: string | null }
+  | { kind: "session"; focus: string | null };
+
+function parseMemoryMutationCommand(prompt: string): MemoryMutationCommand | null {
+  const trimmed = prompt.trim();
+  if (!trimmed.startsWith("/memory")) {
+    return null;
+  }
+
+  const parts = trimmed.split(/\s+/);
+  if (parts.length < 2) {
+    return null;
+  }
+
+  const action = (parts[1] ?? "").toLowerCase();
+  if (action === "save") {
+    const text = trimmed.replace(/^\/memory\s+save\s*/i, "").trim();
+    return { kind: "save", text };
+  }
+
+  if (action === "checkpoint") {
+    const reason = trimmed.replace(/^\/memory\s+checkpoint\s*/i, "").trim();
+    return { kind: "checkpoint", reason: reason.length > 0 ? reason : null };
+  }
+
+  if (action === "session") {
+    const focus = trimmed.replace(/^\/memory\s+session\s*/i, "").trim();
+    return { kind: "session", focus: focus.length > 0 ? focus : null };
+  }
+
+  return null;
+}
+
+async function applyMemoryMutationCommand(session: RuntimeSession, command: MemoryMutationCommand): Promise<string> {
+  if (!session.archivist.enabled) {
+    throw new Error("archivist memory disabled");
+  }
+
+  if (command.kind === "save") {
+    if (!command.text.trim()) {
+      throw new Error("usage: /memory save <text>");
+    }
+    const result = await saveArchivistMemory(session, {
+      summary: command.text,
+      content: command.text,
+      type: "operator-memory",
+    });
+    return `memory saved; entries=${String(result.entryCount)}\n${result.preview}`;
+  }
+
+  const result = await checkpointArchivistSession(session, command.reason ?? "manual checkpoint");
+  if (command.kind === "checkpoint") {
+    return `memory checkpoint saved; entries=${String(result.entryCount)}\n${result.preview}`;
+  }
+
+  const sessionDigest = buildSessionMemoryDigest(session, command.focus);
+  const saved = await saveArchivistMemory(session, {
+    summary: sessionDigest.summary,
+    content: sessionDigest.content,
+    type: "session-summary",
+    tags: ["session", "summary", ...(command.focus ? ["focused"] : [])],
+  });
+  return `memory session summary saved; entries=${String(saved.entryCount)}\n${saved.preview}`;
+}
+
+function buildSessionMemoryDigest(session: RuntimeSession, focus: string | null): { summary: string; content: string } {
+  const recent = session.conversation.slice(-8);
+  const userTurns = recent.filter((turn) => turn.role === "user").slice(-4);
+  const assistantTurns = recent.filter((turn) => turn.role === "assistant").slice(-4);
+  const recentUserTopics = userTurns
+    .map((turn) => normalizeCompactText(turn.content))
+    .filter((line) => line.length > 0)
+    .slice(-3);
+  const recentAssistantOutcomes = assistantTurns
+    .map((turn) => normalizeCompactText(turn.content))
+    .filter((line) => line.length > 0)
+    .slice(-3);
+
+  const summaryParts = [
+    focus ? `focus=${focus}` : null,
+    `provider=${session.provider}`,
+    `transport=${session.providerTransport.mode}`,
+    `turns=${String(session.telemetry.turnCount)}`,
+    `contextLeft=${String(getRemainingContextTokens(session))}`,
+    recentUserTopics.length > 0 ? `topics=${recentUserTopics.join(" | ")}` : null,
+  ].filter((part): part is string => Boolean(part));
+
+  const contentLines = [
+    focus ? `Focus: ${focus}` : "Focus: session digest",
+    `Provider: ${session.provider}`,
+    `Transport: ${session.providerTransport.mode}`,
+    `Turns: ${String(session.telemetry.turnCount)}`,
+    `Context left: ${String(getRemainingContextTokens(session))}`,
+    "",
+    "Recent user topics:",
+    ...(recentUserTopics.length > 0 ? recentUserTopics.map((line) => `- ${line}`) : ["- none"]),
+    "",
+    "Recent assistant outcomes:",
+    ...(recentAssistantOutcomes.length > 0 ? recentAssistantOutcomes.map((line) => `- ${line}`) : ["- none"]),
+  ];
+
+  return {
+    summary: summaryParts.join("; ").slice(0, 220),
+    content: contentLines.join("\n").slice(0, 2000),
+  };
+}
+
+function normalizeCompactText(value: string): string {
+  return value
+    .replace(/\s+/g, " ")
+    .replace(/[`*_#>-]/g, "")
+    .trim()
+    .slice(0, 160);
+}
+
+type AttachmentMutationCommand =
+  | { kind: "attach"; rawPath: string }
+  | { kind: "detach" };
+
+function parseAttachmentMutationCommand(prompt: string): AttachmentMutationCommand | null {
+  const trimmed = prompt.trim();
+  if (trimmed === "/detach") {
+    return { kind: "detach" };
+  }
+  if (!trimmed.startsWith("/attach")) {
+    return null;
+  }
+  const rawPath = trimmed.replace(/^\/attach\s*/i, "").trim();
+  if (!rawPath || rawPath.toLowerCase() === "clear") {
+    return { kind: "detach" };
+  }
+  return { kind: "attach", rawPath };
+}
+
+function applyAttachmentMutationCommand(
+  session: RuntimeSession,
+  command: AttachmentMutationCommand,
+): { output: string; attachment: ImageAttachment | null } {
+  if (command.kind === "detach") {
+    return {
+      output: "image attachment cleared",
+      attachment: null,
+    };
+  }
+
+  if (session.providerTransport.mode === "cli-exec") {
+    throw new Error("current transport cli-exec does not support images; switch with /provider transport codex-http or /provider transport http-responses");
+  }
+
+  const absolutePath = path.isAbsolute(command.rawPath)
+    ? command.rawPath
+    : path.resolve(session.cwd, command.rawPath);
+  const fileStats = statSync(absolutePath);
+  if (!fileStats.isFile()) {
+    throw new Error(`not a file: ${absolutePath}`);
+  }
+  if (fileStats.size > MAX_IMAGE_ATTACHMENT_BYTES) {
+    throw new Error(`image too large (${formatBytes(fileStats.size)}); max ${formatBytes(MAX_IMAGE_ATTACHMENT_BYTES)}`);
+  }
+
+  const extension = path.extname(absolutePath).toLowerCase();
+  const mimeType = IMAGE_MIME_BY_EXTENSION[extension];
+  if (!mimeType) {
+    throw new Error("unsupported image type; supported: .png .jpg .jpeg .webp .gif");
+  }
+
+  const bytes = readFileSync(absolutePath);
+  const attachment: ImageAttachment = {
+    path: absolutePath,
+    name: path.basename(absolutePath),
+    mimeType,
+    bytes: bytes.byteLength,
+    dataUrl: `data:${mimeType};base64,${bytes.toString("base64")}`,
+  };
+
+  return {
+    output: `image attached: ${attachment.name} (${attachment.mimeType}, ${formatBytes(attachment.bytes)})`,
+    attachment,
+  };
+}
+
+function formatBytes(value: number): string {
+  if (value < 1024) {
+    return `${value}B`;
+  }
+  const kib = value / 1024;
+  if (kib < 1024) {
+    return `${kib.toFixed(1)}KB`;
+  }
+  const mib = kib / 1024;
+  return `${mib.toFixed(1)}MB`;
+}
+
+function formatAttachmentLabel(attachment: ImageAttachment | null): string {
+  if (!attachment) {
+    return "none";
+  }
+  return `${attachment.name} (${attachment.mimeType}, ${formatBytes(attachment.bytes)})`;
+}
+
+function extractClipboardImageToTempFile(): { path: string; source: string } {
+  const tempDir = mkdtempSync(path.join(tmpdir(), "nexagent-clipboard-"));
+  const outputPath = path.join(tempDir, "clipboard.png");
+
+  const cleanupAndThrow = (message: string): never => {
+    rmSync(tempDir, { recursive: true, force: true });
+    throw new Error(message);
+  };
+
+  try {
+    execFileSync("pngpaste", [outputPath], { stdio: "ignore" });
+    if (statSync(outputPath).size > 0) {
+      return { path: outputPath, source: "pngpaste" };
+    }
+  } catch {
+    // fallthrough
+  }
+
+  try {
+    const bytes = execFileSync("wl-paste", ["--no-newline", "--type", "image/png"], { encoding: "buffer", maxBuffer: 16 * 1024 * 1024 });
+    if (Buffer.isBuffer(bytes) && bytes.length > 0) {
+      writeFileSync(outputPath, bytes);
+      return { path: outputPath, source: "wl-paste" };
+    }
+  } catch {
+    // fallthrough
+  }
+
+  try {
+    const bytes = execFileSync("xclip", ["-selection", "clipboard", "-t", "image/png", "-o"], { encoding: "buffer", maxBuffer: 16 * 1024 * 1024 });
+    if (Buffer.isBuffer(bytes) && bytes.length > 0) {
+      writeFileSync(outputPath, bytes);
+      return { path: outputPath, source: "xclip" };
+    }
+  } catch {
+    // fallthrough
+  }
+
+  try {
+    const base64 = execFileSync(
+      "powershell",
+      [
+        "-NoProfile",
+        "-Command",
+        "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; $img=Get-Clipboard -Format Image; if($img -eq $null){ exit 1 }; $ms=New-Object System.IO.MemoryStream; $img.Save($ms,[System.Drawing.Imaging.ImageFormat]::Png); [Convert]::ToBase64String($ms.ToArray())",
+      ],
+      { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 },
+    ).trim();
+    if (base64.length > 0) {
+      writeFileSync(outputPath, Buffer.from(base64, "base64"));
+      return { path: outputPath, source: "powershell" };
+    }
+  } catch {
+    // fallthrough
+  }
+
+  try {
+    const windowsPath = execFileSync(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-Command",
+        "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; $img=Get-Clipboard -Format Image; if($img -eq $null){ exit 1 }; $p=[System.IO.Path]::GetTempFileName(); $p=[System.IO.Path]::ChangeExtension($p,'png'); $img.Save($p,[System.Drawing.Imaging.ImageFormat]::Png); Write-Output $p",
+      ],
+      { encoding: "utf8", maxBuffer: 1024 * 1024 },
+    ).trim();
+    if (windowsPath.length > 0) {
+      const wslPath = windowsPathToWslPath(windowsPath);
+      const bytes = readFileSync(wslPath);
+      writeFileSync(outputPath, bytes);
+      return { path: outputPath, source: "powershell.exe" };
+    }
+  } catch {
+    // fallthrough
+  }
+
+  cleanupAndThrow("no clipboard image found (tried pngpaste, wl-paste, xclip, powershell)");
+}
+
+function windowsPathToWslPath(value: string): string {
+  const normalized = value.replace(/\\/g, "/");
+  const drive = normalized.match(/^([A-Za-z]):\/(.*)$/);
+  if (!drive) {
+    return normalized;
+  }
+  const letter = drive[1].toLowerCase();
+  const rest = drive[2];
+  return `/mnt/${letter}/${rest}`;
+}
+
+async function maybeAutoPersistMemory(session: RuntimeSession, prompt: string): Promise<void> {
+  if (!session.archivist.enabled) {
+    return;
+  }
+  const threshold = getCompactionThresholdTokens(session);
+  const estimated = estimateConversationTokens(session);
+  if (threshold <= 0 || estimated < Math.floor(threshold * 0.9)) {
+    return;
+  }
+
+  await persistSessionDigestMemory(
+    session,
+    `pre-compaction threshold (${estimated}/${threshold})`,
+    `pre-compaction threshold; prompt=${normalizeCompactText(prompt).slice(0, 120)}`,
+    "pre-compaction",
+    ["auto", "compaction-threshold", "session"],
+  );
+}
+
+async function maybePersistCompactionMemory(session: RuntimeSession, prompt: string, beforeTokens: number, afterTokens: number): Promise<void> {
+  if (!session.archivist.enabled) {
+    return;
+  }
+  await persistSessionDigestMemory(
+    session,
+    `auto compact ${beforeTokens}->${afterTokens}`,
+    `auto compact ${beforeTokens}->${afterTokens}; prompt=${normalizeCompactText(prompt).slice(0, 120)}`,
+    "auto-compaction",
+    ["auto", "compaction", "session"],
+  );
+}
+
+function scheduleNextPeriodicMemoryAutosave(now: number): number {
+  const window = PERIODIC_MEMORY_MAX_MS - PERIODIC_MEMORY_MIN_MS;
+  const jitter = window > 0 ? Math.floor(Math.random() * (window + 1)) : 0;
+  return now + PERIODIC_MEMORY_MIN_MS + jitter;
+}
+
+async function maybePersistPeriodicMemory(session: RuntimeSession): Promise<boolean> {
+  if (!session.archivist.enabled) {
+    return false;
+  }
+  if (session.conversation.length === 0 && session.events.length === 0) {
+    return false;
+  }
+
+  await persistSessionDigestMemory(
+    session,
+    "periodic autosave",
+    "periodic autosave digest",
+    "periodic-autosave",
+    ["auto", "periodic", "session"],
+  );
+  return true;
+}
+
+async function maybePersistSessionMemoryOnQuit(session: RuntimeSession, reason: string): Promise<string | null> {
+  if (!session.archivist.enabled) {
+    return null;
+  }
+  try {
+    await persistSessionDigestMemory(
+      session,
+      reason,
+      "pre-quit autosave",
+      "session-quit",
+      ["auto", "quit", "session"],
+    );
+    return session.archivist.writes.preview ?? "memory session autosaved before quit";
+  } catch {
+    return null;
+  }
+}
+
+async function persistSessionDigestMemory(
+  session: RuntimeSession,
+  checkpointReason: string,
+  focus: string,
+  type: string,
+  tags: string[],
+): Promise<void> {
+  await checkpointArchivistSession(session, checkpointReason);
+  const digest = buildSessionMemoryDigest(session, focus);
+  await saveArchivistMemory(session, {
+    summary: digest.summary,
+    content: digest.content,
+    type,
+    tags,
+  });
+}
+
+function buildCopyPayload(state: RuntimeTuiState): { text: string; label: string } | null {
+  const assistant = state.latestAssistantMessage?.trim();
+  if (assistant) {
+    return { text: assistant.slice(0, 12000), label: "latest assistant reply" };
+  }
+
+  const user = state.latestUserMessage?.trim();
+  if (user) {
+    return { text: user.slice(0, 12000), label: "latest user prompt" };
+  }
+
+  const transcript = state.chatHistory.filter((line) => line.trim().length > 0).slice(-30).join("\n").trim();
+  if (transcript) {
+    return { text: transcript.slice(0, 12000), label: "recent transcript" };
+  }
+
+  return null;
+}
+
+function copyTextToClipboard(text: string): boolean {
+  if (!text.trim()) {
+    return false;
+  }
+
+  const clipboardCommands: ReadonlyArray<{ cmd: string; args: string[] }> = [
+    { cmd: "pbcopy", args: [] },
+    { cmd: "wl-copy", args: [] },
+    { cmd: "xclip", args: ["-selection", "clipboard"] },
+    { cmd: "clip.exe", args: [] },
+  ];
+
+  for (const candidate of clipboardCommands) {
+    try {
+      execFileSync(candidate.cmd, candidate.args, {
+        input: text,
+        stdio: ["pipe", "ignore", "ignore"],
+      });
+      return true;
+    } catch {
+      // Try next clipboard transport.
+    }
+  }
+
+  try {
+    const encoded = Buffer.from(text, "utf8").toString("base64");
+    if (!encoded) {
+      return false;
+    }
+    process.stdout.write(`\u001b]52;c;${encoded}\u0007`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function summarizeTurnEvents(events: RuntimeSession["events"]): string[] {
   if (events.length === 0) {
     return [];
   }
 
   const toolStarted = events.filter((event) => event.kind === "tool" && event.status === "started");
+  const toolCompleted = events.filter((event) => event.kind === "tool" && event.status === "completed");
   const toolFailed = events.filter((event) => event.kind === "tool" && event.status === "failed");
   const waitingApproval = events.find((event) => event.kind === "control" && event.status === "queued");
   const blocked = events.find((event) =>
@@ -3594,7 +4445,8 @@ export function summarizeTurnEvents(events: RuntimeSession["events"]): string[] 
   const providerStarted = events.find((event) => event.kind === "provider" && event.status === "started");
   const providerFailed = events.find((event) => event.kind === "provider" && event.status === "failed");
   const lines: string[] = [];
-  const toolNames = [...new Set(toolStarted
+  const toolEventsForNames = [...toolStarted, ...toolCompleted, ...toolFailed];
+  const toolNames = [...new Set(toolEventsForNames
     .map((event) => event.summary.match(/tool\s+([a-z0-9_]+)/i)?.[1] ?? null)
     .filter((value): value is string => value !== null))];
 
@@ -3612,8 +4464,8 @@ export function summarizeTurnEvents(events: RuntimeSession["events"]): string[] 
   }
   if (toolNames.length > 0) {
     lines.push(`  ↳ tools: ${toolNames.join(", ")}`);
-  } else if (toolStarted.length > 0) {
-    lines.push(`  ↳ tool calls (${toolStarted.length})`);
+  } else if (toolEventsForNames.length > 0) {
+    lines.push(`  ↳ tool calls (${toolEventsForNames.length})`);
   }
   if (waitingApproval) {
     lines.push("  ↳ waiting approval");
@@ -3623,6 +4475,16 @@ export function summarizeTurnEvents(events: RuntimeSession["events"]): string[] 
   }
 
   return lines;
+}
+
+function getFilteredModelPickerEntries(state: RuntimeTuiState): Array<{ id: string; description: string; current: boolean }> {
+  const query = state.modelPickerQuery.trim().toLowerCase();
+  if (!query) {
+    return state.modelPickerEntries;
+  }
+  return state.modelPickerEntries.filter((entry) =>
+    entry.id.toLowerCase().includes(query) || entry.description.toLowerCase().includes(query),
+  );
 }
 
 function getSectionRows(view: RuntimeTuiView, section: RuntimeTuiSection): ReadonlyArray<[string, string]> {
@@ -3670,25 +4532,6 @@ function wrapPair(label: string, value: string, width: number): string[] {
     const actualPrefix = index === 0 ? prefix : " ".repeat(prefix.length);
     return padLine(`${actualPrefix}${line}`, width);
   });
-}
-
-function wrapText(value: string, width: number): string[] {
-  if (value.length === 0) {
-    return [""];
-  }
-
-  const chunks: string[] = [];
-  let remaining = value;
-
-  while (remaining.length > width) {
-    const breakIndex = remaining.lastIndexOf(" ", width);
-    const splitAt = breakIndex > Math.floor(width / 2) ? breakIndex : width;
-    chunks.push(remaining.slice(0, splitAt).trimEnd());
-    remaining = remaining.slice(splitAt).trimStart();
-  }
-
-  chunks.push(remaining);
-  return chunks;
 }
 
 function lookupValue(rows: ReadonlyArray<[string, string]>, key: string): string {
@@ -3743,37 +4586,6 @@ ${rows.map(([label, value]) => `        <dt>${escapeHtml(label)}</dt><dd>${escap
 
 function escapeHtml(value: string): string {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
-}
-
-function renderScreen(lines: string[]): string {
-  return `\x1b[?1049h\x1b[?1000h\x1b[?1006h\x1b[?25l\x1b[2J\x1b[H${lines.join("\n")}\n`;
-}
-
-function renderRule(width: number): string {
-  return "─".repeat(Math.max(8, width));
-}
-
-const ANSI = {
-  reset: "\x1b[0m",
-  none: "",
-  header: "\x1b[1;97m",
-  dim: "\x1b[2;37m",
-  rule: "\x1b[38;5;180m",
-  progress: "\x1b[38;5;186m",
-  footer: "\x1b[38;5;151m",
-  prompt: "\x1b[1;96m",
-  preview: "\x1b[38;5;223m",
-  user: "\x1b[1;97m",
-  agent: "\x1b[38;5;220m",
-  trace: "\x1b[38;5;111m",
-  working: "\x1b[38;5;149m",
-} as const;
-
-function tintLine(value: string, ansi: string): string {
-  if (!ansi || value.length === 0) {
-    return value;
-  }
-  return `${ansi}${value}${ANSI.reset}`;
 }
 
 function composeTuiPanes(top: string[], middle: string[], bottom: string[], rows: number, scrollOffset = 0, width = 80): string[] {
@@ -3835,6 +4647,7 @@ function decorateMiddleScrollPane(
 
 function restoreTerminal(): void {
   process.stdout.write("\x1b[?25h\x1b[?1006l\x1b[?1000l\x1b[?1049l");
+  resetScreenRenderer();
 }
 
 function formatList(values: string[]): string {
@@ -3878,34 +4691,6 @@ function formatFallbackPolicy(fallback: RuntimeSession["providerRouting"]["fallb
 function formatProviderModels(models: RuntimeSession["providerRouting"]["modelSelection"]["configuredModels"]): string {
   const entries = Object.entries(models).map(([provider, model]) => `${provider}=${model}`);
   return entries.length > 0 ? entries.join(", ") : "none";
-}
-
-function padLine(value: string, width: number): string {
-  return truncateLine(value, width).padEnd(width, " ");
-}
-
-function padVisibleLine(value: string, width: number): string {
-  const visible = stripAnsi(value);
-  if (visible.length >= width) {
-    return value;
-  }
-  return `${value}${" ".repeat(width - visible.length)}`;
-}
-
-function truncateLine(value: string, width: number): string {
-  if (value.length <= width) {
-    return value;
-  }
-
-  if (width <= 1) {
-    return value.slice(0, width);
-  }
-
-  return `${value.slice(0, width - 1)}…`;
-}
-
-function stripAnsi(value: string): string {
-  return value.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "");
 }
 
 function formatActivityLine(message: string): string {

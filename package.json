@@ -8,6 +8,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "test": "bun test ./test/*.test.ts",
     "start": "node dist/cli.js",
     "dev": "node --loader ts-node/esm src/cli.ts",
     "compile": "bun run compile:linux && bun run compile:macos && bun run compile:windows",
@@ -21,6 +22,7 @@
     "typescript": "^5.8.3"
   },
   "dependencies": {
+    "@openrouter/agent": "^0.4.0",
     "get-shit-done-cc": "^1.38.3"
   }
 }

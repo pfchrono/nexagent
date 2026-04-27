@@ -9,15 +9,20 @@ Parities are explicit: don’t ship blindly, compare UX and turn-flow behaviors 
 
 ## Phases
 
-- [ ] **Phase 43.1: TTY redesign pass** - Push transcript/tool/result styling and overall terminal identity closer to donor quality bar without cloning donor look.
+- [x] **Phase 43.1: TTY redesign pass** - Push transcript/tool/result styling and overall terminal identity closer to donor quality bar without cloning donor look. (completed 2026-04-27)
 - [x] **Phase 40: Diagnostics surface redesign** - Replace flat dumps with compact operator-facing summaries and explicit detail layers. (completed 2026-04-27)
 - [x] **Phase 40.1: Turn workflow and truthful execution hardening** - Make continue-until-done behavior, verification honesty, and long-turn state reliable. (completed 2026-04-27)
-- [ ] **Phase 41: Transcript pane scrollback and collapsed trace blocks** - Keep newest answer visible while letting long transcript/tool output stay navigable.
-- [ ] **Phase 41.1: Picker and trace interaction polish** - Make history/model pickers and trace interaction feel like real console controls instead of thin utilities.
-- [ ] **Phase 42: Approval and control card UX** - Make approval, cancel, and steer states obvious and action-driven inside workspace.
-- [ ] **Phase 43: Composer and statusline polish** - Improve input container, footer signal density, autocomplete preview, and focus mode.
-- [ ] **Phase 44: TUI/runtime module split** - Break `src/cli.ts` into safer renderer/input/runtime boundaries.
-- [ ] **Phase 45: Future capability prep** - Lock staged contracts for `--yolo`, image paste, and remaining parked runtime UX work.
+- [x] **Phase 41: Transcript pane scrollback and collapsed trace blocks** - Keep newest answer visible while letting long transcript/tool output stay navigable. (completed 2026-04-27)
+- [x] **Phase 41.1: Picker and trace interaction polish** - Make history/model pickers and trace interaction feel like real console controls instead of thin utilities. (completed 2026-04-27)
+- [x] **Phase 42: Approval and control card UX** - Make approval, cancel, and steer states obvious and action-driven inside workspace. (completed 2026-04-27)
+- [x] **Phase 43: Composer and statusline polish** - Improve input container, footer signal density, autocomplete preview, and focus mode. (completed 2026-04-27)
+- [x] **Phase 44: TUI/runtime module split** - Break `src/cli.ts` into safer renderer/input/runtime boundaries. (completed 2026-04-27)
+- [x] **Phase 45: Future capability prep** - Lock staged contracts for `--yolo`, image paste, and remaining parked runtime UX work. (completed 2026-04-27)
+- [ ] **Phase 46: YOLO guarded-mode implementation** - Implement runtime `--yolo` session behavior with explicit safety floor and persistent UI signal.
+- [x] **Phase 47: Image attachment pipeline baseline** - Implement provider-gated image attachment flow for local files/paste-ready payload path. (completed 2026-04-27)
+- [ ] **Phase 48: Skill command baseline (`/skill` + `$skill`)** - Implement minimal usable skill listing/lookup/dispatch routing in TTY.
+- [ ] **Phase 48.1: Dual mouse interaction mode** - Restore wheel scroll while preserving drag-highlight copy workflow in terminal sessions.
+- [ ] **Phase 49: Cockpit operator UX pack** - Add pinned flight strip, intent ladder, warning lane, pilot overrides, and split memory panel semantics.
 
 ## Phase Details
 
@@ -109,6 +114,57 @@ Parities are explicit: don’t ship blindly, compare UX and turn-flow behaviors 
   5. Promoted old out-of-scope systems are explicitly routed into next-milestone planning instead of left as buried notes.
 **Plans**: `45-01`
 
+### Phase 46: YOLO guarded-mode implementation
+**Goal**: implement `--yolo` mode from contract with non-destructive safety floor preserved.
+**Depends on**: Phase 45
+**Success Criteria** (what must be TRUE):
+  1. `--yolo` flag sets session approval gate off for guarded tools.
+  2. Destructive shell/tool deny rules remain enforced.
+  3. Footer/status output visibly indicates YOLO session state.
+  4. Session-scoped behavior is explicit and auditable.
+**Plans**: `46-01`
+
+### Phase 47: Image attachment pipeline baseline
+**Goal**: deliver first provider-gated attachment flow for image input.
+**Depends on**: Phase 46
+**Success Criteria** (what must be TRUE):
+  1. Operator can attach image path into composer workflow.
+  2. Unsupported provider/mode paths fail with explicit reason.
+  3. Attachment metadata surfaces in composer before send.
+  4. Request payload includes image metadata for supported transports.
+**Plans**: `47-01`
+
+### Phase 48: Skill command baseline (`/skill` + `$skill`)
+**Goal**: add minimal usable skill discovery and command routing in terminal workflow.
+**Depends on**: Phase 47
+**Success Criteria** (what must be TRUE):
+  1. `/skill` lists available skills.
+  2. `/skill <name>` resolves deterministic lookup and route path.
+  3. `$skill` shorthand maps into skill routing with args preserved.
+  4. Unknown skill errors include deterministic closest-match guidance.
+**Plans**: `48-01`
+
+### Phase 48.1: Dual mouse interaction mode
+**Goal**: support both mouse-wheel transcript scrolling and native terminal drag-selection copy in the same TTY workflow.
+**Depends on**: Phase 48
+**Success Criteria** (what must be TRUE):
+  1. Mouse-wheel scroll works in transcript pane again.
+  2. Drag highlight + clipboard copy still works without disabling scroll.
+  3. Behavior is deterministic across startup/reload and clearly surfaced in status/help text.
+  4. If terminal capability conflicts, runtime offers explicit mode toggle/fallback with user-visible notice.
+**Plans**: `48.1-01`
+
+### Phase 49: Cockpit operator UX pack
+**Goal**: shift TUI from generic chat shell to cockpit-style operator console with explicit control/situational-awareness surfaces.
+**Depends on**: Phase 48.1
+**Success Criteria** (what must be TRUE):
+  1. Top pinned flight strip always shows mode, provider/model, context left, approval gate, memory status, and risk state.
+  2. Per-turn action ladder renders `intent -> plan -> act -> result` separately from raw trace.
+  3. Warning card lane elevates runtime failures/blocks with actionable next step text.
+  4. Pilot override row exposes explicit controls for `ABORT`, `HOLD`, `REPLAN`, and `REQ-APPROVAL`.
+  5. Memory panel split clearly distinguishes session context, retrieved memory, and saved checkpoints.
+**Plans**: `49-01`
+
 ## Progress
 
 | Phase | Plans Complete | Status | Completed |
@@ -116,12 +172,17 @@ Parities are explicit: don’t ship blindly, compare UX and turn-flow behaviors 
 | 43.1. TTY redesign pass | 1/1 | Complete | `43.1-01` |
 | 40. Diagnostics surface redesign | 1/1 | Complete    | 2026-04-27 |
 | 40.1. Turn workflow and truthful execution hardening | 1/1 | Complete    | 2026-04-27 |
-| 41. Transcript pane scrollback and collapsed trace blocks | 0/1 | Pending | `—` |
-| 41.1. Picker and trace interaction polish | 0/1 | Pending | `—` |
-| 42. Approval and control card UX | 0/1 | Pending | `—` |
-| 43. Composer and statusline polish | 0/1 | Pending | `—` |
-| 44. TUI/runtime module split | 0/1 | Pending | `—` |
-| 45. Future capability prep | 0/1 | Pending | `—` |
+| 41. Transcript pane scrollback and collapsed trace blocks | 1/1 | Complete | `41-01` |
+| 41.1. Picker and trace interaction polish | 1/1 | Complete | `41.1-01` |
+| 42. Approval and control card UX | 1/1 | Complete | `42-01` |
+| 43. Composer and statusline polish | 1/1 | Complete | `43-01` |
+| 44. TUI/runtime module split | 1/1 | Complete | `44-01` |
+| 45. Future capability prep | 1/1 | Complete | `45-01` |
+| 46. YOLO guarded-mode implementation | 0/1 | Pending | `—` |
+| 47. Image attachment pipeline baseline | 1/1 | Complete | `47-01` |
+| 48. Skill command baseline (`/skill` + `$skill`) | 0/1 | Pending | `—` |
+| 48.1. Dual mouse interaction mode | 0/1 | Pending | `—` |
+| 49. Cockpit operator UX pack | 0/1 | Pending | `—` |
 
 ## Phase-to-Requirement Map
 
@@ -157,3 +218,31 @@ Parities are explicit: don’t ship blindly, compare UX and turn-flow behaviors 
 - CMD-01
 - CMD-02
 - CMD-03
+
+### 46 YOLO guarded-mode implementation
+- CMD-01
+
+### 47 Image attachment pipeline baseline
+- CMD-02
+
+### 48 Skill command baseline
+- CMD-03
+
+### 48.1 Dual mouse interaction mode
+- TU-02
+
+### 49 Cockpit operator UX pack
+- TU-01
+- TU-02
+- TU-04
+
+## Backlog
+
+### Phase 999.1: Investigate token-savior memory integration for nexagent (BACKLOG)
+
+**Goal:** Captured for future planning
+**Requirements:** TBD
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (promote with `$gsd-review-backlog` when ready)
