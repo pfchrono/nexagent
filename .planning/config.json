@@ -1,3 +1,27 @@
 {
-  "model_profile": "inherit"
+  "model_profile": "inherit",
+  "model_overrides": {
+    "gsd-planner": "gpt-5.4-mini",
+    "gsd-roadmapper": "gpt-5.4-mini",
+    "gsd-phase-researcher": "gpt-5.4-mini",
+    "gsd-project-researcher": "gpt-5.4-mini",
+    "gsd-research-synthesizer": "gpt-5.4-mini",
+    "gsd-ui-researcher": "gpt-5.4-mini",
+    "gsd-doc-writer": "gpt-5.4-mini",
+    "gsd-advisor-researcher": "gpt-5.4-mini",
+    "gsd-assumptions-analyzer": "gpt-5.4-mini",
+    "gsd-executor": "gpt-5.3-codex",
+    "gsd-debugger": "gpt-5.3-codex",
+    "gsd-code-fixer": "gpt-5.3-codex",
+    "gsd-code-reviewer": "gpt-5.3-codex",
+    "gsd-verifier": "gpt-5.2",
+    "gsd-plan-checker": "gpt-5.2",
+    "gsd-integration-checker": "gpt-5.2",
+    "gsd-nyquist-auditor": "gpt-5.2",
+    "gsd-codebase-mapper": "gpt-5.2",
+    "gsd-pattern-mapper": "gpt-5.2",
+    "gsd-ui-checker": "gpt-5.2",
+    "gsd-ui-auditor": "gpt-5.2",
+    "gsd-doc-verifier": "gpt-5.2"
+  }
 }
