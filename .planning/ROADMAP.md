@@ -18,11 +18,11 @@ Parities are explicit: don’t ship blindly, compare UX and turn-flow behaviors 
 - [x] **Phase 43: Composer and statusline polish** - Improve input container, footer signal density, autocomplete preview, and focus mode. (completed 2026-04-27)
 - [x] **Phase 44: TUI/runtime module split** - Break `src/cli.ts` into safer renderer/input/runtime boundaries. (completed 2026-04-27)
 - [x] **Phase 45: Future capability prep** - Lock staged contracts for `--yolo`, image paste, and remaining parked runtime UX work. (completed 2026-04-27)
-- [ ] **Phase 46: YOLO guarded-mode implementation** - Implement runtime `--yolo` session behavior with explicit safety floor and persistent UI signal.
+- [x] **Phase 46: YOLO guarded-mode implementation** - Implement runtime `--yolo` session behavior with explicit safety floor and persistent UI signal. (completed 2026-04-28)
 - [x] **Phase 47: Image attachment pipeline baseline** - Implement provider-gated image attachment flow for local files/paste-ready payload path. (completed 2026-04-27)
-- [ ] **Phase 48: Skill command baseline (`/skill` + `$skill`)** - Implement minimal usable skill listing/lookup/dispatch routing in TTY.
-- [ ] **Phase 48.1: Dual mouse interaction mode** - Restore wheel scroll while preserving drag-highlight copy workflow in terminal sessions.
-- [ ] **Phase 49: Cockpit operator UX pack** - Add pinned flight strip, intent ladder, warning lane, pilot overrides, and split memory panel semantics.
+- [x] **Phase 48: Skill command baseline (`/skill` + `$skill`)** - Implement minimal usable skill listing/lookup/dispatch routing in TTY. (completed 2026-04-28)
+- [x] **Phase 48.1: Dual mouse interaction mode** - Restore wheel scroll while preserving drag-highlight copy workflow in terminal sessions. (completed 2026-04-28)
+- [x] **Phase 49: Cockpit operator UX pack** - Add pinned flight strip, intent ladder, pilot overrides, and split memory panel semantics. (completed 2026-04-28)
 
 ## Phase Details
 
@@ -178,11 +178,11 @@ Parities are explicit: don’t ship blindly, compare UX and turn-flow behaviors 
 | 43. Composer and statusline polish | 1/1 | Complete | `43-01` |
 | 44. TUI/runtime module split | 1/1 | Complete | `44-01` |
 | 45. Future capability prep | 1/1 | Complete | `45-01` |
-| 46. YOLO guarded-mode implementation | 0/1 | Pending | `—` |
+| 46. YOLO guarded-mode implementation | 1/1 | Complete   | 2026-04-28 |
 | 47. Image attachment pipeline baseline | 1/1 | Complete | `47-01` |
-| 48. Skill command baseline (`/skill` + `$skill`) | 0/1 | Pending | `—` |
-| 48.1. Dual mouse interaction mode | 0/1 | Pending | `—` |
-| 49. Cockpit operator UX pack | 0/1 | Pending | `—` |
+| 48. Skill command baseline (`/skill` + `$skill`) | 1/1 | Complete | `48-01` |
+| 48.1. Dual mouse interaction mode | 1/1 | Complete | `48.1-01` |
+| 49. Cockpit operator UX pack | 1/1 | Complete | `49-01` |
 
 ## Phase-to-Requirement Map
 
@@ -242,7 +242,7 @@ Parities are explicit: don’t ship blindly, compare UX and turn-flow behaviors 
 
 **Goal:** Captured for future planning
 **Requirements:** TBD
-**Plans:** 0 plans
+**Plans:** 1/1 plans complete
 
 Plans:
 - [ ] TBD (promote with `$gsd-review-backlog` when ready)
