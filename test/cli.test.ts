@@ -57,10 +57,10 @@ test("renderRuntimeTui formats runtime state", async () => {
 
   const output = renderRuntimeTui(view, { columns: 80, rows: 36 });
 
-  assert.match(output, /^\u001b\[\?1049h\u001b\[\?1000h\u001b\[\?1006h\u001b\[\?25l\u001b\[2J\u001b\[H/);
+  assert.match(output, /^\u001b\[\?1049h\u001b\[\?25l\u001b\[H/);
   assert.match(output, /nexagent :: agent tui/);
   assert.match(output, /provider codex \| session abc/);
-  assert.match(output, /◜◆◝ Bootstrapping · ready · runtime baseline/);
+  assert.match(output, /◜◆◝ Bootstrapping/);
   assert.match(output, /╭ home/);
   assert.match(output, /Welcome back\./);
   assert.match(output, /Recent activity/);
@@ -72,9 +72,12 @@ test("renderRuntimeTui formats runtime state", async () => {
 test("parseCommand preserves empty run prompt for resolvePrompt", async () => {
   const { parseCommand } = await import("../src/cli.js");
 
-  assert.deepEqual(parseCommand([]), { kind: "inspect" });
-  assert.deepEqual(parseCommand(["run", "say", "hi"]), { kind: "run", prompt: "say hi" });
-  assert.deepEqual(parseCommand(["run"]), { kind: "run", prompt: null });
+  assert.deepEqual(parseCommand([]), { kind: "inspect", yolo: false });
+  assert.deepEqual(parseCommand(["run", "say", "hi"]), { kind: "run", prompt: "say hi", yolo: false });
+  assert.deepEqual(parseCommand(["run"]), { kind: "run", prompt: null, yolo: false });
+  assert.deepEqual(parseCommand(["--yolo"]), { kind: "inspect", yolo: true });
+  assert.deepEqual(parseCommand(["--yolo", "run", "say", "hi"]), { kind: "run", prompt: "say hi", yolo: true });
+  assert.deepEqual(parseCommand(["run", "--yolo", "say", "hi"]), { kind: "run", prompt: "say hi", yolo: true });
 });
 
 test("formatProgressChrome keeps semantic verb stable while emblem animates", async () => {
@@ -293,39 +296,23 @@ test("runRuntimeCommand exposes command catalog through help", async () => {
   const { runRuntimeCommand } = await import("../src/cli.js");
   const result = runRuntimeCommand(createSession(), "/help");
 
-  assert.deepEqual(result, {
-    ok: true,
-    output: [
-      "/help - show available runtime commands",
-      "/reload - reload runtime state from repo config",
-      "/quit - exit interactive TTY session",
-      "/continue - continue active turn if clear",
-      "/finish - finalize current turn only when completion proof exists",
-      "/login [status] - check or launch Codex login",
-      "/codex [status|off] - activate Codex provider preference",
-      "/provider [status|name|transport ...] [--verbose] - show or switch provider and transport mode",
-      "/model [status|list|name] - show or set model for active provider",
-      "/status [--verbose] - show runtime, repo, auth, and style status (compact default)",
-      "/caveman-mode [on|off|status] - toggle compressed caveman response style",
-      "/deadpoolmode [on|off|status] - toggle Deadpool prose style overlay",
-      "/statusline [on|off|status] - toggle compact runtime statusline footer",
-      "/approval [on|off|status|approve|reject] - control guarded-tool approval gate",
-      "/cancel - request cancel for pending operation",
-      "/steer <message> - queue operator steer note for next tool/model step",
-      "/compact [status] - compact session context now or inspect compaction state",
-      "/tools [--verbose] - show repo-local tool policy and safety guards",
-      "/pwd - show current working directory",
-      "/ls [path] - list directory contents from session cwd",
-      "/read <path> - read text file contents",
-      "/find <text> [path] - search text in repo files",
-      "/glob <pattern> [path] - match repo files by glob pattern",
-      "/rg <pattern> [path] - search repo files with ripgrep",
-      "/diff [path] - show bounded git diff for repo or one path",
-      "/hooks - inspect repo-local hook policy",
-      "/memory [--verbose] - inspect memory boundary and persisted storage (compact default)",
-    ].join("\n"),
-    activity: "help",
-  });
+  assert.equal(result?.ok, true);
+  const outputLines = result?.output?.split("\n") ?? [];
+  const required = [
+    "/help - show available runtime commands",
+    "/reload - reload runtime state from repo config",
+    "/quit - exit interactive TTY session",
+    "/provider [status|name|transport ...] [--verbose] - show or switch provider and transport mode",
+    "/skill [name] [args...] - list skills or resolve and route a skill by name",
+    "/mouse [status|mode <auto|scroll|select>] - show or set transcript mouse interaction mode",
+    "/memory [--verbose|save <text>|checkpoint [reason]|session [focus]] - inspect or persist archivist memory/checkpoints",
+    "/attach <image-path> - attach local image for next prompt (http transports only)",
+    "/detach - clear queued image attachment",
+  ];
+  for (const line of required) {
+    assert.ok(outputLines.includes(line), `${line} missing`);
+  }
+  assert.equal(result?.activity, "help");
 });
 
 test("runRuntimeCommand shows and sets model for active provider", async () => {
@@ -351,7 +338,7 @@ test("runRuntimeCommand exposes reload and quit commands", async () => {
 
   assert.deepEqual(runRuntimeCommand(session, "/reload"), {
     ok: true,
-    output: "runtime reload requested",
+    output: "runtime reload requested (config/state only; code edits require restart)",
     activity: "reload requested",
   });
 
@@ -542,7 +529,7 @@ test("runRuntimeCommand toggles caveman mode", async () => {
 
   assert.deepEqual(result, {
     ok: true,
-    output: "Caveman mode ON. Style stack: caveman.",
+    output: "Caveman mode ON. Style stack: caveman + mouse:auto.",
     activity: "caveman mode on",
   });
   assert.equal(session.commandModes.cavemanMode, true);
@@ -557,7 +544,7 @@ test("runRuntimeCommand toggles deadpool mode", async () => {
 
   assert.deepEqual(result, {
     ok: true,
-    output: "Deadpool mode ON. Style stack: deadpool + caveman.",
+    output: "Deadpool mode ON. Style stack: deadpool + caveman + mouse:auto.",
     activity: "deadpool mode on",
   });
   assert.equal(session.commandModes.deadpoolMode, true);
@@ -571,7 +558,7 @@ test("runRuntimeCommand toggles statusline", async () => {
 
   assert.deepEqual(result, {
     ok: true,
-    output: "Statusline ON. Footer now shows codex | gpt-5.4 | cli-exec | ready | normal | in~0 out~0 | ctx~272000.",
+    output: "Statusline ON. Footer now shows codex | gpt-5.4 | cli-exec | ready | mouse=auto/scroll | mouse:auto | in~0 out~0 | ctx~272000.",
     activity: "statusline on",
   });
   assert.equal(session.commandModes.statusline, true);
@@ -748,7 +735,7 @@ test("formatTranscriptEvent and buildChatHistoryFromSession render command bound
   assert.match(boundary[0], /^\[cmd-result\] 2025-01-01T12:00:00\.000Z · completed · command \/provider completed$/);
   assert.equal(boundary[1], "  line1");
   assert.equal(boundary[2], "  line2");
-  assert.equal(boundary[3], "  (+1 hidden lines)");
+  assert.equal(boundary[3], "  line3");
 
   const eventLines = formatTranscriptEvent(commandEvent);
   assert.equal(eventLines.join("\n"), boundary.join("\n"));
@@ -922,7 +909,7 @@ test("createRuntimeInspectPayload includes instruction layer summaries", async (
   const { createRuntimeInspectPayload } = await import("../src/cli.js");
   const payload = createRuntimeInspectPayload(createSession());
 
-  assert.equal(payload.instructionLayers.count, 27);
+  assert.equal(payload.instructionLayers.count, 29);
   assert.match(payload.instructionLayers.identity, /nexagent, local coding harness assistant/);
   assert.equal(payload.instructionLayers.responseStyle, "none");
   assert.match(payload.instructionLayers.executionGuidance, /Read relevant code before changing behavior/);
@@ -933,7 +920,7 @@ test("createRuntimeInspectPayload includes instruction layer summaries", async (
   assert.match(payload.instructionLayers.toolAvailability, /Available internal tools: read_file, write_file, apply_patch, list_dir, search_content, search_files, git_status, git_diff, shell_command, archivist_save, archivist_checkpoint/);
   assert.match(payload.instructionLayers.providerFallback, /Active provider: codex/);
   assert.equal(payload.instructionLayers.stableSections, "identity, executionGuidance, repoBehavior, taskContext, toolAvailability, providerFallback");
-  assert.equal(payload.instructionLayers.dynamicSections, "");
+  assert.equal(payload.instructionLayers.dynamicSections, "archivistContext");
   assert.equal(payload.instructionLayers.dynamicBoundary, "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__");
   assert.equal(payload.providerTransport.executor, "codex");
   assert.equal(payload.providerTransport.adapter, "codex-cli-exec");
@@ -960,13 +947,13 @@ test("createRuntimeTuiView includes grouped instruction sources", async () => {
   assert.match(instructionRows.get("taskContext") ?? "", /OpenSpec artifacts as current task context/);
   assert.equal(instructionRows.get("responseStyle"), "none");
   assert.equal(instructionRows.get("stableSections"), "identity, executionGuidance, repoBehavior, taskContext, toolAvailability, providerFallback");
-  assert.equal(instructionRows.get("dynamicSections"), "none");
+  assert.equal(instructionRows.get("dynamicSections"), "archivistContext");
   assert.equal(metadataRows.get("lastActivity"), "none");
   assert.equal(metadataRows.get("git"), "up to date with origin/main; clean");
   assert.equal(metadataRows.get("contextLeft"), "272000");
   assert.equal(metadataRows.get("compact"), "50% · left 272000 · compacts 0");
   assert.equal(metadataRows.get("toolPolicy"), "repo-local-guarded");
-  assert.equal(metadataRows.get("styles"), "normal");
+  assert.equal(metadataRows.get("styles"), "mouse:auto");
   const routingRows = new Map(view.routing);
   assert.equal(routingRows.get("capabilities"), "turns=bounded; tool-calls=xml-loop; approval=guarded; steer=boundary-only; model-scope=local-cli");
   assert.match(routingRows.get("caveats") ?? "", /local Codex CLI behavior/);

@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import process from "node:process";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { executeProviderRequest, type ImageAttachment } from "./provider.js";
@@ -272,7 +272,7 @@ const SPINNER_VERBS = [
   "Salting",
 ] as const;
 const TUI_SECTIONS = ["overview", "routing", "auth", "instructions", "mcp", "hooks", "imports", "archivist", "agent"] as const;
-const KEY_HINT = "Keys: Enter send · Esc clear · Tab complete · Alt+V paste-image (Ctrl+Alt+V) · ↑/↓ history · Ctrl+R picker · Ctrl+T trace · Ctrl+Y/N approve/reject · Ctrl+L focus · Ctrl+C copy/exit · /reload · /quit";
+const KEY_HINT = "Keys: Enter send · Esc clear · Tab complete · Alt+V paste-image (Ctrl+Alt+V) · ↑/↓ history · Ctrl+R picker · Ctrl+T trace · Ctrl+Y/N approve/reject · Ctrl+O mouse-mode · Ctrl+L focus · Ctrl+C copy/exit · /reload · /quit";
 const COMMAND_CATALOG = [
   { name: "/help", usage: "/help", description: "show available runtime commands" },
   { name: "/reload", usage: "/reload", description: "reload runtime state from repo config" },
@@ -283,6 +283,8 @@ const COMMAND_CATALOG = [
   { name: "/codex", usage: "/codex [status|off]", description: "activate Codex provider preference" },
   { name: "/provider", usage: "/provider [status|name|transport ...] [--verbose]", description: "show or switch provider and transport mode" },
   { name: "/model", usage: "/model [status|list|name]", description: "show or set model for active provider" },
+  { name: "/skill", usage: "/skill [name] [args...]", description: "list skills or resolve and route a skill by name" },
+  { name: "/mouse", usage: "/mouse [status|mode <auto|scroll|select>]", description: "show or set transcript mouse interaction mode" },
   { name: "/status", usage: "/status [--verbose]", description: "show runtime, repo, auth, and style status (compact default)" },
   { name: "/caveman-mode", usage: "/caveman-mode [on|off|status]", description: "toggle compressed caveman response style" },
   { name: "/deadpoolmode", usage: "/deadpoolmode [on|off|status]", description: "toggle Deadpool prose style overlay" },
@@ -359,6 +361,7 @@ interface RuntimeCommandSuccess {
   ok: true;
   output: string;
   activity: string;
+  autoInvokeAfterSkill?: boolean;
 }
 
 interface RuntimeCommandFailure {
@@ -368,6 +371,19 @@ interface RuntimeCommandFailure {
 }
 
 type DiagnosticRow = readonly [string, string];
+
+interface RuntimeSkillDefinition {
+  name: string;
+  description: string;
+  source: string;
+  path: string;
+  aliases: string[];
+}
+
+interface RuntimeSkillResolution {
+  mode: "exact" | "alias" | "prefix" | "fuzzy";
+  skill: RuntimeSkillDefinition;
+}
 
 export type RuntimeCommandResult = RuntimeCommandSuccess | RuntimeCommandFailure;
 
@@ -423,10 +439,12 @@ async function main(): Promise<void> {
 interface RunCommand {
   kind: "run";
   prompt: string | null;
+  yolo: boolean;
 }
 
 interface InspectCommand {
   kind: "inspect";
+  yolo: boolean;
 }
 
 type CliCommand = RunCommand | InspectCommand;
@@ -447,14 +465,18 @@ export interface RuntimeTuiView {
 export type RuntimeGuiView = RuntimeTuiView;
 
 export function parseCommand(argv: string[]): CliCommand {
-  if (argv[0] !== "run") {
-    return { kind: "inspect" };
+  const yolo = argv.includes("--yolo");
+  const normalizedArgv = argv.filter((arg) => arg !== "--yolo");
+
+  if (normalizedArgv[0] !== "run") {
+    return { kind: "inspect", yolo };
   }
 
-  const prompt = argv.slice(1).join(" ").trim();
+  const prompt = normalizedArgv.slice(1).join(" ").trim();
   return {
     kind: "run",
     prompt: prompt.length > 0 ? prompt : null,
+    yolo,
   };
 }
 
@@ -665,7 +687,12 @@ async function readPipedStdin(stdin: NodeJS.ReadStream): Promise<string | null> 
 }
 
 export async function runPromptCommand(session: RuntimeSession, prompt: string): Promise<void> {
-  const trimmedPrompt = prompt.trim();
+  let effectivePrompt = prompt.trim();
+  const skillCommand = toSkillCommandFromShorthand(effectivePrompt);
+  if (skillCommand) {
+    effectivePrompt = skillCommand;
+  }
+  const trimmedPrompt = effectivePrompt;
   const memoryMutation = parseMemoryMutationCommand(trimmedPrompt);
 
   if (memoryMutation) {
@@ -698,9 +725,9 @@ export async function runPromptCommand(session: RuntimeSession, prompt: string):
   if (session.operationControls.pendingApproval && !trimmedPrompt.startsWith("/")) {
     const lowerPrompt = trimmedPrompt.toLowerCase();
     if (APPROVE_PROMPT_ALIASES.has(lowerPrompt)) {
-      prompt = "/approval approve";
+      effectivePrompt = "/approval approve";
     } else if (REJECT_PROMPT_ALIASES.has(lowerPrompt)) {
-      prompt = "/approval reject";
+      effectivePrompt = "/approval reject";
     } else {
       const message = `approval pending for ${session.operationControls.pendingApproval.tool}; use /approval approve or /approval reject`;
       setRuntimeAction(session, "error", message);
@@ -716,7 +743,7 @@ export async function runPromptCommand(session: RuntimeSession, prompt: string):
     }
   }
 
-  if (prompt.trim() === "/reload") {
+  if (effectivePrompt.trim() === "/reload") {
     recordRuntimeEvent(session, {
       kind: "command",
       status: "started",
@@ -734,7 +761,7 @@ export async function runPromptCommand(session: RuntimeSession, prompt: string):
     return;
   }
 
-  if (prompt.trim() === "/quit") {
+  if (effectivePrompt.trim() === "/quit") {
     const quitMemoryNote = await maybePersistSessionMemoryOnQuit(session, "quit command");
     setRuntimeAction(session, "ready", "command complete");
     recordRuntimeEvent(session, {
@@ -747,52 +774,55 @@ export async function runPromptCommand(session: RuntimeSession, prompt: string):
     return;
   }
 
-  const commandResult = runRuntimeCommand(session, prompt);
+  const commandResult = runRuntimeCommand(session, effectivePrompt);
 
   if (commandResult) {
-    if (commandResult.ok) {
+    // Skill commands with autoInvokeAfterSkill fall through to model invocation
+    if (commandResult.ok && commandResult.autoInvokeAfterSkill) {
+      process.stdout.write(`${commandResult.output}\n`);
+    } else if (commandResult.ok) {
       setRuntimeAction(session, "ready", "command complete");
       recordRuntimeEvent(session, {
         kind: "command",
         status: "completed",
-        summary: `command ${prompt.split(/\s+/)[0]} completed`,
+        summary: `command ${effectivePrompt.split(/\s+/)[0]} completed`,
         detail: commandResult.output,
       });
       process.stdout.write(`${commandResult.output}\n`);
       return;
+    } else {
+      setRuntimeAction(session, "error", commandResult.message);
+      recordRuntimeEvent(session, {
+        kind: "command",
+        status: "failed",
+        summary: `command ${effectivePrompt.split(/\s+/)[0]} failed`,
+        detail: commandResult.message,
+      });
+      process.stderr.write(`${commandResult.message}\n`);
+      process.exitCode = 1;
+      return;
     }
-
-    setRuntimeAction(session, "error", commandResult.message);
-    recordRuntimeEvent(session, {
-      kind: "command",
-      status: "failed",
-      summary: `command ${prompt.split(/\s+/)[0]} failed`,
-      detail: commandResult.message,
-    });
-    process.stderr.write(`${commandResult.message}\n`);
-    process.exitCode = 1;
-    return;
   }
 
   recordRuntimeEvent(session, {
     kind: "prompt",
     status: "queued",
     summary: "user prompt accepted",
-    detail: prompt.length > 160 ? `${prompt.slice(0, 157)}...` : prompt,
+    detail: effectivePrompt.length > 160 ? `${effectivePrompt.slice(0, 157)}...` : effectivePrompt,
   });
   setRuntimeAction(session, "running", "provider request");
 
   try {
-    const autoCompact = maybeCompactConversation(session, prompt);
+    const autoCompact = maybeCompactConversation(session, effectivePrompt);
     if (autoCompact.compacted) {
       setRuntimeAction(session, "running", `auto compact · ${autoCompact.beforeTokens} -> ${autoCompact.afterTokens}`);
     }
-    const result = await executeProviderRequest({ session, prompt });
+    const result = await executeProviderRequest({ session, prompt: effectivePrompt });
 
     if (result.ok) {
-      recordConversationTurn(session, "user", prompt);
+      recordConversationTurn(session, "user", effectivePrompt);
       recordConversationTurn(session, "assistant", result.output);
-      recordTurnTelemetry(session, prompt, result.output);
+      recordTurnTelemetry(session, effectivePrompt, result.output);
       setRuntimeAction(session, "ready", `response received · ${result.provider}`);
       process.stdout.write(`${result.output}\n`);
       return;
@@ -846,6 +876,10 @@ export function runRuntimeCommand(session: RuntimeSession, input: string): Runti
       return handleProviderCommand(session, args);
     case "/model":
       return handleModelCommand(session, args);
+    case "/skill":
+      return handleSkillCommand(session, args);
+    case "/mouse":
+      return handleMouseCommand(session, args);
     case "/status":
       return handleStatusCommand(session, args);
     case "/caveman-mode":
@@ -910,6 +944,349 @@ function splitVerboseArg(args: string[]): { detailMode: DetailMode; args: string
     detailMode,
     args: args.filter((arg) => !VERBOSE_ARGS.has(arg.toLowerCase())),
   };
+}
+
+function detectMouseCapabilities(): { wheel: boolean; reason: string | null } {
+  const term = (process.env.TERM ?? "").toLowerCase();
+  if (!term || term === "dumb" || term === "unknown") {
+    return { wheel: false, reason: `terminal ${term || "unset"} does not support wheel capture` };
+  }
+  return { wheel: true, reason: null };
+}
+
+function getConfiguredMouseMode(session: RuntimeSession): "auto" | "scroll" | "select" {
+  const configured = session.commandModes.mouseMode;
+  return configured === "scroll" || configured === "select" || configured === "auto" ? configured : "auto";
+}
+
+function getEffectiveMouseMode(session: RuntimeSession): { mode: "scroll" | "select"; warning: string | null } {
+  const configured = getConfiguredMouseMode(session);
+  const caps = detectMouseCapabilities();
+  if (configured === "scroll") {
+    if (!caps.wheel) {
+      return { mode: "select", warning: caps.reason ? `fallback select: ${caps.reason}; fix by using a wheel-capable terminal or /mouse mode select` : null };
+    }
+    return { mode: "scroll", warning: null };
+  }
+  if (configured === "select") {
+    return { mode: "select", warning: null };
+  }
+  if (!caps.wheel) {
+    return { mode: "select", warning: caps.reason ? `auto fallback select: ${caps.reason}; fix by enabling a wheel-capable terminal` : null };
+  }
+  return { mode: "scroll", warning: null };
+}
+
+function formatMouseStatus(session: RuntimeSession): string {
+  const effective = getEffectiveMouseMode(session);
+  return [
+    `configured: ${getConfiguredMouseMode(session)}`,
+    `effective: ${effective.mode}`,
+    `wheel: ${detectMouseCapabilities().wheel ? "supported" : "unsupported"}`,
+    effective.warning ? `warning: ${effective.warning}` : "warning: none",
+  ].join("\n");
+}
+
+function handleMouseCommand(session: RuntimeSession, args: string[]): RuntimeCommandResult {
+  if (args.length === 0 || (args.length === 1 && STATUS_ARGS.has(args[0].toLowerCase()))) {
+    return {
+      ok: true,
+      output: formatMouseStatus(session),
+      activity: "mouse mode status",
+    };
+  }
+  if (args.length !== 2 || args[0]?.toLowerCase() !== "mode") {
+    return {
+      ok: false,
+      message: "usage: /mouse [status|mode <auto|scroll|select>]",
+      activity: "command failed · /mouse usage",
+    };
+  }
+  const next = args[1]?.toLowerCase();
+  if (next !== "auto" && next !== "scroll" && next !== "select") {
+    return {
+      ok: false,
+      message: "usage: /mouse [status|mode <auto|scroll|select>]",
+      activity: "command failed · /mouse usage",
+    };
+  }
+  session.commandModes.mouseMode = next;
+  savePersistedRuntimeState(session);
+  return {
+    ok: true,
+    output: formatMouseStatus(session),
+    activity: `mouse mode set · ${next}`,
+  };
+}
+
+function writeTerminalMouseMode(session: RuntimeSession): void {
+  const configured = getConfiguredMouseMode(session);
+  const effective = getEffectiveMouseMode(session);
+  if (configured === "scroll" && effective.mode === "scroll") {
+    process.stdout.write("\x1b[?1007h\x1b[?1006h\x1b[?1000h");
+    return;
+  }
+  if (configured === "auto" && detectMouseCapabilities().wheel) {
+    process.stdout.write("\x1b[?1000l\x1b[?1006l\x1b[?1007h");
+    return;
+  }
+  process.stdout.write("\x1b[?1000l\x1b[?1006l\x1b[?1007l");
+}
+
+function handleSkillCommand(session: RuntimeSession, args: string[]): RuntimeCommandResult {
+  const skills = discoverSkills(session.cwd);
+  if (args.length === 0) {
+    return {
+      ok: true,
+      output: formatSkillList(session, skills),
+      activity: "skill list",
+    };
+  }
+
+  const [rawName, ...rawArgParts] = args;
+  const skillName = normalizeSkillToken(rawName ?? "");
+  const rawArgs = rawArgParts.join(" ");
+  const resolution = resolveSkill(skills, skillName);
+  if (!resolution) {
+    const suggestions = rankClosestSkills(skills, skillName, 3);
+    return {
+      ok: false,
+      message: [
+        `unknown skill ${rawName}`,
+        suggestions.length > 0 ? `closest: ${suggestions.map((skill) => skill.name).join(", ")}` : "closest: none",
+        "hint: run /skill",
+      ].join("\n"),
+      activity: "skill lookup failed",
+    };
+  }
+
+  const routedArgs = rawArgs.length > 0 ? rawArgs : "(none)";
+  session.activeSkill = {
+    name: resolution.skill.name,
+    source: resolution.skill.source,
+    path: resolution.skill.path,
+    args: routedArgs,
+    content: readSkillContent(resolution.skill.path),
+  };
+  refreshInstructionState(session);
+  return {
+    ok: true,
+    output: [
+      `skill resolved: ${resolution.skill.name}`,
+      `resolution: ${resolution.mode}`,
+      `source: ${resolution.skill.source}`,
+      `path: ${resolution.skill.path}`,
+      `args: ${routedArgs}`,
+      `route: /skill ${resolution.skill.name}${rawArgs.length > 0 ? ` ${rawArgs}` : ""}`,
+    ].join("\n"),
+    activity: `skill routed · ${resolution.skill.name}`,
+    autoInvokeAfterSkill: true,
+  };
+}
+
+function formatSkillList(session: RuntimeSession, skills: RuntimeSkillDefinition[]): string {
+  if (skills.length === 0) {
+    return "no skills found";
+  }
+  const activeName = session.activeSkill?.name ?? "";
+  const withStatus = skills.map((skill) => ({ ...skill, status: skill.name === activeName ? "*" : "" }));
+  const nameWidth = Math.max(4, ...withStatus.map((skill) => visibleLength(skill.name)));
+  const sourceWidth = Math.max(6, ...withStatus.map((skill) => visibleLength(skill.source)));
+  const lines = [
+    `${padText("name", nameWidth)}  ${padText("source", sourceWidth)}  description`,
+    `${"-".repeat(nameWidth)}  ${"-".repeat(sourceWidth)}  -----------`,
+  ];
+  for (const skill of withStatus) {
+    lines.push(`${skill.status ? "*" : " "}${padText(skill.name, nameWidth)}  ${padText(skill.source, sourceWidth)}  ${skill.description}`);
+  }
+  return lines.join("\n");
+}
+
+function discoverSkills(cwd: string): RuntimeSkillDefinition[] {
+  const roots = [
+    path.join(cwd, ".codex", "skills"),
+    path.join(cwd, ".agents", "skills"),
+    path.join(homedir(), ".codex", "skills"),
+    path.join(homedir(), ".agents", "skills"),
+  ];
+  const skills: RuntimeSkillDefinition[] = [];
+  const seen = new Set<string>();
+  for (const root of roots) {
+    if (!existsSync(root)) {
+      continue;
+    }
+    const source = root.startsWith(cwd) ? "project" : "user";
+    for (const entry of safeReaddir(root)) {
+      const folderPath = path.join(root, entry);
+      const stat = safeStat(folderPath);
+      if (!stat?.isDirectory()) {
+        continue;
+      }
+      const skillPath = path.join(folderPath, "SKILL.md");
+      if (!existsSync(skillPath)) {
+        continue;
+      }
+      const parsed = parseSkillFile(skillPath, entry);
+      const dedupe = normalizeSkillToken(parsed.name);
+      if (!dedupe || seen.has(dedupe)) {
+        continue;
+      }
+      seen.add(dedupe);
+      skills.push({
+        name: parsed.name,
+        description: parsed.description,
+        source,
+        path: skillPath,
+        aliases: parsed.aliases,
+      });
+    }
+  }
+  return skills.sort((left, right) => left.name.localeCompare(right.name));
+}
+
+function parseSkillFile(skillPath: string, fallbackName: string): { name: string; description: string; aliases: string[] } {
+  const content = safeReadFile(skillPath) ?? "";
+  const frontmatter = content.match(/^---\n([\s\S]*?)\n---/);
+  const metadata = frontmatter?.[1] ?? "";
+  const name = metadata.match(/^name:\s*"?([^"\n]+)"?\s*$/m)?.[1]?.trim() || fallbackName;
+  const description = metadata.match(/^description:\s*"?([^"\n]+)"?\s*$/m)?.[1]?.trim()
+    || metadata.match(/^short-description:\s*"?([^"\n]+)"?\s*$/m)?.[1]?.trim()
+    || "no description";
+  const aliasesLine = metadata.match(/^aliases:\s*\[([^\]]*)\]\s*$/m)?.[1] ?? "";
+  const aliases = aliasesLine
+    .split(",")
+    .map((alias) => normalizeSkillToken(alias.replaceAll('"', "").replaceAll("'", "")))
+    .filter((alias) => alias.length > 0);
+  return { name, description, aliases };
+}
+
+function readSkillContent(skillPath: string): string {
+  const content = safeReadFile(skillPath);
+  if (!content) {
+    throw new Error(`unable to read skill: ${skillPath}`);
+  }
+  return content;
+}
+
+function resolveSkill(skills: RuntimeSkillDefinition[], skillName: string): RuntimeSkillResolution | null {
+  const needle = normalizeSkillToken(skillName);
+  if (!needle) {
+    return null;
+  }
+  const exact = skills.find((skill) => normalizeSkillToken(skill.name) === needle);
+  if (exact) {
+    return { mode: "exact", skill: exact };
+  }
+  const alias = skills.find((skill) => skill.aliases.includes(needle));
+  if (alias) {
+    return { mode: "alias", skill: alias };
+  }
+  const prefixCandidates = skills.filter((skill) => normalizeSkillToken(skill.name).startsWith(needle));
+  if (prefixCandidates.length > 0) {
+    prefixCandidates.sort((left, right) => left.name.localeCompare(right.name));
+    return { mode: "prefix", skill: prefixCandidates[0]! };
+  }
+  const fuzzy = rankClosestSkills(skills, needle, 1)[0];
+  return fuzzy ? { mode: "fuzzy", skill: fuzzy } : null;
+}
+
+function rankClosestSkills(skills: RuntimeSkillDefinition[], skillName: string, limit: number): RuntimeSkillDefinition[] {
+  const needle = normalizeSkillToken(skillName);
+  return skills
+    .map((skill) => ({ skill, distance: levenshteinDistance(needle, normalizeSkillToken(skill.name)) }))
+    .sort((left, right) => (left.distance - right.distance) || left.skill.name.localeCompare(right.skill.name))
+    .slice(0, Math.max(0, limit))
+    .map((entry) => entry.skill);
+}
+
+function normalizeSkillToken(value: string): string {
+  return value.trim().replace(/^\$+/, "").replace(/^\/+/, "").toLowerCase();
+}
+
+function parseSkillShorthand(input: string): { skillName: string; rawArgs: string } | null {
+  const trimmed = input.trim();
+  if (!trimmed.startsWith("$") || trimmed.startsWith("$ ")) {
+    return null;
+  }
+  const match = trimmed.match(/^\$([^\s]+)(?:\s+(.*))?$/);
+  if (!match) {
+    return null;
+  }
+  const skillName = normalizeSkillToken(match[1] ?? "");
+  return skillName ? { skillName, rawArgs: match[2] ?? "" } : null;
+}
+
+function toSkillCommandFromShorthand(input: string): string | null {
+  const parsed = parseSkillShorthand(input);
+  if (!parsed) {
+    return null;
+  }
+  return `/skill ${parsed.skillName}${parsed.rawArgs.length > 0 ? ` ${parsed.rawArgs}` : ""}`;
+}
+
+function safeReadFile(filePath: string): string | null {
+  try {
+    return readFileSync(filePath, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+function safeReaddir(dirPath: string): string[] {
+  try {
+    return readdirSync(dirPath);
+  } catch {
+    return [];
+  }
+}
+
+function safeStat(filePath: string): ReturnType<typeof statSync> | null {
+  try {
+    return statSync(filePath);
+  } catch {
+    return null;
+  }
+}
+
+function padText(value: string, width: number): string {
+  const visible = visibleLength(value);
+  return visible >= width ? value : `${value}${" ".repeat(width - visible)}`;
+}
+
+function visibleLength(value: string): number {
+  return [...value].length;
+}
+
+function levenshteinDistance(a: string, b: string): number {
+  if (a === b) {
+    return 0;
+  }
+  if (a.length === 0) {
+    return b.length;
+  }
+  if (b.length === 0) {
+    return a.length;
+  }
+  const prev = new Array<number>(b.length + 1);
+  const next = new Array<number>(b.length + 1);
+  for (let index = 0; index <= b.length; index += 1) {
+    prev[index] = index;
+  }
+  for (let i = 1; i <= a.length; i += 1) {
+    next[0] = i;
+    for (let j = 1; j <= b.length; j += 1) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      next[j] = Math.min(
+        (next[j - 1] ?? 0) + 1,
+        (prev[j] ?? 0) + 1,
+        (prev[j - 1] ?? 0) + cost,
+      );
+    }
+    for (let j = 0; j <= b.length; j += 1) {
+      prev[j] = next[j] ?? 0;
+    }
+  }
+  return prev[b.length] ?? 0;
 }
 
 function formatDiagnosticSection(
@@ -1865,7 +2242,8 @@ function formatStyleStack(session: RuntimeSession): string {
   if (session.commandModes.cavemanMode) {
     active.push("caveman");
   }
-  return active.length > 0 ? active.join(" + ") : "normal";
+  active.push(`mouse:${getConfiguredMouseMode(session)}`);
+  return active.join(" + ");
 }
 
 function formatTurnTokens(session: RuntimeSession): string {
@@ -1882,6 +2260,7 @@ function formatStatusline(session: RuntimeSession): string {
     getCurrentProviderModel(session),
     session.providerTransport.mode,
     session.providerTransport.authGate,
+    `mouse=${getConfiguredMouseMode(session)}/${getEffectiveMouseMode(session).mode}`,
     formatStyleStack(session),
     formatTurnTokens(session),
     `ctx~${getRemainingContextTokens(session)}`,
@@ -2021,19 +2400,28 @@ export function autocompletePromptBuffer(
   input: string,
 ): { value: string; hint: string | null } {
   const trimmedLeft = input.replace(/^\s+/, "");
-  if (!trimmedLeft.startsWith("/")) {
-    return { value: input, hint: null };
+
+  if (trimmedLeft.startsWith("$")) {
+    return completeSkillShorthand(session.cwd, trimmedLeft);
   }
 
-  if (/^\/\S*$/.test(input)) {
-    return completeSlashCommand(input);
+  if (trimmedLeft.startsWith("/")) {
+    if (/^\/\S*$/.test(input)) {
+      return completeSlashCommand(input);
+    }
+    return completeCommandPath(session.cwd, input);
   }
 
-  return completeCommandPath(session.cwd, input);
+  return { value: input, hint: null };
 }
 
 export function describePromptHint(session: Pick<RuntimeSession, "cwd">, input: string): string | null {
   const trimmedLeft = input.replace(/^\s+/, "");
+
+  if (trimmedLeft.startsWith("$")) {
+    return describeSkillHint(session.cwd, trimmedLeft);
+  }
+
   if (!trimmedLeft.startsWith("/")) {
     return null;
   }
@@ -2048,6 +2436,57 @@ export function describePromptHint(session: Pick<RuntimeSession, "cwd">, input: 
   }
 
   return completeCommandPath(session.cwd, input).hint;
+}
+
+function completeSkillShorthand(cwd: string, input: string): { value: string; hint: string | null } {
+  const parsed = parseSkillShorthand(input);
+  const skills = discoverSkills(cwd);
+  const needle = parsed ? normalizeSkillToken(parsed.skillName) : "";
+
+  const matches = skills
+    .filter((s) => normalizeSkillToken(s.name).startsWith(needle))
+    .slice(0, 6);
+
+  if (matches.length === 0) {
+    return { value: input, hint: null };
+  }
+
+  if (matches.length === 1) {
+    const completed = `$${matches[0].name} `;
+    return { value: completed, hint: matches[0].name };
+  }
+
+  const common = longestCommonPrefix(matches.map((s) => s.name));
+  const prefix = needle.length > 0 ? `$${common}` : "$";
+  const suggestions = matches.map((s) => `$${s.name}`).join(" · ");
+  return {
+    value: prefix.length > input.length ? prefix : input,
+    hint: `suggest: ${suggestions}`,
+  };
+}
+
+function describeSkillHint(cwd: string, input: string): string | null {
+  const parsed = parseSkillShorthand(input);
+  const skills = discoverSkills(cwd);
+  const needle = parsed ? normalizeSkillToken(parsed.skillName) : "";
+
+  const matches = skills
+    .filter((s) => normalizeSkillToken(s.name).startsWith(needle))
+    .slice(0, 6);
+
+  if (matches.length === 0) {
+    return null;
+  }
+
+  if (needle.length === 0) {
+    return `skills: ${matches.map((s) => s.name).join(" · ")}`;
+  }
+
+  if (matches.length <= 3) {
+    return `skills: ${matches.map((s) => `${s.name} (${s.source})`).join(" · ")}`;
+  }
+
+  return `skills: ${matches.map((s) => s.name).join(" · ")} +${skills.length - matches.length} more`;
 }
 
 function completeSlashCommand(input: string): { value: string; hint: string | null } {
@@ -2410,6 +2849,12 @@ async function runRuntimeTui(session: RuntimeSession): Promise<void> {
       return metrics;
     };
 
+    const scrollChatBy = (delta: number) => {
+      const metrics = clampChatScroll();
+      state.chatScrollOffset = Math.max(0, Math.min(metrics.maxScroll, state.chatScrollOffset + delta));
+      render();
+    };
+
     const openHistoryPopup = () => {
       if (state.promptHistory.length === 0) {
         return;
@@ -2644,8 +3089,9 @@ async function runRuntimeTui(session: RuntimeSession): Promise<void> {
       if (prompt.length === 0) {
         return;
       }
+      const effectivePrompt = toSkillCommandFromShorthand(prompt) ?? prompt;
 
-      const memoryMutation = parseMemoryMutationCommand(prompt);
+      const memoryMutation = parseMemoryMutationCommand(effectivePrompt);
       if (memoryMutation) {
         state.promptBuffer = "";
         state.promptCursor = 0;
@@ -2679,7 +3125,7 @@ async function runRuntimeTui(session: RuntimeSession): Promise<void> {
         return;
       }
 
-      const attachmentMutation = parseAttachmentMutationCommand(prompt);
+      const attachmentMutation = parseAttachmentMutationCommand(effectivePrompt);
       if (attachmentMutation) {
         state.promptBuffer = "";
         state.promptCursor = 0;
@@ -2714,7 +3160,7 @@ async function runRuntimeTui(session: RuntimeSession): Promise<void> {
         return;
       }
 
-      if (prompt === "/model") {
+      if (effectivePrompt === "/model") {
         state.promptBuffer = "";
         state.promptCursor = 0;
         resetHistoryNavigation();
@@ -2724,16 +3170,16 @@ async function runRuntimeTui(session: RuntimeSession): Promise<void> {
 
       commitPromptHistory(prompt);
 
-      const commandResult = runRuntimeCommand(session, prompt);
+      const commandResult = runRuntimeCommand(session, effectivePrompt);
       if (commandResult) {
-        if (prompt === "/reload") {
+        if (effectivePrompt === "/reload") {
           state.promptBuffer = "";
           state.promptCursor = 0;
           void reloadRuntime();
           return;
         }
 
-        if (prompt === "/quit") {
+        if (effectivePrompt === "/quit") {
           const quitMemoryNote = await maybePersistSessionMemoryOnQuit(session, "quit command");
           state.promptBuffer = "";
           state.promptCursor = 0;
@@ -2752,19 +3198,27 @@ async function runRuntimeTui(session: RuntimeSession): Promise<void> {
           return;
         }
 
-        state.promptBuffer = "";
-        state.promptCursor = 0;
-        setRuntimeAction(session, commandResult.ok ? "ready" : "error", commandResult.ok ? "command complete" : commandResult.message);
-        recordRuntimeEvent(session, {
-          kind: "command",
-          status: commandResult.ok ? "completed" : "failed",
-          summary: `command ${prompt.split(/\s+/)[0]} ${commandResult.ok ? "completed" : "failed"}`,
-          detail: commandResult.ok ? commandResult.output : commandResult.message,
-        });
-        state.action = session.action;
-        pushActivity(commandResult.activity);
-        render();
-        return;
+        // Skill commands with autoInvokeAfterSkill fall through to model invocation
+        if (commandResult.ok && commandResult.autoInvokeAfterSkill) {
+          process.stdout.write(`${commandResult.output}\n`);
+          state.promptBuffer = "";
+          state.promptCursor = 0;
+          // fall through to provider request below
+        } else {
+          state.promptBuffer = "";
+          state.promptCursor = 0;
+          setRuntimeAction(session, commandResult.ok ? "ready" : "error", commandResult.ok ? "command complete" : commandResult.message);
+          recordRuntimeEvent(session, {
+            kind: "command",
+            status: commandResult.ok ? "completed" : "failed",
+            summary: `command ${effectivePrompt.split(/\s+/)[0]} ${commandResult.ok ? "completed" : "failed"}`,
+            detail: commandResult.ok ? commandResult.output : commandResult.message,
+          });
+          state.action = session.action;
+          pushActivity(commandResult.activity);
+          render();
+          return;
+        }
       }
 
       if (state.action.pending) {
@@ -2778,7 +3232,7 @@ async function runRuntimeTui(session: RuntimeSession): Promise<void> {
         kind: "prompt",
         status: "queued",
         summary: "user prompt accepted",
-        detail: prompt.length > 160 ? `${prompt.slice(0, 157)}...` : prompt,
+        detail: effectivePrompt.length > 160 ? `${effectivePrompt.slice(0, 157)}...` : effectivePrompt,
       });
       setRuntimeAction(session, "running", "provider request");
       state.action = session.action;
@@ -2786,28 +3240,28 @@ async function runRuntimeTui(session: RuntimeSession): Promise<void> {
       render();
 
       try {
-        await maybeAutoPersistMemory(session, prompt);
-        const autoCompact = maybeCompactConversation(session, prompt);
+        await maybeAutoPersistMemory(session, effectivePrompt);
+        const autoCompact = maybeCompactConversation(session, effectivePrompt);
         if (autoCompact.compacted) {
           setRuntimeAction(session, "running", `auto compact · ${autoCompact.beforeTokens} -> ${autoCompact.afterTokens}`);
           state.action = session.action;
           pushActivity(`auto compact · ${autoCompact.beforeTokens} -> ${autoCompact.afterTokens}`);
-          await maybePersistCompactionMemory(session, prompt, autoCompact.beforeTokens, autoCompact.afterTokens);
+          await maybePersistCompactionMemory(session, effectivePrompt, autoCompact.beforeTokens, autoCompact.afterTokens);
           render();
         }
         const queuedAttachment = state.pendingImageAttachment;
         const result = await executeProviderRequest({
           session,
-          prompt,
+          prompt: effectivePrompt,
           ...(queuedAttachment ? { attachments: [queuedAttachment] } : {}),
         });
         if (result.ok) {
           const userTurn = queuedAttachment
-            ? `${prompt}\n[attachment] name=${queuedAttachment.name}; mime=${queuedAttachment.mimeType}; bytes=${String(queuedAttachment.bytes)}`
-            : prompt;
+            ? `${effectivePrompt}\n[attachment] name=${queuedAttachment.name}; mime=${queuedAttachment.mimeType}; bytes=${String(queuedAttachment.bytes)}`
+            : effectivePrompt;
           recordConversationTurn(session, "user", userTurn);
           recordConversationTurn(session, "assistant", result.output);
-          recordTurnTelemetry(session, prompt, result.output);
+          recordTurnTelemetry(session, effectivePrompt, result.output);
           setRuntimeAction(session, "ready", `response received · ${result.provider}`);
           state.action = session.action;
           pushActivity(`request ok · ${result.provider}`);
@@ -2946,6 +3400,27 @@ async function runRuntimeTui(session: RuntimeSession): Promise<void> {
         return;
       }
 
+      if (key === "\u000f") {
+        const current = getConfiguredMouseMode(session);
+        session.commandModes.mouseMode = current === "auto" ? "scroll" : current === "scroll" ? "select" : "auto";
+        savePersistedRuntimeState(session);
+        writeTerminalMouseMode(session);
+        const effective = getEffectiveMouseMode(session);
+        if (effective.warning) {
+          recordRuntimeEvent(session, {
+            kind: "control",
+            status: "blocked",
+            summary: "mouse mode fallback active",
+            detail: effective.warning,
+          });
+          pushActivity(`mouse ${getConfiguredMouseMode(session)} -> ${effective.mode} · ${effective.warning}`);
+        } else {
+          pushActivity(`mouse mode ${getConfiguredMouseMode(session)} · Ctrl+O`);
+        }
+        render();
+        return;
+      }
+
       if (key === "\u0019") {
         if (state.pendingApprovalTool) {
           const commandResult = runRuntimeCommand(session, "/approval approve");
@@ -3073,6 +3548,10 @@ async function runRuntimeTui(session: RuntimeSession): Promise<void> {
           navigateHistoryPopup(-1);
           return;
         }
+        if (getConfiguredMouseMode(session) === "auto" && state.promptBuffer.length === 0) {
+          scrollChatBy(3);
+          return;
+        }
         navigatePromptHistory(-1);
         return;
       }
@@ -3084,6 +3563,10 @@ async function runRuntimeTui(session: RuntimeSession): Promise<void> {
         }
         if (state.historyPopupOpen) {
           navigateHistoryPopup(1);
+          return;
+        }
+        if (getConfiguredMouseMode(session) === "auto" && state.promptBuffer.length === 0) {
+          scrollChatBy(-3);
           return;
         }
         navigatePromptHistory(1);
@@ -3163,6 +3646,20 @@ async function runRuntimeTui(session: RuntimeSession): Promise<void> {
 
       const wheelMatch = key.match(/^\u001b\[<(\d+);(\d+);(\d+)([mM])$/);
       if (wheelMatch) {
+        const effectiveMouse = getEffectiveMouseMode(session);
+        if (effectiveMouse.mode === "select") {
+          if (effectiveMouse.warning) {
+            recordRuntimeEvent(session, {
+              kind: "control",
+              status: "blocked",
+              summary: "mouse wheel ignored",
+              detail: effectiveMouse.warning,
+            });
+            pushActivity(`mouse wheel ignored · ${effectiveMouse.warning}`);
+            render();
+          }
+          return;
+        }
         const button = Number(wheelMatch[1]);
         if (state.modelPickerOpen) {
           if (button === 64) {
@@ -3260,6 +3757,7 @@ async function runRuntimeTui(session: RuntimeSession): Promise<void> {
         stdin.setRawMode(true);
         rawModeChanged = priorRawMode !== true;
       }
+      writeTerminalMouseMode(session);
       stdin.resume();
       stdin.on("data", onData);
       render();
@@ -3539,6 +4037,7 @@ function renderAgentPanel(state: RuntimeTuiState, width: number): string[] {
   const transcript = state.transcript.length > 0 ? state.transcript : ["assistant: no messages yet"];
   const composer = renderPromptBuffer(state.promptBuffer, state.promptCursor);
   const composerHint = state.promptBuffer.length > 0 ? describePromptHint({ cwd: lookupValue(state.view.metadata, "cwd") }, state.promptBuffer) : "start typing or use slash command";
+  const promptComposerLines = renderPromptForComposer(composer, width);
   const lines = [
     padLine("agent console", width),
     padLine("-------------", width),
@@ -3550,7 +4049,7 @@ function renderAgentPanel(state: RuntimeTuiState, width: number): string[] {
     ...wrapText(`turns: ${lookupMetadataValue(state.view.metadata, "turns", "0")} · tokens: ${lookupMetadataValue(state.view.metadata, "lastTokens", "in~0 out~0")}`, width),
     "",
     padLine("composer", width),
-    ...wrapText(composer, width),
+    ...promptComposerLines,
     ...wrapText(`hint: ${composerHint ?? "none"}`, width),
     padLine("transcript", width),
     ...transcript.flatMap((entry) => wrapText(entry, width)),
@@ -3571,6 +4070,7 @@ function renderWorkspacePanel(
   const completion = state.promptBuffer.length > 0 ? autocompletePromptBuffer({ cwd: lookupValue(state.view.metadata, "cwd") }, state.promptBuffer) : null;
   const composerHint = state.promptBuffer.length > 0 ? describePromptHint({ cwd: lookupValue(state.view.metadata, "cwd") }, state.promptBuffer) : "start typing or use slash command";
   const suggestion = completion && completion.value !== state.promptBuffer ? completion.value : null;
+  const promptComposerLines = renderPromptForComposer(composer, width);
   const chatLines = renderConversationTranscript(state.chatHistory, width);
   const footerStatus = buildFooterStatus(state, width);
   const hasTrace = state.latestTurnTrace.length > 0 || state.currentTurnActivity.length > 0;
@@ -3594,7 +4094,7 @@ function renderWorkspacePanel(
     ...(state.pendingImageAttachment ? [`img ${state.pendingImageAttachment.name} ${formatBytes(state.pendingImageAttachment.bytes)}`] : []),
   ].join(" · ");
   const composerBody = [
-    tintLine(truncateLine(`> ${composer}`, width), ANSI.prompt),
+    ...promptComposerLines.map((line) => tintLine(line, ANSI.prompt)),
     ...(state.pendingImageAttachment
       ? wrapText(`image attached ${state.pendingImageAttachment.path}`, width).map((line) => tintLine(line, ANSI.preview))
       : []),
@@ -3718,9 +4218,10 @@ function renderIdleHomePanel(
   const completion = state.promptBuffer.length > 0 ? autocompletePromptBuffer({ cwd }, state.promptBuffer) : null;
   const composerHint = state.promptBuffer.length > 0 ? describePromptHint({ cwd }, state.promptBuffer) : "start typing or use slash command";
   const suggestion = completion && completion.value !== state.promptBuffer ? completion.value : null;
+  const promptComposerLines = renderPromptForComposer(composer, width);
   const promptBlock = [
     tintLine("prompt", ANSI.agent),
-    tintLine(truncateLine(`> ${composer}`, width), ANSI.prompt),
+    ...promptComposerLines.map((line) => tintLine(line, ANSI.prompt)),
     ...(suggestion
       ? wrapText(`preview ${suggestion}`, width).map((line) => tintLine(line, ANSI.preview))
       : wrapText(`hint ${composerHint}`, width).map((line) => tintLine(line, ANSI.dim))),
@@ -3753,6 +4254,21 @@ function renderPromptBuffer(buffer: string, cursor: number): string {
   const before = buffer.slice(0, boundedCursor);
   const after = buffer.slice(boundedCursor);
   return `${before}▌${after}`;
+}
+
+function renderPromptForComposer(buffer: string, width: number): string[] {
+  const lines: string[] = [];
+  const segments = buffer.split("\n");
+  let firstLine = true;
+  for (const segment of segments) {
+    const segmentWidth = Math.max(12, width - (firstLine ? 2 : 0));
+    const wrapped = segment.length > 0 ? wrapText(segment, segmentWidth) : [""];
+    for (const line of wrapped) {
+      lines.push(firstLine ? `> ${line}` : line);
+      firstLine = false;
+    }
+  }
+  return lines.length > 0 ? lines : ["> "];
 }
 
 function renderHistoryPopup(state: RuntimeTuiState, width: number): string[] {
@@ -4042,8 +4558,8 @@ async function applyMemoryMutationCommand(session: RuntimeSession, command: Memo
     return `memory saved; entries=${String(result.entryCount)}\n${result.preview}`;
   }
 
-  const result = await checkpointArchivistSession(session, command.reason ?? "manual checkpoint");
   if (command.kind === "checkpoint") {
+    const result = await checkpointArchivistSession(session, command.reason ?? "manual checkpoint");
     return `memory checkpoint saved; entries=${String(result.entryCount)}\n${result.preview}`;
   }
 
@@ -4268,7 +4784,7 @@ function extractClipboardImageToTempFile(): { path: string; source: string } {
     // fallthrough
   }
 
-  cleanupAndThrow("no clipboard image found (tried pngpaste, wl-paste, xclip, powershell)");
+  return cleanupAndThrow("no clipboard image found (tried pngpaste, wl-paste, xclip, powershell)");
 }
 
 function windowsPathToWslPath(value: string): string {
@@ -4646,7 +5162,7 @@ function decorateMiddleScrollPane(
 }
 
 function restoreTerminal(): void {
-  process.stdout.write("\x1b[?25h\x1b[?1006l\x1b[?1000l\x1b[?1049l");
+  process.stdout.write("\x1b[?25h\x1b[?1007l\x1b[?1006l\x1b[?1000l\x1b[?1049l");
   resetScreenRenderer();
 }
 
