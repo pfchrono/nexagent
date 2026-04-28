@@ -364,6 +364,104 @@ test("executeProviderRequest executes internal tool loop before final answer", a
   });
 });
 
+test("executeProviderRequest returns partial result when tool budget is exhausted", async () => {
+  const session = createSession();
+  const prompts: string[] = [];
+
+  const result = await executeProviderRequest(
+    {
+      session,
+      prompt: "keep checking git forever",
+    },
+    {
+      exec: async (request) => {
+        prompts.push(request.prompt);
+        return {
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+          output: '<nexagent_tool_call>{"name":"git_status","arguments":{}}</nexagent_tool_call>',
+        };
+      },
+      http: async () => {
+        throw new Error("http should not be used");
+      },
+      codexHttp: async () => {
+        throw new Error("codex-http should not be used");
+      },
+    },
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(prompts.length, 12);
+  assert.match(prompts[5] ?? "", /Tool budget is almost exhausted/);
+  assert.match(prompts[6] ?? "", /Tool budget continuation cycle 2 started/);
+  assert.match(result.output, /Tool budget exhausted before final assistant answer/);
+  assert.match(result.output, /Partial evidence from completed tools/);
+  assert.match(result.output, /Tool call: \{"name":"git_status","arguments":\{\}\}/);
+  assert.equal(
+    session.events.some((event) => event.kind === "control" && event.summary === "tool budget continuation cycle started"),
+    true,
+  );
+  assert.equal(
+    session.events.some((event) => event.kind === "control" && event.summary === "tool budget fallback returned partial result"),
+    true,
+  );
+});
+
+test("executeProviderRequest resets tool budget once for bounded continuation", async () => {
+  const session = createSession();
+  const prompts: string[] = [];
+
+  const result = await executeProviderRequest(
+    {
+      session,
+      prompt: "use a few tools then answer",
+    },
+    {
+      exec: async (request) => {
+        prompts.push(request.prompt);
+        if (prompts.length <= 6) {
+          return {
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            output: '<nexagent_tool_call>{"name":"git_status","arguments":{}}</nexagent_tool_call>',
+          };
+        }
+        return {
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+          output: "continued after budget reset",
+        };
+      },
+      http: async () => {
+        throw new Error("http should not be used");
+      },
+      codexHttp: async () => {
+        throw new Error("codex-http should not be used");
+      },
+    },
+  );
+
+  assert.deepEqual(result, {
+    ok: true,
+    provider: "codex",
+    model: "gpt-5.4",
+    transport: "codex",
+    adapter: "codex-cli-exec",
+    fallbackApplied: false,
+    output: "continued after budget reset",
+  });
+  assert.equal(prompts.length, 7);
+  assert.match(prompts[6] ?? "", /legally reset the per-cycle tool counter/);
+  assert.equal(
+    session.events.some((event) => event.kind === "control" && event.summary === "tool budget continuation cycle started"),
+    true,
+  );
+});
+
 test("executeProviderRequest accepts attribute-style internal tool calls", async () => {
   const session = createSession();
   const result = await executeProviderRequest(

@@ -69,6 +69,7 @@ export interface CodexInvokers {
 const TOOL_CALL_PATTERN = /<nexagent_tool_call>([\s\S]+?)<\/nexagent_tool_call>/;
 const TOOL_CALL_MARKUP_PATTERN = /<\s*\/?\s*nexagent_tool_call\b/i;
 const MAX_INTERNAL_TOOL_STEPS = 6;
+const MAX_INTERNAL_TOOL_CYCLES = 2;
 const CONTINUATION_NUDGE = [
   "The previous response deferred action or asked for confirmation instead of executing.",
   "The user has already authorized this task.",
@@ -92,6 +93,13 @@ const NEXSIGHT_TOOL_NUDGE = [
   "Do not use read_file, list_dir, search_content, search_files, or shell_command for this broad inspection step.",
   "Direct tools are fine only for a known small file/path, exact file content, or a narrower follow-up after Nexsight has routed the work.",
   "Retry with exactly one Nexsight tool call: nexsight_execute, nexsight_index, nexsight_batch, or nexsight_search.",
+].join(" ");
+const FINAL_TOOL_STEP_NUDGE = [
+  "Tool budget is almost exhausted.",
+  "You have one provider step left after this transcript.",
+  "Answer now from the available evidence unless one final tool call is absolutely required.",
+  "If another tool is still required, the harness may start one bounded continuation cycle with the tool count reset.",
+  "After that continuation cycle, it will return a partial result instead of failing the turn.",
 ].join(" ");
 
 export async function executeProviderRequest(
@@ -161,7 +169,9 @@ export async function executeProviderRequest(
     let prompt = assembled.prompt;
     const toolTranscript: string[] = [];
 
-    for (let step = 0; step < MAX_INTERNAL_TOOL_STEPS; step += 1) {
+    toolCycles:
+    for (let cycle = 0; cycle < MAX_INTERNAL_TOOL_CYCLES; cycle += 1) {
+      for (let step = 0; step < MAX_INTERNAL_TOOL_STEPS; step += 1) {
       const steer = consumeOperatorSteer(request.session, `before provider step ${String(step + 1)}`);
       if (steer) {
         prompt = `${prompt}\n\nOperator steer:\n- ${steer}`;
@@ -249,6 +259,33 @@ export async function executeProviderRequest(
         };
       }
 
+      if (step === MAX_INTERNAL_TOOL_STEPS - 1) {
+        if (cycle < MAX_INTERNAL_TOOL_CYCLES - 1) {
+          recordRuntimeEvent(request.session, {
+            kind: "control",
+            status: "queued",
+            summary: "tool budget continuation cycle started",
+            detail: toolCall.name,
+          });
+          prompt = createToolBudgetContinuationPrompt(assembled.prompt, toolTranscript, toolCall.name, cycle + 2);
+          continue toolCycles;
+        }
+        recordRuntimeEvent(request.session, {
+          kind: "control",
+          status: "completed",
+          summary: "tool budget fallback returned partial result",
+          detail: toolCall.name,
+        });
+        return createToolBudgetPartialResult(
+          provider,
+          model,
+          transport.transport,
+          transport.id,
+          toolTranscript,
+          `Blocked another ${toolCall.name} call because this turn reached the internal tool budget.`,
+        );
+      }
+
       if (needsNexsightToolOnly(request.prompt, toolCall) && !isNexsightToolCall(toolCall) && step < MAX_INTERNAL_TOOL_STEPS - 1) {
         recordRuntimeEvent(request.session, {
           kind: "control",
@@ -262,7 +299,9 @@ export async function executeProviderRequest(
 
       const toolResult = await executeToolWithRuntimeActivity(request.session, toolCall);
       toolTranscript.push(formatInternalToolExchange(step + 1, toolCall, toolResult));
-      prompt = `${assembled.prompt}\n\nInternal tool transcript:\n${toolTranscript.join("\n\n")}\n\nContinue. Either answer user directly or request one more tool with one <nexagent_tool_call> block only.`;
+      const finalStepNudge = step === MAX_INTERNAL_TOOL_STEPS - 2 ? `\n\n${FINAL_TOOL_STEP_NUDGE}` : "";
+      prompt = `${assembled.prompt}\n\nInternal tool transcript:\n${toolTranscript.join("\n\n")}\n\nContinue. Either answer user directly or request one more tool with one <nexagent_tool_call> block only.${finalStepNudge}`;
+      }
     }
 
     return {
@@ -484,6 +523,23 @@ async function executeOpenAiNativeToolLoop(
       };
     }
 
+    if (step === MAX_INTERNAL_TOOL_STEPS - 1) {
+      recordRuntimeEvent(request.session, {
+        kind: "control",
+        status: "completed",
+        summary: "native tool budget fallback returned partial result",
+        detail: toolCall.name,
+      });
+      return createToolBudgetPartialResult(
+        request.session.provider,
+        model,
+        transport.transport,
+        transport.id,
+        [],
+        `Blocked another ${toolCall.name} native tool call because this turn reached the internal tool budget.`,
+      );
+    }
+
     const toolResult = await executeToolWithRuntimeActivity(request.session, {
       name: toolCall.name,
       arguments: toolCall.arguments,
@@ -497,6 +553,7 @@ async function executeOpenAiNativeToolLoop(
         output: toolResult.output,
       },
       ...(steer ? [{ role: "user", content: `Operator steer: ${steer}` }] : []),
+      ...(step === MAX_INTERNAL_TOOL_STEPS - 2 ? [{ role: "user", content: FINAL_TOOL_STEP_NUDGE }] : []),
     ];
   }
 
@@ -920,6 +977,49 @@ function formatInternalToolExchange(step: number, call: InternalToolCall, result
     `Tool result (${result.ok ? "ok" : "error"}):`,
     result.output,
   ].join("\n");
+}
+
+function createToolBudgetContinuationPrompt(basePrompt: string, toolTranscript: string[], pendingToolName: string, cycleNumber: number): string {
+  const compactTranscript = toolTranscript.slice(-4).join("\n\n");
+  return [
+    basePrompt,
+    "",
+    "Internal tool transcript:",
+    compactTranscript,
+    "",
+    `Tool budget continuation cycle ${String(cycleNumber)} started.`,
+    `The previous provider step attempted another ${pendingToolName} tool call at the tool budget boundary.`,
+    "The harness legally reset the per-cycle tool counter for one bounded continuation cycle.",
+    "Continue from the existing evidence. Prefer answering now; use tools only for the smallest missing fact.",
+  ].join("\n");
+}
+
+function createToolBudgetPartialResult(
+  provider: string,
+  model: string | null,
+  transport: "codex" | "openai",
+  adapter: ProviderSuccess["adapter"],
+  toolTranscript: string[],
+  reason: string,
+): ProviderSuccess {
+  const transcript = toolTranscript.length > 0
+    ? toolTranscript.slice(-3).join("\n\n")
+    : "No completed tool transcript was available for this fallback.";
+  return {
+    ok: true,
+    provider,
+    model,
+    transport,
+    adapter,
+    fallbackApplied: false,
+    output: [
+      "Tool budget exhausted before final assistant answer.",
+      reason,
+      "",
+      "Partial evidence from completed tools:",
+      transcript,
+    ].join("\n"),
+  };
 }
 
 function isNonActionableDeferral(output: string): boolean {
