@@ -910,12 +910,15 @@ test("summarizeTurnEvents prioritizes blocker/error lines first", async () => {
 });
 
 test("autocompletePromptBuffer completes slash commands", async () => {
-  const { autocompletePromptBuffer } = await import("../src/cli.js");
+  const { autocompletePromptBuffer, describePromptHint } = await import("../src/cli.js");
 
-  assert.deepEqual(autocompletePromptBuffer(createSession(), "/pro"), {
-    value: "/provider ",
-    hint: "/provider",
-  });
+  const completion = autocompletePromptBuffer(createSession(), "/pro");
+  assert.equal(completion.value, "/provider ");
+  assert.equal(completion.hint, "/provider — show or switch provider and transport mode");
+  assert.deepEqual(completion.suggestions.map((suggestion) => suggestion.label), ["/provider"]);
+  assert.match(describePromptHint(createSession(), "/p") ?? "", /\/provider/);
+  assert.equal(autocompletePromptBuffer(createSession(), "/h").value, "/help ");
+  assert.match(autocompletePromptBuffer(createSession(), "/h").hint ?? "", /commands:/);
 });
 
 test("autocompletePromptBuffer completes repo paths", async () => {
@@ -931,17 +934,60 @@ test("autocompletePromptBuffer completes repo paths", async () => {
       cwd,
     };
 
-    assert.deepEqual(autocompletePromptBuffer(session, "/read src/cli"), {
-      value: "/read src/cli.ts",
-      hint: "file: src/cli.ts",
-    });
+    const single = autocompletePromptBuffer(session, "/read src/cli");
+    assert.equal(single.value, "/read src/cli.ts");
+    assert.equal(single.hint, "file: src/cli.ts");
 
-    assert.deepEqual(autocompletePromptBuffer(session, "/glob *.ts src/cl"), {
-      value: "/glob *.ts src/cl",
-      hint: "suggest: file src/cli.ts · file src/clock.ts",
-    });
+    const multiple = autocompletePromptBuffer(session, "/glob *.ts src/cl");
+    assert.equal(multiple.value, "/glob *.ts src/cli.ts");
+    assert.match(multiple.hint ?? "", /file src\/cli.ts/);
+    assert.match(multiple.hint ?? "", /file src\/clock.ts/);
+
+    const selected = autocompletePromptBuffer(session, "/glob *.ts src/cl", 1);
+    assert.equal(selected.value, "/glob *.ts src/clock.ts");
   } finally {
     await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("autocompletePromptBuffer completes home and absolute path tokens without stealing slash commands", async () => {
+  const { autocompletePromptBuffer } = await import("../src/cli.js");
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-cli-paths-"));
+  const home = await mkdtemp(path.join(tmpdir(), "nexagent-home-"));
+  const originalHome = process.env.HOME;
+
+  try {
+    process.env.HOME = home;
+    await mkdir(path.join(home, "code"));
+    await mkdir(path.join(home, "code", "nexagent"));
+    await mkdir(path.join(cwd, "alpha"));
+    await mkdir(path.join(cwd, "alpine"));
+    await writeFile(path.join(cwd, "alpha", "notes.md"), "notes\n", "utf8");
+    const session = { ...createSession(), cwd };
+
+    const homeCompletion = autocompletePromptBuffer(session, "open ~/co");
+    assert.equal(homeCompletion.value, "open ~/code/");
+    assert.equal(homeCompletion.hint, "dir: ~/code/");
+
+    const absoluteCompletion = autocompletePromptBuffer(session, `${cwd}/alp`);
+    assert.equal(absoluteCompletion.value, `${cwd}/alpha/`);
+    assert.match(absoluteCompletion.hint ?? "", /directory/);
+    assert.equal(autocompletePromptBuffer(session, `${cwd}/alp`, 1).value, `${cwd}/alpine/`);
+
+    const nextSegment = autocompletePromptBuffer(session, "open ./alpha/no");
+    assert.equal(nextSegment.value, "open ./alpha/notes.md");
+
+    const slashCommand = autocompletePromptBuffer(session, "/h");
+    assert.notEqual(slashCommand.value, "/home/");
+    assert.match(slashCommand.hint ?? "", /commands:/);
+  } finally {
+    if (originalHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = originalHome;
+    }
+    await rm(cwd, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
   }
 });
 

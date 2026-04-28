@@ -330,6 +330,7 @@ interface RuntimeTuiState {
   promptHistory: string[];
   promptHistoryIndex: number;
   promptDraft: string | null;
+  completionIndex: number;
   historyPopupOpen: boolean;
   historyPopupIndex: number;
   modelPickerOpen: boolean;
@@ -351,6 +352,19 @@ interface RuntimeTuiState {
   cancelRequested: boolean;
   steerState: string | null;
   steerMessage: string | null;
+}
+
+export interface PromptCompletionSuggestion {
+  value: string;
+  label: string;
+  hint: string;
+}
+
+export interface PromptCompletionResult {
+  value: string;
+  hint: string | null;
+  suggestions: PromptCompletionSuggestion[];
+  selectedIndex: number;
 }
 
 interface TerminalSize {
@@ -2422,21 +2436,27 @@ function isWithinRoot(targetPath: string, rootPath: string): boolean {
 export function autocompletePromptBuffer(
   session: Pick<RuntimeSession, "cwd">,
   input: string,
-): { value: string; hint: string | null } {
+  selectedIndex = 0,
+): PromptCompletionResult {
   const trimmedLeft = input.replace(/^\s+/, "");
 
   if (trimmedLeft.startsWith("$")) {
-    return completeSkillShorthand(session.cwd, trimmedLeft);
+    return completeSkillShorthand(session.cwd, trimmedLeft, selectedIndex);
   }
 
   if (trimmedLeft.startsWith("/")) {
     if (/^\/\S*$/.test(input)) {
-      return completeSlashCommand(input);
+      const commandCompletion = completeSlashCommand(input, selectedIndex);
+      if (commandCompletion.suggestions.length > 0 || commandCompletion.value !== input) {
+        return commandCompletion;
+      }
+      const pathCompletion = completeFreeformPath(session.cwd, input, selectedIndex);
+      return pathCompletion ?? emptyCompletion(input);
     }
-    return completeCommandPath(session.cwd, input);
+    return completeCommandPath(session.cwd, input, selectedIndex);
   }
 
-  return { value: input, hint: null };
+  return completeFreeformPath(session.cwd, input, selectedIndex) ?? emptyCompletion(input);
 }
 
 export function describePromptHint(session: Pick<RuntimeSession, "cwd">, input: string): string | null {
@@ -2462,7 +2482,7 @@ export function describePromptHint(session: Pick<RuntimeSession, "cwd">, input: 
   return completeCommandPath(session.cwd, input).hint;
 }
 
-function completeSkillShorthand(cwd: string, input: string): { value: string; hint: string | null } {
+function completeSkillShorthand(cwd: string, input: string, selectedIndex = 0): PromptCompletionResult {
   const parsed = parseSkillShorthand(input);
   const skills = discoverSkills(cwd);
   const needle = parsed ? normalizeSkillToken(parsed.skillName) : "";
@@ -2472,21 +2492,33 @@ function completeSkillShorthand(cwd: string, input: string): { value: string; hi
     .slice(0, 6);
 
   if (matches.length === 0) {
-    return { value: input, hint: null };
+    return emptyCompletion(input);
   }
 
   if (matches.length === 1) {
     const completed = `$${matches[0].name} `;
-    return { value: completed, hint: matches[0].name };
+    return completionResult(completed, matches[0].name, [{
+      value: completed,
+      label: `$${matches[0].name}`,
+      hint: matches[0].source,
+    }], 0);
   }
 
   const common = longestCommonPrefix(matches.map((s) => s.name));
   const prefix = needle.length > 0 ? `$${common}` : "$";
   const suggestions = matches.map((s) => `$${s.name}`).join(" · ");
-  return {
-    value: prefix.length > input.length ? prefix : input,
-    hint: `suggest: ${suggestions}`,
-  };
+  const completionSuggestions = matches.map((s) => ({
+    value: `$${s.name} `,
+    label: `$${s.name}`,
+    hint: s.source,
+  }));
+  const selected = clampIndex(selectedIndex, completionSuggestions.length);
+  return completionResult(
+    prefix.length > input.length ? prefix : completionSuggestions[selected]?.value ?? input,
+    `suggest: ${suggestions}`,
+    completionSuggestions,
+    selected,
+  );
 }
 
 function describeSkillHint(cwd: string, input: string): string | null {
@@ -2513,35 +2545,49 @@ function describeSkillHint(cwd: string, input: string): string | null {
   return `skills: ${matches.map((s) => s.name).join(" · ")} +${skills.length - matches.length} more`;
 }
 
-function completeSlashCommand(input: string): { value: string; hint: string | null } {
+function completeSlashCommand(input: string, selectedIndex = 0): PromptCompletionResult {
   const partial = input.toLowerCase();
-  const matches = COMMAND_CATALOG.map((entry) => entry.name).filter((name) => name.startsWith(partial));
+  const matches = COMMAND_CATALOG.filter((entry) => entry.name.startsWith(partial));
   if (matches.length === 0) {
-    return { value: input, hint: null };
+    return emptyCompletion(input);
   }
   if (matches.length === 1) {
-    return { value: `${matches[0]} `, hint: matches[0] };
+    const match = matches[0];
+    return completionResult(`${match.name} `, `${match.name} — ${match.description}`, [{
+      value: `${match.name} `,
+      label: match.name,
+      hint: match.description,
+    }], 0);
   }
 
-  const common = longestCommonPrefix(matches);
+  const names = matches.map((entry) => entry.name);
+  const common = longestCommonPrefix(names);
+  const suggestions = matches.map((entry) => ({
+    value: `${entry.name} `,
+    label: entry.name,
+    hint: entry.description,
+  }));
+  const selected = clampIndex(selectedIndex, suggestions.length);
   return {
-    value: common.length > partial.length ? common : input,
-    hint: `suggest: ${matches.join(" · ")}`,
+    value: common.length > partial.length ? common : suggestions[selected]?.value ?? input,
+    hint: `commands: ${matches.slice(0, 6).map((entry) => `${entry.name} — ${entry.description}`).join(" · ")}`,
+    suggestions,
+    selectedIndex: selected,
   };
 }
 
-function completeCommandPath(cwd: string, input: string): { value: string; hint: string | null } {
+function completeCommandPath(cwd: string, input: string, selectedIndex = 0): PromptCompletionResult {
   const parts = input.split(/\s+/);
   const command = parts[0] ?? "";
   const pathIndex = SECOND_ARG_PATH_COMMANDS.has(command) ? 2 : 1;
   if (!PATH_COMPLETION_COMMANDS.has(command) && !(SECOND_ARG_PATH_COMMANDS.has(command) && parts.length >= 3)) {
-    return { value: input, hint: null };
+    return emptyCompletion(input);
   }
 
   const partialPath = parts[pathIndex] ?? "";
-  const completion = completePathFromCwd(cwd, partialPath);
+  const completion = completePathFromCwd(cwd, partialPath, selectedIndex);
   if (!completion) {
-    return { value: input, hint: null };
+    return emptyCompletion(input);
   }
 
   const nextParts = [...parts];
@@ -2549,14 +2595,41 @@ function completeCommandPath(cwd: string, input: string): { value: string; hint:
   return {
     value: nextParts.join(" "),
     hint: completion.hint,
+    suggestions: completion.suggestions.map((suggestion) => ({
+      ...suggestion,
+      value: withReplacedPart(parts, pathIndex, suggestion.value),
+    })),
+    selectedIndex: completion.selectedIndex,
   };
 }
 
-function completePathFromCwd(cwd: string, partialPath: string): { value: string; hint: string | null } | null {
+function completeFreeformPath(cwd: string, input: string, selectedIndex = 0): PromptCompletionResult | null {
+  const match = input.match(/(?:^|\s)(~\/[^\s]*|~|\.{1,2}\/[^\s]*|\/[^\s]*|[^\s]*\/[^\s]*)$/);
+  if (!match || match.index === undefined) {
+    return null;
+  }
+  const token = match[1] ?? "";
+  const tokenStart = match.index + match[0].length - token.length;
+  const completion = completePathFromCwd(cwd, token, selectedIndex);
+  if (!completion) {
+    return null;
+  }
+  return completionResult(
+    `${input.slice(0, tokenStart)}${completion.value}`,
+    completion.hint,
+    completion.suggestions.map((suggestion) => ({
+      ...suggestion,
+      value: `${input.slice(0, tokenStart)}${suggestion.value}`,
+    })),
+    completion.selectedIndex,
+  );
+}
+
+function completePathFromCwd(cwd: string, partialPath: string, selectedIndex = 0): PromptCompletionResult | null {
   const normalizedInput = partialPath.length > 0 ? partialPath : ".";
-  const basePath = normalizedInput.endsWith("/") ? normalizedInput : path.dirname(normalizedInput);
-  const searchDir = path.resolve(cwd, basePath === "." ? "" : basePath);
+  const baseToken = normalizedInput.endsWith("/") ? normalizedInput : path.dirname(normalizedInput);
   const needle = normalizedInput.endsWith("/") ? "" : path.basename(normalizedInput);
+  const searchDir = resolveCompletionSearchDir(cwd, baseToken);
 
   let entries: Array<{ label: string; isDirectory: boolean }>;
   try {
@@ -2574,29 +2647,105 @@ function completePathFromCwd(cwd: string, partialPath: string): { value: string;
 
   const labels = entries.map((entry) => entry.label);
   const common = longestCommonPrefix(labels);
-  const resolvedBase = basePath === "." ? "" : basePath.replace(/\/+$/, "");
-  const prefix = resolvedBase ? `${resolvedBase}/` : "";
+  const prefix = formatCompletionPrefix(baseToken);
+  const suggestions = entries.slice(0, 8).map((entry) => {
+    const value = `${prefix}${entry.label}${entry.isDirectory ? "/" : ""}`;
+    return {
+      value,
+      label: value,
+      hint: entry.isDirectory ? "directory" : "file",
+    };
+  });
+  const selected = clampIndex(selectedIndex, suggestions.length);
 
   if (entries.length === 1) {
     const only = entries[0];
     const completed = `${prefix}${only.label}`;
-    return {
-      value: only.isDirectory ? `${completed}/` : completed,
-      hint: only.isDirectory ? `dir: ${completed}/` : `file: ${completed}`,
-    };
+    return completionResult(
+      only.isDirectory ? `${completed}/` : completed,
+      only.isDirectory ? `dir: ${completed}/` : `file: ${completed}`,
+      suggestions,
+      0,
+    );
   }
 
   if (common.length > needle.length) {
-    return {
-      value: `${prefix}${common}`,
-      hint: `suggest: ${entries.slice(0, 4).map((entry) => `${entry.isDirectory ? "dir" : "file"} ${prefix}${entry.label}${entry.isDirectory ? "/" : ""}`).join(" · ")}`,
-    };
+    return completionResult(
+      `${prefix}${common}`,
+      `suggest: ${suggestions.slice(0, 6).map((entry) => `${entry.hint} ${entry.label}`).join(" · ")}`,
+      suggestions,
+      selected,
+    );
   }
 
+  return completionResult(
+    suggestions[selected]?.value ?? partialPath,
+    `suggest: ${suggestions.slice(0, 6).map((entry) => `${entry.hint} ${entry.label}`).join(" · ")}`,
+    suggestions,
+    selected,
+  );
+}
+
+function emptyCompletion(input: string): PromptCompletionResult {
   return {
-    value: partialPath,
-    hint: `suggest: ${entries.slice(0, 4).map((entry) => `${entry.isDirectory ? "dir" : "file"} ${prefix}${entry.label}${entry.isDirectory ? "/" : ""}`).join(" · ")}`,
+    value: input,
+    hint: null,
+    suggestions: [],
+    selectedIndex: 0,
   };
+}
+
+function completionResult(
+  value: string,
+  hint: string | null,
+  suggestions: PromptCompletionSuggestion[],
+  selectedIndex: number,
+): PromptCompletionResult {
+  return {
+    value,
+    hint,
+    suggestions,
+    selectedIndex,
+  };
+}
+
+function clampIndex(index: number, length: number): number {
+  if (length <= 0) {
+    return 0;
+  }
+  return Math.max(0, Math.min(length - 1, index));
+}
+
+function withReplacedPart(parts: string[], index: number, value: string): string {
+  const nextParts = [...parts];
+  nextParts[index] = value;
+  return nextParts.join(" ");
+}
+
+function resolveCompletionSearchDir(cwd: string, baseToken: string): string {
+  if (baseToken === "." || baseToken.length === 0) {
+    return cwd;
+  }
+  if (baseToken === "~") {
+    return homedir();
+  }
+  if (baseToken.startsWith("~/")) {
+    return path.join(homedir(), baseToken.slice(2));
+  }
+  if (path.isAbsolute(baseToken)) {
+    return baseToken;
+  }
+  return path.resolve(cwd, baseToken);
+}
+
+function formatCompletionPrefix(baseToken: string): string {
+  if (baseToken === "." || baseToken.length === 0) {
+    return "";
+  }
+  if (baseToken === "~") {
+    return "~/";
+  }
+  return `${baseToken.replace(/\/+$/, "")}/`;
 }
 
 function longestCommonPrefix(values: string[]): string {
@@ -2856,6 +3005,10 @@ async function runRuntimeTui(session: RuntimeSession): Promise<void> {
       state.promptDraft = null;
     };
 
+    const resetCompletionNavigation = () => {
+      state.completionIndex = 0;
+    };
+
     const closeHistoryPopup = () => {
       state.historyPopupOpen = false;
       state.historyPopupIndex = 0;
@@ -2980,6 +3133,16 @@ async function runRuntimeTui(session: RuntimeSession): Promise<void> {
       const maxIndex = availableModels.length - 1;
       state.modelPickerIndex = Math.max(0, Math.min(maxIndex, state.modelPickerIndex + (direction === -1 ? -1 : 1)));
       render();
+    };
+
+    const navigatePromptCompletion = (direction: -1 | 1) => {
+      const completion = autocompletePromptBuffer(session, state.promptBuffer, state.completionIndex);
+      if (completion.suggestions.length <= 1) {
+        return false;
+      }
+      state.completionIndex = clampIndex(state.completionIndex + direction, completion.suggestions.length);
+      render();
+      return true;
     };
 
     const commitHistoryPopupSelection = () => {
@@ -3519,11 +3682,12 @@ async function runRuntimeTui(session: RuntimeSession): Promise<void> {
       }
 
       if (key === "\t") {
-        const completion = autocompletePromptBuffer(session, state.promptBuffer);
+        const completion = autocompletePromptBuffer(session, state.promptBuffer, state.completionIndex);
         if (completion.value !== state.promptBuffer) {
           state.promptBuffer = completion.value;
           state.promptCursor = state.promptBuffer.length;
           resetHistoryNavigation();
+          resetCompletionNavigation();
           render();
         }
         return;
@@ -3542,6 +3706,7 @@ async function runRuntimeTui(session: RuntimeSession): Promise<void> {
           state.promptBuffer = `${state.promptBuffer.slice(0, state.promptCursor - 1)}${state.promptBuffer.slice(state.promptCursor)}`;
           state.promptCursor -= 1;
           resetHistoryNavigation();
+          resetCompletionNavigation();
           render();
         }
         return;
@@ -3572,6 +3737,9 @@ async function runRuntimeTui(session: RuntimeSession): Promise<void> {
           navigateHistoryPopup(-1);
           return;
         }
+        if (state.promptBuffer.length > 0 && navigatePromptCompletion(-1)) {
+          return;
+        }
         if (getConfiguredMouseMode(session) === "auto" && state.promptBuffer.length === 0) {
           scrollChatBy(3);
           return;
@@ -3587,6 +3755,9 @@ async function runRuntimeTui(session: RuntimeSession): Promise<void> {
         }
         if (state.historyPopupOpen) {
           navigateHistoryPopup(1);
+          return;
+        }
+        if (state.promptBuffer.length > 0 && navigatePromptCompletion(1)) {
           return;
         }
         if (getConfiguredMouseMode(session) === "auto" && state.promptBuffer.length === 0) {
@@ -3732,6 +3903,7 @@ async function runRuntimeTui(session: RuntimeSession): Promise<void> {
         state.promptCursor += key.length;
         state.selectedSection = "agent";
         resetHistoryNavigation();
+        resetCompletionNavigation();
         render();
       }
     };
@@ -3813,6 +3985,7 @@ function createDefaultRuntimeTuiState(view: RuntimeTuiView): RuntimeTuiState {
     promptHistory: [],
     promptHistoryIndex: -1,
     promptDraft: null,
+    completionIndex: 0,
     historyPopupOpen: false,
     historyPopupIndex: 0,
     modelPickerOpen: false,
@@ -4057,9 +4230,25 @@ function stableVerbIndex(source: string): number {
   return hash % SPINNER_VERBS.length;
 }
 
+function formatCompletionPreview(completion: PromptCompletionResult | null, fallbackHint: string | null): string {
+  if (!completion || completion.suggestions.length === 0) {
+    return `hint ${fallbackHint ?? "none"}`;
+  }
+  const selected = completion.suggestions[completion.selectedIndex];
+  const preview = completion.value.trim().length > 0 ? completion.value : selected?.value ?? "";
+  const menu = completion.suggestions
+    .slice(0, 6)
+    .map((suggestion, index) => `${index === completion.selectedIndex ? ">" : " "} ${suggestion.label} — ${suggestion.hint}`)
+    .join("  ");
+  return `preview ${preview}  ${menu}`;
+}
+
 function renderAgentPanel(state: RuntimeTuiState, width: number): string[] {
   const transcript = state.transcript.length > 0 ? state.transcript : ["assistant: no messages yet"];
   const composer = renderPromptBuffer(state.promptBuffer, state.promptCursor);
+  const completion = state.promptBuffer.length > 0
+    ? autocompletePromptBuffer({ cwd: lookupValue(state.view.metadata, "cwd") }, state.promptBuffer, state.completionIndex)
+    : null;
   const composerHint = state.promptBuffer.length > 0 ? describePromptHint({ cwd: lookupValue(state.view.metadata, "cwd") }, state.promptBuffer) : "start typing or use slash command";
   const promptComposerLines = renderPromptForComposer(composer, width);
   const lines = [
@@ -4074,7 +4263,7 @@ function renderAgentPanel(state: RuntimeTuiState, width: number): string[] {
     "",
     padLine("composer", width),
     ...promptComposerLines,
-    ...wrapText(`hint: ${composerHint ?? "none"}`, width),
+    ...wrapText(formatCompletionPreview(completion, composerHint), width),
     padLine("transcript", width),
     ...transcript.flatMap((entry) => wrapText(entry, width)),
   ];
@@ -4091,9 +4280,8 @@ function renderWorkspacePanel(
   }
 
   const composer = renderPromptBuffer(state.promptBuffer, state.promptCursor);
-  const completion = state.promptBuffer.length > 0 ? autocompletePromptBuffer({ cwd: lookupValue(state.view.metadata, "cwd") }, state.promptBuffer) : null;
+  const completion = state.promptBuffer.length > 0 ? autocompletePromptBuffer({ cwd: lookupValue(state.view.metadata, "cwd") }, state.promptBuffer, state.completionIndex) : null;
   const composerHint = state.promptBuffer.length > 0 ? describePromptHint({ cwd: lookupValue(state.view.metadata, "cwd") }, state.promptBuffer) : "start typing or use slash command";
-  const suggestion = completion && completion.value !== state.promptBuffer ? completion.value : null;
   const promptComposerLines = renderPromptForComposer(composer, width);
   const chatLines = renderConversationTranscript(state.chatHistory, width);
   const footerStatus = buildFooterStatus(state, width);
@@ -4122,8 +4310,7 @@ function renderWorkspacePanel(
     ...(state.pendingImageAttachment
       ? wrapText(`image attached ${state.pendingImageAttachment.path}`, width).map((line) => tintLine(line, ANSI.preview))
       : []),
-    ...(suggestion ? wrapText(`preview ${suggestion}`, width).map((line) => tintLine(line, ANSI.preview)) : []),
-    ...(!suggestion && composerHint ? wrapText(`hint ${composerHint}`, width).map((line) => tintLine(line, ANSI.dim)) : []),
+    ...wrapText(formatCompletionPreview(completion, composerHint), width).map((line) => tintLine(line, completion?.suggestions.length ? ANSI.preview : ANSI.dim)),
     tintLine(truncateLine(composerMeta, width), ANSI.footer),
   ];
   const composerLines = [
@@ -4239,16 +4426,14 @@ function renderIdleHomePanel(
     "type prompt below",
   ].flatMap((line) => wrapText(line, rightWidth));
   const composer = renderPromptBuffer(state.promptBuffer, state.promptCursor);
-  const completion = state.promptBuffer.length > 0 ? autocompletePromptBuffer({ cwd }, state.promptBuffer) : null;
+  const completion = state.promptBuffer.length > 0 ? autocompletePromptBuffer({ cwd }, state.promptBuffer, state.completionIndex) : null;
   const composerHint = state.promptBuffer.length > 0 ? describePromptHint({ cwd }, state.promptBuffer) : "start typing or use slash command";
-  const suggestion = completion && completion.value !== state.promptBuffer ? completion.value : null;
   const promptComposerLines = renderPromptForComposer(composer, width);
   const promptBlock = [
     tintLine("prompt", ANSI.agent),
     ...promptComposerLines.map((line) => tintLine(line, ANSI.prompt)),
-    ...(suggestion
-      ? wrapText(`preview ${suggestion}`, width).map((line) => tintLine(line, ANSI.preview))
-      : wrapText(`hint ${composerHint}`, width).map((line) => tintLine(line, ANSI.dim))),
+    ...wrapText(formatCompletionPreview(completion, composerHint), width)
+      .map((line) => tintLine(line, completion?.suggestions.length ? ANSI.preview : ANSI.dim)),
   ];
   const footerStatus = buildFooterStatus(state, width);
 
