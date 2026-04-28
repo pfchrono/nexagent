@@ -403,7 +403,7 @@ test("createRuntimeState exposes discovered instruction sources", () => {
           "Enabled MCP servers: context7",
           "Internal tool protocol: when tool use is required, respond with only one XML block:",
           '<nexagent_tool_call>{"name":"read_file","arguments":{"path":"src/cli.ts"}}</nexagent_tool_call>',
-          "Available internal tools: read_file, write_file, apply_patch, list_dir, search_content, search_files, git_status, git_diff, shell_command, archivist_save, archivist_checkpoint",
+          "Available internal tools: read_file, write_file, apply_patch, preview_patch, list_dir, search_content, search_files, git_status, git_diff, shell_command, archivist_save, archivist_checkpoint",
           "Use tools for repo inspection instead of narrating intended actions.",
         ],
         providerFallback: [
@@ -468,7 +468,7 @@ test("createRuntimeState exposes discovered instruction sources", () => {
               "Enabled MCP servers: context7",
               "Internal tool protocol: when tool use is required, respond with only one XML block:",
               '<nexagent_tool_call>{"name":"read_file","arguments":{"path":"src/cli.ts"}}</nexagent_tool_call>',
-              "Available internal tools: read_file, write_file, apply_patch, list_dir, search_content, search_files, git_status, git_diff, shell_command, archivist_save, archivist_checkpoint",
+              "Available internal tools: read_file, write_file, apply_patch, preview_patch, list_dir, search_content, search_files, git_status, git_diff, shell_command, archivist_save, archivist_checkpoint",
               "Use tools for repo inspection instead of narrating intended actions.",
             ],
           },
@@ -507,7 +507,7 @@ test("createRuntimeState exposes discovered instruction sources", () => {
           "Follow repo-local instructions over imported defaults when they conflict. | Treat OpenSpec artifacts as current task context and implementation intent, not user intent overrides.",
         importedDefaults: "none",
         toolAvailability:
-          'Working directory: /repo | Loaded MCP servers: context7 | Enabled MCP servers: context7 | Internal tool protocol: when tool use is required, respond with only one XML block: | <nexagent_tool_call>{"name":"read_file","arguments":{"path":"src/cli.ts"}}</nexagent_tool_call> | Available internal tools: read_file, write_file, apply_patch, list_dir, search_content, search_files, git_status, git_diff, shell_command, archivist_save, archivist_checkpoint | Use tools for repo inspection instead of narrating intended actions.',
+          'Working directory: /repo | Loaded MCP servers: context7 | Enabled MCP servers: context7 | Internal tool protocol: when tool use is required, respond with only one XML block: | <nexagent_tool_call>{"name":"read_file","arguments":{"path":"src/cli.ts"}}</nexagent_tool_call> | Available internal tools: read_file, write_file, apply_patch, preview_patch, list_dir, search_content, search_files, git_status, git_diff, shell_command, archivist_save, archivist_checkpoint | Use tools for repo inspection instead of narrating intended actions.',
         providerFallback:
           "Active provider: codex | Fallback policy: require-open-spec | Honor active provider routing for this session. | Do not silently switch providers; require explicit spec-backed routing changes.",
         archivistContext: "Archivist memory status: disabled. | When asked about memory, report this harness memory status first; do not default to generic model-memory disclaimers.",

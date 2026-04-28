@@ -3,12 +3,14 @@ import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "n
 import path from "node:path";
 
 import { checkpointArchivistSession, saveArchivistMemory } from "./archivist.js";
+import { buildPatchPreview, searchFilesWithIgnore } from "./core-helpers.js";
 import type { RuntimeSession } from "./session.js";
 
 export type InternalToolName =
   | "read_file"
   | "write_file"
   | "apply_patch"
+  | "preview_patch"
   | "list_dir"
   | "search_content"
   | "search_files"
@@ -91,6 +93,21 @@ export function getInternalToolDefinitions(): readonly InternalToolDefinition[] 
     {
       name: "apply_patch",
       description: "Apply exact text replacement inside existing UTF-8 file inside repo-local allowed roots.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "File path relative to current working directory." },
+          find: { type: "string", description: "Exact text to replace." },
+          replace: { type: "string", description: "Replacement text." },
+          replaceAll: { type: "boolean", description: "Replace every exact match when true." },
+        },
+        required: ["path", "find", "replace"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "preview_patch",
+      description: "Preview exact text replacement as unified diff without writing file.",
       inputSchema: {
         type: "object",
         properties: {
@@ -235,6 +252,14 @@ export function executeInternalTool(session: RuntimeSession, call: InternalToolC
         asString(call.arguments?.replace, ""),
         asBoolean(call.arguments?.replaceAll),
       );
+    case "preview_patch":
+      return executePreviewPatchTool(
+        session,
+        asString(call.arguments?.path, "."),
+        asString(call.arguments?.find, ""),
+        asString(call.arguments?.replace, ""),
+        asBoolean(call.arguments?.replaceAll),
+      );
     case "list_dir":
       return executeListDirTool(session, asOptionalString(call.arguments?.path));
     case "search_content":
@@ -275,6 +300,7 @@ export function classifyInternalToolRisk(call: InternalToolCall): "low" | "guard
   return call.name === "shell_command"
     || call.name === "write_file"
     || call.name === "apply_patch"
+    || call.name === "preview_patch"
     || call.name === "archivist_save"
     || call.name === "archivist_checkpoint"
     ? "guarded"
@@ -396,6 +422,45 @@ function executeApplyPatchTool(
   }
 }
 
+function executePreviewPatchTool(
+  session: RuntimeSession,
+  inputPath: string,
+  find: string,
+  replace: string,
+  replaceAll: boolean,
+): InternalToolResult {
+  if (!find.length) {
+    return fail("preview_patch", "find required");
+  }
+
+  const targetPath = resolveRepoPath(session, inputPath);
+  const policyFailure = validateRepoToolPath(session, targetPath);
+  if (policyFailure) {
+    return fail("preview_patch", policyFailure);
+  }
+
+  try {
+    const stats = statSync(targetPath);
+    if (!stats.isFile()) {
+      return fail("preview_patch", `${formatToolPath(session, targetPath)} is not a file`);
+    }
+
+    const current = readFileSync(targetPath, "utf8");
+    const occurrences = current.split(find).length - 1;
+    if (occurrences === 0) {
+      return fail("preview_patch", `patch target not found in ${formatToolPath(session, targetPath)}`);
+    }
+    if (!replaceAll && occurrences > 1) {
+      return fail("preview_patch", `patch target ambiguous in ${formatToolPath(session, targetPath)}; ${String(occurrences)} matches`);
+    }
+
+    const next = replaceAll ? current.split(find).join(replace) : current.replace(find, replace);
+    return ok("preview_patch", buildPatchPreview(formatToolPath(session, targetPath), current, next));
+  } catch (error) {
+    return fail("preview_patch", formatToolError(targetPath, error));
+  }
+}
+
 function executeSearchContentTool(session: RuntimeSession, pattern: string, inputPath?: string): InternalToolResult {
   if (!pattern.trim()) {
     return fail("search_content", "pattern required");
@@ -443,26 +508,15 @@ function executeSearchFilesTool(session: RuntimeSession, pattern: string, inputP
   }
 
   try {
-    if (hasRipgrep()) {
-      const output = execFileSync("rg", ["--files", "-g", pattern, targetPath], {
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "pipe"],
-      }).trim();
-      return ok("search_files", output.length > 0 ? normalizePathMatchLines(output, targetPath) : "(no matches)");
-    }
-  } catch (error) {
-    const result = error as NodeJS.ErrnoException & { status?: number; stderr?: string | Buffer };
-    if (result.status === 1) {
-      return ok("search_files", "(no matches)");
-    }
-    return fail("search_files", formatToolError(targetPath, result.stderr ? String(result.stderr) : error));
-  }
-
-  try {
-    const matches = findPathMatches(targetPath, pattern).slice(0, 100);
+    const matches = searchFilesWithIgnore({ cwd: targetPath, pattern, limit: 100 });
     return ok("search_files", matches.length > 0 ? matches.join("\n") : "(no matches)");
   } catch (error) {
-    return fail("search_files", formatToolError(targetPath, error));
+    try {
+      const matches = findPathMatches(targetPath, pattern).slice(0, 100);
+      return ok("search_files", matches.length > 0 ? matches.join("\n") : "(no matches)");
+    } catch {
+      return fail("search_files", formatToolError(targetPath, error));
+    }
   }
 }
 

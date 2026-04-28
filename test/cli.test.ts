@@ -149,6 +149,7 @@ test("parseCommand preserves empty run prompt for resolvePrompt", async () => {
   assert.deepEqual(parseCommand(["run", "say", "hi"]), { kind: "run", prompt: "say hi", yolo: false });
   assert.deepEqual(parseCommand(["run"]), { kind: "run", prompt: null, yolo: false });
   assert.deepEqual(parseCommand(["--yolo"]), { kind: "inspect", yolo: true });
+  assert.deepEqual(parseCommand(["--opentui"]), { kind: "inspect", yolo: false, openTui: true });
   assert.deepEqual(parseCommand(["--yolo", "run", "say", "hi"]), { kind: "run", prompt: "say hi", yolo: true });
   assert.deepEqual(parseCommand(["run", "--yolo", "say", "hi"]), { kind: "run", prompt: "say hi", yolo: true });
 });
@@ -1190,7 +1191,7 @@ test("createRuntimeInspectPayload includes instruction layer summaries", async (
   assert.match(payload.instructionLayers.taskContext, /OpenSpec artifacts as current task context/);
   assert.match(payload.instructionLayers.taskContext, /openspec includes changes, SPEC\.md/);
   assert.match(payload.instructionLayers.toolAvailability, /Working directory: \/repo/);
-  assert.match(payload.instructionLayers.toolAvailability, /Available internal tools: read_file, write_file, apply_patch, list_dir, search_content, search_files, git_status, git_diff, shell_command, archivist_save, archivist_checkpoint/);
+  assert.match(payload.instructionLayers.toolAvailability, /Available internal tools: read_file, write_file, apply_patch, preview_patch, list_dir, search_content, search_files, git_status, git_diff, shell_command, archivist_save, archivist_checkpoint/);
   assert.match(payload.instructionLayers.providerFallback, /Active provider: codex/);
   assert.equal(payload.instructionLayers.stableSections, "identity, executionGuidance, repoBehavior, taskContext, toolAvailability, providerFallback");
   assert.equal(payload.instructionLayers.dynamicSections, "archivistContext");

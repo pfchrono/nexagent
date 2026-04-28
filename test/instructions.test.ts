@@ -229,7 +229,7 @@ test("assemblePrompt keeps precedence layers distinct before serialization", asy
       "Enabled MCP servers: context7",
       "Internal tool protocol: when tool use is required, respond with only one XML block:",
       '<nexagent_tool_call>{"name":"read_file","arguments":{"path":"src/cli.ts"}}</nexagent_tool_call>',
-      "Available internal tools: read_file, write_file, apply_patch, list_dir, search_content, search_files, git_status, git_diff, shell_command, archivist_save, archivist_checkpoint",
+      "Available internal tools: read_file, write_file, apply_patch, preview_patch, list_dir, search_content, search_files, git_status, git_diff, shell_command, archivist_save, archivist_checkpoint",
       "Use tools for repo inspection instead of narrating intended actions.",
     ]);
     assert.deepEqual(assembled.layers.providerFallback, [

@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import process from "node:process";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { executeProviderRequest, type ImageAttachment } from "./provider.js";
@@ -15,6 +15,17 @@ import { loadPersistedPromptHistory, savePersistedPromptHistory, savePersistedRu
 import { executeInternalTool, getInternalToolDefinitions } from "./runtime/tools.js";
 import { CODEX_MODEL_CATALOG, DEFAULT_CODEX_MODEL, getCodexModelDefinition, normalizeCodexModel } from "./models.js";
 import { ANSI, padLine, padVisibleLine, renderRule, renderScreen, resetScreenRenderer, tintLine, truncateLine, wrapText } from "./tui/primitives.js";
+import { autocompletePromptBuffer, describePromptHint, type PromptCompletionResult } from "./cli/autocomplete.js";
+import { COMMAND_CATALOG } from "./cli/catalog.js";
+import {
+  discoverSkills,
+  formatSkillList,
+  normalizeSkillToken,
+  rankClosestSkills,
+  readSkillContent,
+  resolveSkill,
+  toSkillCommandFromShorthand,
+} from "./cli/skills.js";
 import {
   applyTransportMode,
   applyYoloMode,
@@ -35,6 +46,9 @@ import {
   syncRuntimeSession,
   type RuntimeSession,
 } from "./runtime/session.js";
+
+export { autocompletePromptBuffer, describePromptHint } from "./cli/autocomplete.js";
+export type { PromptCompletionResult, PromptCompletionSuggestion } from "./cli/autocomplete.js";
 
 const SPINNER_FRAMES = ["-", "\\", "|", "/"] as const;
 const NEXAGENT_EMBLEM_FRAMES = ["◜◆◝", "◠◆◡", "◟◆◞", "◡◆◠"] as const;
@@ -274,41 +288,6 @@ const SPINNER_VERBS = [
 ] as const;
 const TUI_SECTIONS = ["overview", "routing", "auth", "instructions", "mcp", "hooks", "imports", "archivist", "agent"] as const;
 const KEY_HINT = "Keys: Enter send · Esc clear · Tab complete · Alt+V paste-image (Ctrl+Alt+V) · ↑/↓ history · Ctrl+R picker · Ctrl+T trace · Ctrl+Y/N approve/reject · Ctrl+O mouse-mode · Ctrl+L focus · Ctrl+C copy/exit · /reload · /quit";
-const COMMAND_CATALOG = [
-  { name: "/help", usage: "/help", description: "show available runtime commands" },
-  { name: "/reload", usage: "/reload", description: "reload runtime state from repo config" },
-  { name: "/quit", usage: "/quit", description: "exit interactive TTY session" },
-  { name: "/continue", usage: "/continue", description: "continue active turn if clear" },
-  { name: "/finish", usage: "/finish", description: "finalize current turn only when completion proof exists" },
-  { name: "/login", usage: "/login [status]", description: "check or launch Codex login" },
-  { name: "/codex", usage: "/codex [status|off]", description: "activate Codex provider preference" },
-  { name: "/provider", usage: "/provider [status|name|transport ...] [--verbose]", description: "show or switch provider and transport mode" },
-  { name: "/model", usage: "/model [status|list|name]", description: "show or set model for active provider" },
-  { name: "/skill", usage: "/skill [name] [args...]", description: "list skills or resolve and route a skill by name" },
-  { name: "/mouse", usage: "/mouse [status|mode <auto|scroll|select>]", description: "show or set transcript mouse interaction mode" },
-  { name: "/status", usage: "/status [--verbose]", description: "show runtime, repo, auth, and style status (compact default)" },
-  { name: "/caveman-mode", usage: "/caveman-mode [on|off|status]", description: "toggle compressed caveman response style" },
-  { name: "/deadpoolmode", usage: "/deadpoolmode [on|off|status]", description: "toggle Deadpool prose style overlay" },
-  { name: "/statusline", usage: "/statusline [on|off|status]", description: "toggle compact runtime statusline footer" },
-  { name: "/approval", usage: "/approval [on|off|status|approve|reject]", description: "control guarded-tool approval gate" },
-  { name: "/cancel", usage: "/cancel", description: "request cancel for pending operation" },
-  { name: "/steer", usage: "/steer <message>", description: "queue operator steer note for next tool/model step" },
-  { name: "/compact", usage: "/compact [status]", description: "compact session context now or inspect compaction state" },
-  { name: "/tools", usage: "/tools [--verbose]", description: "show repo-local tool policy and safety guards" },
-  { name: "/pwd", usage: "/pwd", description: "show current working directory" },
-  { name: "/ls", usage: "/ls [path]", description: "list directory contents from session cwd" },
-  { name: "/read", usage: "/read <path>", description: "read text file contents" },
-  { name: "/find", usage: "/find <text> [path]", description: "search text in repo files" },
-  { name: "/glob", usage: "/glob <pattern> [path]", description: "match repo files by glob pattern" },
-  { name: "/rg", usage: "/rg <pattern> [path]", description: "search repo files with ripgrep" },
-  { name: "/diff", usage: "/diff [path]", description: "show bounded git diff for repo or one path" },
-  { name: "/hooks", usage: "/hooks", description: "inspect repo-local hook policy" },
-  { name: "/memory", usage: "/memory [--verbose|save <text>|checkpoint [reason]|session [focus]]", description: "inspect or persist archivist memory/checkpoints" },
-  { name: "/attach", usage: "/attach <image-path>", description: "attach local image for next prompt (http transports only)" },
-  { name: "/detach", usage: "/detach", description: "clear queued image attachment" },
-] as const;
-const PATH_COMPLETION_COMMANDS = new Set(["/ls", "/read", "/diff"]);
-const SECOND_ARG_PATH_COMMANDS = new Set(["/find", "/glob", "/rg"]);
 const APPROVE_PROMPT_ALIASES = new Set(["approve", "approved"]);
 const REJECT_PROMPT_ALIASES = new Set(["reject", "rejected", "deny", "denied"]);
 
@@ -355,19 +334,6 @@ interface RuntimeTuiState {
   steerMessage: string | null;
 }
 
-export interface PromptCompletionSuggestion {
-  value: string;
-  label: string;
-  hint: string;
-}
-
-export interface PromptCompletionResult {
-  value: string;
-  hint: string | null;
-  suggestions: PromptCompletionSuggestion[];
-  selectedIndex: number;
-}
-
 interface TerminalSize {
   columns: number;
   rows: number;
@@ -387,19 +353,6 @@ interface RuntimeCommandFailure {
 }
 
 type DiagnosticRow = readonly [string, string];
-
-interface RuntimeSkillDefinition {
-  name: string;
-  description: string;
-  source: string;
-  path: string;
-  aliases: string[];
-}
-
-interface RuntimeSkillResolution {
-  mode: "exact" | "alias" | "prefix" | "fuzzy";
-  skill: RuntimeSkillDefinition;
-}
 
 export type RuntimeCommandResult = RuntimeCommandSuccess | RuntimeCommandFailure;
 
@@ -453,6 +406,11 @@ async function main(): Promise<void> {
     stopStartup();
     stopStartup = undefined;
     process.removeListener("SIGINT", onStartupSigint);
+    if (command.openTui) {
+      const { runOpenTuiRuntime } = await import("./opentui/entry.js");
+      await runOpenTuiRuntime(session);
+      return;
+    }
     await runRuntimeTui(session);
   } finally {
     process.removeListener("SIGINT", onStartupSigint);
@@ -465,11 +423,13 @@ interface RunCommand {
   kind: "run";
   prompt: string | null;
   yolo: boolean;
+  openTui?: boolean;
 }
 
 interface InspectCommand {
   kind: "inspect";
   yolo: boolean;
+  openTui?: boolean;
 }
 
 type CliCommand = RunCommand | InspectCommand;
@@ -491,18 +451,23 @@ export type RuntimeGuiView = RuntimeTuiView;
 
 export function parseCommand(argv: string[]): CliCommand {
   const yolo = argv.includes("--yolo");
-  const normalizedArgv = argv.filter((arg) => arg !== "--yolo");
+  const openTui = argv.includes("--opentui");
+  const normalizedArgv = argv.filter((arg) => arg !== "--yolo" && arg !== "--opentui");
 
   if (normalizedArgv[0] !== "run") {
-    return { kind: "inspect", yolo };
+    return openTui ? { kind: "inspect", yolo, openTui } : { kind: "inspect", yolo };
   }
 
   const prompt = normalizedArgv.slice(1).join(" ").trim();
-  return {
+  const command: RunCommand = {
     kind: "run",
     prompt: prompt.length > 0 ? prompt : null,
     yolo,
   };
+  if (openTui) {
+    command.openTui = true;
+  }
+  return command;
 }
 
 export function resolvePrompt(prompt: string | null, pipedInput: string | null): string {
@@ -1111,211 +1076,6 @@ function handleSkillCommand(session: RuntimeSession, args: string[]): RuntimeCom
     activity: `skill routed · ${resolution.skill.name}`,
     autoInvokeAfterSkill: true,
   };
-}
-
-function formatSkillList(session: RuntimeSession, skills: RuntimeSkillDefinition[]): string {
-  if (skills.length === 0) {
-    return "no skills found";
-  }
-  const activeName = session.activeSkill?.name ?? "";
-  const withStatus = skills.map((skill) => ({ ...skill, status: skill.name === activeName ? "*" : "" }));
-  const nameWidth = Math.max(4, ...withStatus.map((skill) => visibleLength(skill.name)));
-  const sourceWidth = Math.max(6, ...withStatus.map((skill) => visibleLength(skill.source)));
-  const lines = [
-    `${padText("name", nameWidth)}  ${padText("source", sourceWidth)}  description`,
-    `${"-".repeat(nameWidth)}  ${"-".repeat(sourceWidth)}  -----------`,
-  ];
-  for (const skill of withStatus) {
-    lines.push(`${skill.status ? "*" : " "}${padText(skill.name, nameWidth)}  ${padText(skill.source, sourceWidth)}  ${skill.description}`);
-  }
-  return lines.join("\n");
-}
-
-function discoverSkills(cwd: string): RuntimeSkillDefinition[] {
-  const roots = [
-    path.join(cwd, ".codex", "skills"),
-    path.join(cwd, ".agents", "skills"),
-    path.join(homedir(), ".codex", "skills"),
-    path.join(homedir(), ".agents", "skills"),
-  ];
-  const skills: RuntimeSkillDefinition[] = [];
-  const seen = new Set<string>();
-  for (const root of roots) {
-    if (!existsSync(root)) {
-      continue;
-    }
-    const source = root.startsWith(cwd) ? "project" : "user";
-    for (const entry of safeReaddir(root)) {
-      const folderPath = path.join(root, entry);
-      const stat = safeStat(folderPath);
-      if (!stat?.isDirectory()) {
-        continue;
-      }
-      const skillPath = path.join(folderPath, "SKILL.md");
-      if (!existsSync(skillPath)) {
-        continue;
-      }
-      const parsed = parseSkillFile(skillPath, entry);
-      const dedupe = normalizeSkillToken(parsed.name);
-      if (!dedupe || seen.has(dedupe)) {
-        continue;
-      }
-      seen.add(dedupe);
-      skills.push({
-        name: parsed.name,
-        description: parsed.description,
-        source,
-        path: skillPath,
-        aliases: parsed.aliases,
-      });
-    }
-  }
-  return skills.sort((left, right) => left.name.localeCompare(right.name));
-}
-
-function parseSkillFile(skillPath: string, fallbackName: string): { name: string; description: string; aliases: string[] } {
-  const content = safeReadFile(skillPath) ?? "";
-  const frontmatter = content.match(/^---\n([\s\S]*?)\n---/);
-  const metadata = frontmatter?.[1] ?? "";
-  const name = metadata.match(/^name:\s*"?([^"\n]+)"?\s*$/m)?.[1]?.trim() || fallbackName;
-  const description = metadata.match(/^description:\s*"?([^"\n]+)"?\s*$/m)?.[1]?.trim()
-    || metadata.match(/^short-description:\s*"?([^"\n]+)"?\s*$/m)?.[1]?.trim()
-    || "no description";
-  const aliasesLine = metadata.match(/^aliases:\s*\[([^\]]*)\]\s*$/m)?.[1] ?? "";
-  const aliases = aliasesLine
-    .split(",")
-    .map((alias) => normalizeSkillToken(alias.replaceAll('"', "").replaceAll("'", "")))
-    .filter((alias) => alias.length > 0);
-  return { name, description, aliases };
-}
-
-function readSkillContent(skillPath: string): string {
-  const content = safeReadFile(skillPath);
-  if (!content) {
-    throw new Error(`unable to read skill: ${skillPath}`);
-  }
-  return content;
-}
-
-function resolveSkill(skills: RuntimeSkillDefinition[], skillName: string): RuntimeSkillResolution | null {
-  const needle = normalizeSkillToken(skillName);
-  if (!needle) {
-    return null;
-  }
-  const exact = skills.find((skill) => normalizeSkillToken(skill.name) === needle);
-  if (exact) {
-    return { mode: "exact", skill: exact };
-  }
-  const alias = skills.find((skill) => skill.aliases.includes(needle));
-  if (alias) {
-    return { mode: "alias", skill: alias };
-  }
-  const prefixCandidates = skills.filter((skill) => normalizeSkillToken(skill.name).startsWith(needle));
-  if (prefixCandidates.length > 0) {
-    prefixCandidates.sort((left, right) => left.name.localeCompare(right.name));
-    return { mode: "prefix", skill: prefixCandidates[0]! };
-  }
-  const fuzzy = rankClosestSkills(skills, needle, 1)[0];
-  return fuzzy ? { mode: "fuzzy", skill: fuzzy } : null;
-}
-
-function rankClosestSkills(skills: RuntimeSkillDefinition[], skillName: string, limit: number): RuntimeSkillDefinition[] {
-  const needle = normalizeSkillToken(skillName);
-  return skills
-    .map((skill) => ({ skill, distance: levenshteinDistance(needle, normalizeSkillToken(skill.name)) }))
-    .sort((left, right) => (left.distance - right.distance) || left.skill.name.localeCompare(right.skill.name))
-    .slice(0, Math.max(0, limit))
-    .map((entry) => entry.skill);
-}
-
-function normalizeSkillToken(value: string): string {
-  return value.trim().replace(/^\$+/, "").replace(/^\/+/, "").toLowerCase();
-}
-
-function parseSkillShorthand(input: string): { skillName: string; rawArgs: string } | null {
-  const trimmed = input.trim();
-  if (!trimmed.startsWith("$") || trimmed.startsWith("$ ")) {
-    return null;
-  }
-  const match = trimmed.match(/^\$([^\s]+)(?:\s+(.*))?$/);
-  if (!match) {
-    return null;
-  }
-  const skillName = normalizeSkillToken(match[1] ?? "");
-  return skillName ? { skillName, rawArgs: match[2] ?? "" } : null;
-}
-
-function toSkillCommandFromShorthand(input: string): string | null {
-  const parsed = parseSkillShorthand(input);
-  if (!parsed) {
-    return null;
-  }
-  return `/skill ${parsed.skillName}${parsed.rawArgs.length > 0 ? ` ${parsed.rawArgs}` : ""}`;
-}
-
-function safeReadFile(filePath: string): string | null {
-  try {
-    return readFileSync(filePath, "utf8");
-  } catch {
-    return null;
-  }
-}
-
-function safeReaddir(dirPath: string): string[] {
-  try {
-    return readdirSync(dirPath);
-  } catch {
-    return [];
-  }
-}
-
-function safeStat(filePath: string): ReturnType<typeof statSync> | null {
-  try {
-    return statSync(filePath);
-  } catch {
-    return null;
-  }
-}
-
-function padText(value: string, width: number): string {
-  const visible = visibleLength(value);
-  return visible >= width ? value : `${value}${" ".repeat(width - visible)}`;
-}
-
-function visibleLength(value: string): number {
-  return [...value].length;
-}
-
-function levenshteinDistance(a: string, b: string): number {
-  if (a === b) {
-    return 0;
-  }
-  if (a.length === 0) {
-    return b.length;
-  }
-  if (b.length === 0) {
-    return a.length;
-  }
-  const prev = new Array<number>(b.length + 1);
-  const next = new Array<number>(b.length + 1);
-  for (let index = 0; index <= b.length; index += 1) {
-    prev[index] = index;
-  }
-  for (let i = 1; i <= a.length; i += 1) {
-    next[0] = i;
-    for (let j = 1; j <= b.length; j += 1) {
-      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
-      next[j] = Math.min(
-        (next[j - 1] ?? 0) + 1,
-        (prev[j] ?? 0) + 1,
-        (prev[j - 1] ?? 0) + cost,
-      );
-    }
-    for (let j = 0; j <= b.length; j += 1) {
-      prev[j] = next[j] ?? 0;
-    }
-  }
-  return prev[b.length] ?? 0;
 }
 
 function formatDiagnosticSection(
@@ -2470,369 +2230,6 @@ function isWithinRoot(targetPath: string, rootPath: string): boolean {
   return relativePath.length > 0 && !relativePath.startsWith("..") && !path.isAbsolute(relativePath);
 }
 
-export function autocompletePromptBuffer(
-  session: Pick<RuntimeSession, "cwd">,
-  input: string,
-  selectedIndex = 0,
-): PromptCompletionResult {
-  const trimmedLeft = input.replace(/^\s+/, "");
-  const skillToken = findTrailingSkillToken(input);
-
-  if (skillToken) {
-    return completeSkillShorthand(session.cwd, input, skillToken.start, selectedIndex);
-  }
-
-  if (trimmedLeft.startsWith("$")) {
-    return completeSkillShorthand(session.cwd, input, 0, selectedIndex);
-  }
-
-  if (trimmedLeft.startsWith("/")) {
-    if (/^\/\S*$/.test(input)) {
-      const commandCompletion = completeSlashCommand(input, selectedIndex);
-      if (commandCompletion.suggestions.length > 0 || commandCompletion.value !== input) {
-        return commandCompletion;
-      }
-      const pathCompletion = completeFreeformPath(session.cwd, input, selectedIndex);
-      return pathCompletion ?? emptyCompletion(input);
-    }
-    return completeCommandPath(session.cwd, input, selectedIndex);
-  }
-
-  return completeFreeformPath(session.cwd, input, selectedIndex) ?? emptyCompletion(input);
-}
-
-export function describePromptHint(session: Pick<RuntimeSession, "cwd">, input: string): string | null {
-  const trimmedLeft = input.replace(/^\s+/, "");
-  const skillToken = findTrailingSkillToken(input);
-
-  if (skillToken) {
-    return describeSkillHint(session.cwd, skillToken.token);
-  }
-
-  if (trimmedLeft.startsWith("$")) {
-    return describeSkillHint(session.cwd, trimmedLeft);
-  }
-
-  if (!trimmedLeft.startsWith("/")) {
-    return null;
-  }
-
-  if (/^\/\S*$/.test(input)) {
-    const partial = input.toLowerCase();
-    const matches = COMMAND_CATALOG
-      .map((entry) => entry.name)
-      .filter((name) => name.startsWith(partial))
-      .slice(0, 4);
-    return matches.length > 0 ? `suggest: ${matches.join(" · ")}` : null;
-  }
-
-  return completeCommandPath(session.cwd, input).hint;
-}
-
-function findTrailingSkillToken(input: string): { start: number; token: string } | null {
-  const match = input.match(/(?:^|\s)(\$[^\s]*)$/);
-  if (!match || match.index === undefined) {
-    return null;
-  }
-  const token = match[1] ?? "";
-  if (token.length <= 1) {
-    return null;
-  }
-  return {
-    start: match.index + match[0].length - token.length,
-    token,
-  };
-}
-
-function completeSkillShorthand(cwd: string, input: string, tokenStart = 0, selectedIndex = 0): PromptCompletionResult {
-  const token = input.slice(tokenStart);
-  const prefix = input.slice(0, tokenStart);
-  const parsed = parseSkillShorthand(token);
-  const skills = discoverSkills(cwd);
-  const needle = parsed ? normalizeSkillToken(parsed.skillName) : "";
-
-  const matches = skills
-    .filter((s) => normalizeSkillToken(s.name).startsWith(needle))
-    .slice(0, 6);
-
-  if (matches.length === 0) {
-    return emptyCompletion(input);
-  }
-
-  if (matches.length === 1) {
-    const completed = `${prefix}$${matches[0].name} `;
-    return completionResult(completed, matches[0].name, [{
-      value: completed,
-      label: `$${matches[0].name}`,
-      hint: matches[0].source,
-    }], 0);
-  }
-
-  const common = longestCommonPrefix(matches.map((s) => s.name));
-  const tokenPrefix = needle.length > 0 ? `$${common}` : "$";
-  const suggestions = matches.map((s) => `$${s.name}`).join(" · ");
-  const completionSuggestions = matches.map((s) => ({
-    value: `${prefix}$${s.name} `,
-    label: `$${s.name}`,
-    hint: s.source,
-  }));
-  const selected = clampIndex(selectedIndex, completionSuggestions.length);
-  const commonValue = `${prefix}${tokenPrefix}`;
-  return completionResult(
-    commonValue.length > input.length ? commonValue : completionSuggestions[selected]?.value ?? input,
-    `suggest: ${suggestions}`,
-    completionSuggestions,
-    selected,
-  );
-}
-
-function describeSkillHint(cwd: string, input: string): string | null {
-  const parsed = parseSkillShorthand(input);
-  const skills = discoverSkills(cwd);
-  const needle = parsed ? normalizeSkillToken(parsed.skillName) : "";
-
-  const matches = skills
-    .filter((s) => normalizeSkillToken(s.name).startsWith(needle))
-    .slice(0, 6);
-
-  if (matches.length === 0) {
-    return null;
-  }
-
-  if (needle.length === 0) {
-    return `skills: ${matches.map((s) => s.name).join(" · ")}`;
-  }
-
-  if (matches.length <= 3) {
-    return `skills: ${matches.map((s) => `${s.name} (${s.source})`).join(" · ")}`;
-  }
-
-  return `skills: ${matches.map((s) => s.name).join(" · ")} +${skills.length - matches.length} more`;
-}
-
-function completeSlashCommand(input: string, selectedIndex = 0): PromptCompletionResult {
-  const partial = input.toLowerCase();
-  const matches = COMMAND_CATALOG.filter((entry) => entry.name.startsWith(partial));
-  if (matches.length === 0) {
-    return emptyCompletion(input);
-  }
-  if (matches.length === 1) {
-    const match = matches[0];
-    return completionResult(`${match.name} `, `${match.name} — ${match.description}`, [{
-      value: `${match.name} `,
-      label: match.name,
-      hint: match.description,
-    }], 0);
-  }
-
-  const names = matches.map((entry) => entry.name);
-  const common = longestCommonPrefix(names);
-  const suggestions = matches.map((entry) => ({
-    value: `${entry.name} `,
-    label: entry.name,
-    hint: entry.description,
-  }));
-  const selected = clampIndex(selectedIndex, suggestions.length);
-  return {
-    value: common.length > partial.length ? common : suggestions[selected]?.value ?? input,
-    hint: `commands: ${matches.slice(0, 6).map((entry) => `${entry.name} — ${entry.description}`).join(" · ")}`,
-    suggestions,
-    selectedIndex: selected,
-  };
-}
-
-function completeCommandPath(cwd: string, input: string, selectedIndex = 0): PromptCompletionResult {
-  const parts = input.split(/\s+/);
-  const command = parts[0] ?? "";
-  const pathIndex = SECOND_ARG_PATH_COMMANDS.has(command) ? 2 : 1;
-  if (!PATH_COMPLETION_COMMANDS.has(command) && !(SECOND_ARG_PATH_COMMANDS.has(command) && parts.length >= 3)) {
-    return emptyCompletion(input);
-  }
-
-  const partialPath = parts[pathIndex] ?? "";
-  const completion = completePathFromCwd(cwd, partialPath, selectedIndex);
-  if (!completion) {
-    return emptyCompletion(input);
-  }
-
-  const nextParts = [...parts];
-  nextParts[pathIndex] = completion.value;
-  return {
-    value: nextParts.join(" "),
-    hint: completion.hint,
-    suggestions: completion.suggestions.map((suggestion) => ({
-      ...suggestion,
-      value: withReplacedPart(parts, pathIndex, suggestion.value),
-    })),
-    selectedIndex: completion.selectedIndex,
-  };
-}
-
-function completeFreeformPath(cwd: string, input: string, selectedIndex = 0): PromptCompletionResult | null {
-  const match = input.match(/(?:^|\s)(~\/[^\s]*|~|\.{1,2}\/[^\s]*|\/[^\s]*|[^\s]*\/[^\s]*)$/);
-  if (!match || match.index === undefined) {
-    return null;
-  }
-  const token = match[1] ?? "";
-  const tokenStart = match.index + match[0].length - token.length;
-  const completion = completePathFromCwd(cwd, token, selectedIndex);
-  if (!completion) {
-    return null;
-  }
-  return completionResult(
-    `${input.slice(0, tokenStart)}${completion.value}`,
-    completion.hint,
-    completion.suggestions.map((suggestion) => ({
-      ...suggestion,
-      value: `${input.slice(0, tokenStart)}${suggestion.value}`,
-    })),
-    completion.selectedIndex,
-  );
-}
-
-function completePathFromCwd(cwd: string, partialPath: string, selectedIndex = 0): PromptCompletionResult | null {
-  const normalizedInput = partialPath.length > 0 ? partialPath : ".";
-  const baseToken = normalizedInput.endsWith("/") ? normalizedInput : path.dirname(normalizedInput);
-  const needle = normalizedInput.endsWith("/") ? "" : path.basename(normalizedInput);
-  const searchDir = resolveCompletionSearchDir(cwd, baseToken);
-
-  let entries: Array<{ label: string; isDirectory: boolean }>;
-  try {
-    entries = readdirSync(searchDir, { withFileTypes: true })
-      .filter((entry) => needle.startsWith(".") || !entry.name.startsWith("."))
-      .filter((entry) => entry.name.startsWith(needle))
-      .sort((left, right) => left.name.localeCompare(right.name))
-      .map((entry) => ({ label: entry.name, isDirectory: entry.isDirectory() }));
-  } catch {
-    return null;
-  }
-
-  if (entries.length === 0) {
-    return null;
-  }
-
-  const labels = entries.map((entry) => entry.label);
-  const common = longestCommonPrefix(labels);
-  const prefix = formatCompletionPrefix(baseToken);
-  const suggestions = entries.slice(0, 8).map((entry) => {
-    const value = `${prefix}${entry.label}${entry.isDirectory ? "/" : ""}`;
-    return {
-      value,
-      label: value,
-      hint: entry.isDirectory ? "directory" : "file",
-    };
-  });
-  const selected = clampIndex(selectedIndex, suggestions.length);
-
-  if (entries.length === 1) {
-    const only = entries[0];
-    const completed = `${prefix}${only.label}`;
-    return completionResult(
-      only.isDirectory ? `${completed}/` : completed,
-      only.isDirectory ? `dir: ${completed}/` : `file: ${completed}`,
-      suggestions,
-      0,
-    );
-  }
-
-  if (common.length > needle.length) {
-    return completionResult(
-      `${prefix}${common}`,
-      `suggest: ${suggestions.slice(0, 6).map((entry) => `${entry.hint} ${entry.label}`).join(" · ")}`,
-      suggestions,
-      selected,
-    );
-  }
-
-  return completionResult(
-    suggestions[selected]?.value ?? partialPath,
-    `suggest: ${suggestions.slice(0, 6).map((entry) => `${entry.hint} ${entry.label}`).join(" · ")}`,
-    suggestions,
-    selected,
-  );
-}
-
-function emptyCompletion(input: string): PromptCompletionResult {
-  return {
-    value: input,
-    hint: null,
-    suggestions: [],
-    selectedIndex: 0,
-  };
-}
-
-function completionResult(
-  value: string,
-  hint: string | null,
-  suggestions: PromptCompletionSuggestion[],
-  selectedIndex: number,
-): PromptCompletionResult {
-  return {
-    value,
-    hint,
-    suggestions,
-    selectedIndex,
-  };
-}
-
-function clampIndex(index: number, length: number): number {
-  if (length <= 0) {
-    return 0;
-  }
-  return Math.max(0, Math.min(length - 1, index));
-}
-
-function withReplacedPart(parts: string[], index: number, value: string): string {
-  const nextParts = [...parts];
-  nextParts[index] = value;
-  return nextParts.join(" ");
-}
-
-function resolveCompletionSearchDir(cwd: string, baseToken: string): string {
-  if (baseToken === "." || baseToken.length === 0) {
-    return cwd;
-  }
-  if (baseToken === "~") {
-    return homedir();
-  }
-  if (baseToken.startsWith("~/")) {
-    return path.join(homedir(), baseToken.slice(2));
-  }
-  if (path.isAbsolute(baseToken)) {
-    return baseToken;
-  }
-  return path.resolve(cwd, baseToken);
-}
-
-function formatCompletionPrefix(baseToken: string): string {
-  if (baseToken === "." || baseToken.length === 0) {
-    return "";
-  }
-  if (baseToken === "~") {
-    return "~/";
-  }
-  return `${baseToken.replace(/\/+$/, "")}/`;
-}
-
-function longestCommonPrefix(values: string[]): string {
-  if (values.length === 0) {
-    return "";
-  }
-
-  let prefix = values[0] ?? "";
-  for (const value of values.slice(1)) {
-    let index = 0;
-    while (index < prefix.length && index < value.length && prefix[index] === value[index]) {
-      index += 1;
-    }
-    prefix = prefix.slice(0, index);
-    if (prefix.length === 0) {
-      break;
-    }
-  }
-  return prefix;
-}
-
 function formatCommandPath(session: RuntimeSession, targetPath: string): string {
   const relativePath = path.relative(session.cwd, targetPath);
   if (relativePath.length === 0) {
@@ -2840,6 +2237,13 @@ function formatCommandPath(session: RuntimeSession, targetPath: string): string 
   }
 
   return relativePath.length > 0 && !relativePath.startsWith("..") ? relativePath : targetPath;
+}
+
+function clampIndex(index: number, length: number): number {
+  if (length <= 0) {
+    return 0;
+  }
+  return Math.max(0, Math.min(length - 1, index));
 }
 
 function commandError(command: string, targetPath: string, error: unknown): RuntimeCommandFailure {

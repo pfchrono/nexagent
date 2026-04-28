@@ -185,6 +185,33 @@ test("executeInternalTool writes and patches file inside guarded repo roots", as
   }
 });
 
+test("executeInternalTool previews patch without writing file", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-tools-preview-"));
+
+  try {
+    const session = createSession(cwd);
+    const filePath = path.join(cwd, "notes.txt");
+    await writeFile(filePath, "alpha\nbeta\n", "utf8");
+
+    const preview = executeInternalTool(session, {
+      name: "preview_patch",
+      arguments: {
+        path: "notes.txt",
+        find: "beta",
+        replace: "gamma",
+      },
+    });
+
+    assert.equal(preview.ok, true);
+    assert.match(preview.output, /--- notes\.txt/);
+    assert.match(preview.output, /-beta/);
+    assert.match(preview.output, /\+gamma/);
+    assert.equal(await readFile(filePath, "utf8"), "alpha\nbeta\n");
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test("executeInternalTool accepts query alias for search tools", async () => {
   const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-tools-search-alias-"));
 
@@ -211,6 +238,33 @@ test("executeInternalTool accepts query alias for search tools", async () => {
     });
     assert.equal(fileResult.ok, true);
     assert.match(fileResult.output, /ghost\.ts/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("executeInternalTool search_files fallback respects gitignore", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-tools-ignore-"));
+
+  try {
+    const session = createSession(cwd);
+    await mkdir(path.join(cwd, "visible"), { recursive: true });
+    await mkdir(path.join(cwd, "ignored"), { recursive: true });
+    await writeFile(path.join(cwd, ".gitignore"), "ignored/\n", "utf8");
+    await writeFile(path.join(cwd, "visible", "keep.ts"), "export const keep = true;\n", "utf8");
+    await writeFile(path.join(cwd, "ignored", "drop.ts"), "export const drop = true;\n", "utf8");
+
+    const result = executeInternalTool(session, {
+      name: "search_files",
+      arguments: {
+        path: ".",
+        pattern: "**/*.ts",
+      },
+    });
+
+    assert.equal(result.ok, true);
+    assert.match(result.output, /visible\/keep\.ts/);
+    assert.doesNotMatch(result.output, /ignored\/drop\.ts/);
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }
