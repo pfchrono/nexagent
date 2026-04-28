@@ -323,6 +323,7 @@ interface RuntimeTuiState {
   promptBuffer: string;
   transcript: string[];
   chatHistory: string[];
+  liveAssistantReply: string | null;
   currentTurnActivity: string[];
   latestTurnTrace: string[];
   traceExpanded: boolean;
@@ -877,6 +878,9 @@ export async function runPromptCommand(session: RuntimeSession, prompt: string):
 
 export function runRuntimeCommand(session: RuntimeSession, input: string): RuntimeCommandResult | null {
   const prompt = input.trim();
+  if (prompt.startsWith("!")) {
+    return handleBangShellCommand(session, prompt);
+  }
   if (!prompt.startsWith("/")) {
     return null;
   }
@@ -1850,6 +1854,36 @@ function handlePwdCommand(session: RuntimeSession, args: string[]): RuntimeComma
   };
 }
 
+function handleBangShellCommand(session: RuntimeSession, prompt: string): RuntimeCommandResult {
+  const command = prompt.slice(1).trim();
+  if (!command) {
+    return {
+      ok: false,
+      message: "usage: !<shell command>",
+      activity: "command failed · ! usage",
+    };
+  }
+
+  const result = executeInternalTool(session, {
+    name: "shell_command",
+    arguments: { command },
+  });
+
+  if (!result.ok) {
+    return {
+      ok: false,
+      message: result.output,
+      activity: `shell failed · ${command}`,
+    };
+  }
+
+  return {
+    ok: true,
+    output: `$ ${command}\n${result.output}`,
+    activity: `shell · ${command}`,
+  };
+}
+
 function handleLsCommand(session: RuntimeSession, args: string[]): RuntimeCommandResult {
   if (args.length > 1) {
     return {
@@ -2288,7 +2322,10 @@ function formatTurnTokens(session: RuntimeSession): string {
 }
 
 function formatCommandCatalog(): string {
-  return COMMAND_CATALOG.map((command) => `${command.usage} - ${command.description}`).join("\n");
+  return [
+    ...COMMAND_CATALOG.map((command) => `${command.usage} - ${command.description}`),
+    "!<command> - run guarded shell command and add output to transcript",
+  ].join("\n");
 }
 
 function formatStatusline(session: RuntimeSession): string {
@@ -2439,9 +2476,14 @@ export function autocompletePromptBuffer(
   selectedIndex = 0,
 ): PromptCompletionResult {
   const trimmedLeft = input.replace(/^\s+/, "");
+  const skillToken = findTrailingSkillToken(input);
+
+  if (skillToken) {
+    return completeSkillShorthand(session.cwd, input, skillToken.start, selectedIndex);
+  }
 
   if (trimmedLeft.startsWith("$")) {
-    return completeSkillShorthand(session.cwd, trimmedLeft, selectedIndex);
+    return completeSkillShorthand(session.cwd, input, 0, selectedIndex);
   }
 
   if (trimmedLeft.startsWith("/")) {
@@ -2461,6 +2503,11 @@ export function autocompletePromptBuffer(
 
 export function describePromptHint(session: Pick<RuntimeSession, "cwd">, input: string): string | null {
   const trimmedLeft = input.replace(/^\s+/, "");
+  const skillToken = findTrailingSkillToken(input);
+
+  if (skillToken) {
+    return describeSkillHint(session.cwd, skillToken.token);
+  }
 
   if (trimmedLeft.startsWith("$")) {
     return describeSkillHint(session.cwd, trimmedLeft);
@@ -2482,8 +2529,25 @@ export function describePromptHint(session: Pick<RuntimeSession, "cwd">, input: 
   return completeCommandPath(session.cwd, input).hint;
 }
 
-function completeSkillShorthand(cwd: string, input: string, selectedIndex = 0): PromptCompletionResult {
-  const parsed = parseSkillShorthand(input);
+function findTrailingSkillToken(input: string): { start: number; token: string } | null {
+  const match = input.match(/(?:^|\s)(\$[^\s]*)$/);
+  if (!match || match.index === undefined) {
+    return null;
+  }
+  const token = match[1] ?? "";
+  if (token.length <= 1) {
+    return null;
+  }
+  return {
+    start: match.index + match[0].length - token.length,
+    token,
+  };
+}
+
+function completeSkillShorthand(cwd: string, input: string, tokenStart = 0, selectedIndex = 0): PromptCompletionResult {
+  const token = input.slice(tokenStart);
+  const prefix = input.slice(0, tokenStart);
+  const parsed = parseSkillShorthand(token);
   const skills = discoverSkills(cwd);
   const needle = parsed ? normalizeSkillToken(parsed.skillName) : "";
 
@@ -2496,7 +2560,7 @@ function completeSkillShorthand(cwd: string, input: string, selectedIndex = 0): 
   }
 
   if (matches.length === 1) {
-    const completed = `$${matches[0].name} `;
+    const completed = `${prefix}$${matches[0].name} `;
     return completionResult(completed, matches[0].name, [{
       value: completed,
       label: `$${matches[0].name}`,
@@ -2505,16 +2569,17 @@ function completeSkillShorthand(cwd: string, input: string, selectedIndex = 0): 
   }
 
   const common = longestCommonPrefix(matches.map((s) => s.name));
-  const prefix = needle.length > 0 ? `$${common}` : "$";
+  const tokenPrefix = needle.length > 0 ? `$${common}` : "$";
   const suggestions = matches.map((s) => `$${s.name}`).join(" · ");
   const completionSuggestions = matches.map((s) => ({
-    value: `$${s.name} `,
+    value: `${prefix}$${s.name} `,
     label: `$${s.name}`,
     hint: s.source,
   }));
   const selected = clampIndex(selectedIndex, completionSuggestions.length);
+  const commonValue = `${prefix}${tokenPrefix}`;
   return completionResult(
-    prefix.length > input.length ? prefix : completionSuggestions[selected]?.value ?? input,
+    commonValue.length > input.length ? commonValue : completionSuggestions[selected]?.value ?? input,
     `suggest: ${suggestions}`,
     completionSuggestions,
     selected,
@@ -3448,7 +3513,12 @@ async function runRuntimeTui(session: RuntimeSession): Promise<void> {
             ? `${effectivePrompt}\n[attachment] name=${queuedAttachment.name}; mime=${queuedAttachment.mimeType}; bytes=${String(queuedAttachment.bytes)}`
             : effectivePrompt;
           recordConversationTurn(session, "user", userTurn);
+          setRuntimeAction(session, "running", `streaming reply · ${result.provider}`);
+          state.action = session.action;
+          pushActivity(`streaming reply · ${result.provider}`);
+          await renderPacedAssistantReply(state, result.output, render);
           recordConversationTurn(session, "assistant", result.output);
+          state.liveAssistantReply = null;
           recordTurnTelemetry(session, effectivePrompt, result.output);
           setRuntimeAction(session, "ready", `response received · ${result.provider}`);
           state.action = session.action;
@@ -3979,6 +4049,7 @@ function createDefaultRuntimeTuiState(view: RuntimeTuiView): RuntimeTuiState {
     promptBuffer: "",
     transcript: ["assistant: runtime baseline ready"],
     chatHistory: [],
+    liveAssistantReply: null,
     currentTurnActivity: [],
     latestTurnTrace: [],
     traceExpanded: false,
@@ -4022,6 +4093,7 @@ function syncTuiEventBuffers(session: RuntimeSession, state: RuntimeTuiState): v
     ? recent.flatMap((event) => formatTranscriptEvent(event))
     : ["assistant: no messages yet"];
   state.chatHistory = buildChatHistoryFromSession(session).slice(-120);
+  state.liveAssistantReply = null;
   const lastPromptIndex = [...session.events].map((event) => event.kind).lastIndexOf("prompt");
   const latestTurnEvents = (lastPromptIndex >= 0 ? session.events.slice(lastPromptIndex) : recent)
     .filter((event) => !["system", "prompt", "assistant"].includes(event.kind));
@@ -4181,8 +4253,42 @@ export function formatProgressChrome(spinnerTick: number, action: Pick<RuntimeSe
   const emblem = action.status === "running"
     ? NEXAGENT_EMBLEM_FRAMES[((spinnerTick % NEXAGENT_EMBLEM_FRAMES.length) + NEXAGENT_EMBLEM_FRAMES.length) % NEXAGENT_EMBLEM_FRAMES.length]
     : NEXAGENT_EMBLEM_FRAMES[0];
+  if (action.status !== "running") {
+    return emblem;
+  }
   const verb = selectProgressVerb(action);
   return `${emblem} ${verb} · ${action.status} · ${action.detail}`;
+}
+
+export function buildPacedReplyFrames(reply: string, maxFrames = 32): string[] {
+  const normalized = reply.trimEnd();
+  if (normalized.length === 0) {
+    return [];
+  }
+
+  const frameCount = Math.min(maxFrames, normalized.length);
+  const frames: string[] = [];
+  for (let index = 1; index <= frameCount; index += 1) {
+    const end = Math.ceil((normalized.length * index) / frameCount);
+    const frame = normalized.slice(0, end);
+    if (frame !== frames[frames.length - 1]) {
+      frames.push(frame);
+    }
+  }
+  return frames;
+}
+
+async function renderPacedAssistantReply(
+  state: RuntimeTuiState,
+  reply: string,
+  render: () => void,
+): Promise<void> {
+  const frames = buildPacedReplyFrames(reply);
+  for (const frame of frames) {
+    state.liveAssistantReply = frame;
+    render();
+    await new Promise((resolve) => setTimeout(resolve, 8));
+  }
 }
 
 function selectProgressVerb(action: Pick<RuntimeSession["action"], "status" | "detail">): string {
@@ -4298,7 +4404,7 @@ function renderWorkspacePanel(
   state: RuntimeTuiState,
   width: number,
 ): { top: string[]; middle: string[]; bottom: string[] } {
-  if (state.chatHistory.length === 0 && !state.action.pending) {
+  if (state.chatHistory.length === 0 && state.action.status === "ready" && !state.action.pending) {
     return renderIdleHomePanel(state, width);
   }
 
@@ -4306,7 +4412,9 @@ function renderWorkspacePanel(
   const completion = state.promptBuffer.length > 0 ? autocompletePromptBuffer({ cwd: lookupValue(state.view.metadata, "cwd") }, state.promptBuffer, state.completionIndex) : null;
   const composerHint = state.promptBuffer.length > 0 ? describePromptHint({ cwd: lookupValue(state.view.metadata, "cwd") }, state.promptBuffer) : "start typing or use slash command";
   const promptComposerLines = renderPromptForComposer(composer, width);
-  const chatLines = renderConversationTranscript(state.chatHistory, width);
+  const chatLines = renderConversationTranscript(state.chatHistory, width, state.liveAssistantReply);
+  const turnHeader = renderTurnHeaderBadges(state, width);
+  const operatorPanels = renderOperatorTurnPanels(state, width);
   const footerStatus = buildFooterStatus(state, width);
   const hasTrace = state.latestTurnTrace.length > 0 || state.currentTurnActivity.length > 0;
   const expandedTraceLines: string[] = [
@@ -4352,7 +4460,7 @@ function renderWorkspacePanel(
         ? renderModelPicker(state, width)
         : state.historyPopupOpen
           ? renderHistoryPopup(state, width)
-          : chatLines),
+          : [...turnHeader, ...operatorPanels, ...chatLines]),
       ...(compactTraceBlock.length > 0 ? ["", ...compactTraceBlock] : []),
       ...(fullTraceBlock.length > 0 ? ["", ...fullTraceBlock] : []),
     ],
@@ -4371,7 +4479,7 @@ function buildFooterStatus(state: RuntimeTuiState, width: number): string {
   const verb = selectProgressVerb(state.action);
   const runBadge = state.action.pending
     ? `${NEXAGENT_EMBLEM_FRAMES[((state.spinnerFrame % NEXAGENT_EMBLEM_FRAMES.length) + NEXAGENT_EMBLEM_FRAMES.length) % NEXAGENT_EMBLEM_FRAMES.length]} ${verb}`
-    : `${NEXAGENT_EMBLEM_FRAMES[0]} ${verb}`;
+    : NEXAGENT_EMBLEM_FRAMES[0];
   const trace = state.latestTurnTrace.length > 0 || state.currentTurnActivity.length > 0
     ? ` │ trace ${state.traceExpanded ? "open" : "closed"}`
     : "";
@@ -4386,12 +4494,131 @@ function buildFooterStatus(state: RuntimeTuiState, width: number): string {
   return truncateLine(`${runBadge} │ ${model}@${provider} │ turns ${turns} │ ${tokens}${trace}${scrollPart}${attachmentPart}${approvalPart}${steerPart}${copyPart}${modePart}${legacyStatusline} │ ${cwd}`, width);
 }
 
+function renderTurnHeaderBadges(state: RuntimeTuiState, width: number): string[] {
+  const provider = lookupValue(state.view.metadata, "provider");
+  const model = lookupActiveModel(state) ?? "none";
+  const mode = lookupMetadataValue(state.view.routing, "mode", lookupMetadataValue(state.view.routing, "transport", "unknown"));
+  const tokens = lookupMetadataValue(state.view.metadata, "lastTokens", "in~0 out~0");
+  const time = state.action.lastActivity ?? "now";
+  const toolCount = state.latestTurnTrace.filter((line) => line.includes("tools:") || line.includes("tool")).length;
+  const duration = state.action.pending ? "running" : state.action.status;
+  return [
+    tintLine(truncateLine(`turn · ${time} · ${mode} · ${provider}/${model} · tools ${toolCount} · ${duration} · ${tokens}`, width), ANSI.footer),
+    tintLine(renderRule(width), ANSI.rule),
+  ];
+}
+
+function renderOperatorTurnPanels(state: RuntimeTuiState, width: number): string[] {
+  return [
+    ...renderPinnedWarningLane(state, width),
+    ...renderIntentEchoLine(state, width),
+    ...renderStructuredTurnBlocks(state, width),
+    ...renderDiffSummaryCard(state, width),
+    ...renderRiskBadgeLine(state, width),
+    ...renderOutcomeFooter(state, width),
+    ...renderInlineActionChips(state, width),
+    ...renderKeyboardNavigationLine(width),
+    ...renderDensityControlLine(width),
+    ...renderTerminalCapabilityPanel(state, width),
+  ];
+}
+
+function renderPinnedWarningLane(state: RuntimeTuiState, width: number): string[] {
+  const warnings = [
+    ...(state.action.status === "error" ? [`error: ${state.action.detail}`] : []),
+    ...(state.pendingApprovalTool ? [`waiting approval: ${state.pendingApprovalTool}`] : []),
+    ...(state.cancelRequested ? ["cancel requested"] : []),
+  ];
+  return warnings.length > 0 ? renderMessageBox("warning lane", warnings.join("\n"), width) : [];
+}
+
+function renderIntentEchoLine(state: RuntimeTuiState, width: number): string[] {
+  const intent = state.latestUserMessage ?? [...state.chatHistory].reverse().find((line) => line.startsWith("you: "))?.slice(5) ?? null;
+  return intent ? [tintLine(truncateLine(`intent: ${intent}`, width), ANSI.user)] : [];
+}
+
+function renderStructuredTurnBlocks(state: RuntimeTuiState, width: number): string[] {
+  const intent = state.latestUserMessage ?? "awaiting operator intent";
+  const actions = state.latestTurnTrace.length > 0 ? state.latestTurnTrace.join(" | ") : state.action.detail;
+  const result = state.latestAssistantMessage ?? (state.action.pending ? "in progress" : state.action.status);
+  const nextStep = state.pendingApprovalTool
+    ? "approve or reject"
+    : state.action.status === "error"
+      ? "inspect warning lane"
+      : state.action.pending
+        ? "wait or steer"
+        : "ready for next prompt";
+  return renderMessageBox("turn blocks", [
+    `intent  ${intent}`,
+    `actions ${actions}`,
+    `result  ${result}`,
+    `next    ${nextStep}`,
+  ].join("\n"), width);
+}
+
+function renderDiffSummaryCard(state: RuntimeTuiState, width: number): string[] {
+  const writeHints = state.currentTurnActivity.filter((line) => /write_file|apply_patch|git_diff|diff/i.test(line));
+  const summary = writeHints.length > 0
+    ? writeHints.slice(0, 3).join("\n")
+    : "no file-change evidence in current turn";
+  return renderMessageBox("diff summary", summary, width);
+}
+
+function renderRiskBadgeLine(state: RuntimeTuiState, width: number): string[] {
+  const risk = state.action.status === "error" || state.cancelRequested
+    ? "high"
+    : state.pendingApprovalTool
+      ? "guarded"
+      : state.action.pending
+        ? "medium"
+        : "low";
+  const confidence = state.action.status === "error" ? "blocked" : state.action.pending ? "working" : "ready";
+  return [tintLine(truncateLine(`risk ${risk} · confidence ${confidence} · approval ${state.approvalRequired ? "on" : "off"}`, width), ANSI.footer)];
+}
+
+function renderOutcomeFooter(state: RuntimeTuiState, width: number): string[] {
+  const outcome = state.pendingApprovalTool
+    ? "waiting"
+    : state.action.status === "error"
+      ? "failed"
+      : state.action.pending
+        ? "running"
+        : "completed";
+  return [truncateLine(`outcome: ${outcome} · detail: ${state.action.detail}`, width)];
+}
+
+function renderInlineActionChips(state: RuntimeTuiState, width: number): string[] {
+  const chips = state.pendingApprovalTool
+    ? ["[approve Ctrl+Y]", "[reject Ctrl+N]", "[details /tools]"]
+    : state.action.status === "error"
+      ? ["[retry /continue]", "[inspect /status]", "[diff /diff]"]
+      : state.action.pending
+        ? ["[abort Esc]", "[hold /cancel]", "[replan /steer]"]
+        : ["[next prompt]", "[status /status]", "[memory /memory]"];
+  return [truncateLine(`actions: ${chips.join(" ")}`, width)];
+}
+
+function renderKeyboardNavigationLine(width: number): string[] {
+  return [truncateLine("nav: Tab sections · Ctrl+T trace · PgUp/PgDn scroll · wheel scroll · drag select", width)];
+}
+
+function renderDensityControlLine(width: number): string[] {
+  return [truncateLine("density: compact cards · expanded trace on Ctrl+T · detailed panels stay one line when idle", width)];
+}
+
+function renderTerminalCapabilityPanel(state: RuntimeTuiState, width: number): string[] {
+  const caps = lookupMetadataValue(state.view.routing, "capabilities", "unknown");
+  const auth = lookupMetadataValue(state.view.routing, "authGate", "unknown");
+  const toolPolicy = lookupMetadataValue(state.view.metadata, "toolPolicy", "unknown");
+  return renderMessageBox("terminal capabilities", `transport ${caps}\nauth ${auth}\ntools ${toolPolicy}`, width);
+}
+
 function formatScrollState(state: RuntimeTuiState, width: number): string {
   if (state.chatHistory.length === 0 && state.latestTurnTrace.length === 0 && state.currentTurnActivity.length === 0) {
     return "";
   }
   const middle = [
-    ...renderConversationTranscript(state.chatHistory, width),
+    ...renderConversationTranscript(state.chatHistory, width, state.liveAssistantReply),
     ...((state.latestTurnTrace.length > 0 || state.currentTurnActivity.length > 0) && !state.traceExpanded ? renderCollapsedTraceSummary(state, width) : []),
     ...((state.latestTurnTrace.length > 0 || state.currentTurnActivity.length > 0) && state.traceExpanded
       ? [
@@ -4617,7 +4844,7 @@ function renderControlCard(state: RuntimeTuiState, width: number): string[] {
   return renderMessageBox("control", lines.join("\n"), width);
 }
 
-function renderConversationTranscript(lines: string[], width: number): string[] {
+function renderConversationTranscript(lines: string[], width: number, liveAssistantReply: string | null = null): string[] {
   const rendered: string[] = [];
 
   for (const line of lines) {
@@ -4642,6 +4869,13 @@ function renderConversationTranscript(lines: string[], width: number): string[] 
     }
 
     rendered.push(...wrapText(line, width));
+  }
+
+  if (liveAssistantReply) {
+    if (rendered.length > 0 && rendered[rendered.length - 1] !== "") {
+      rendered.push("");
+    }
+    rendered.push(...renderMessageBox("agent streaming", liveAssistantReply, width));
   }
 
   return rendered;

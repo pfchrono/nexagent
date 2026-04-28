@@ -40,7 +40,7 @@ export function renderScreen(lines: string[]): string {
     ? "\x1b[H"
     : "\x1b[?1049h\x1b[?25l\x1b[H";
   screenInitialized = true;
-  return `${prefix}${lines.join("\n")}\x1b[J`;
+  return `${prefix}${lines.join("\x1b[K\n")}\x1b[K\x1b[J`;
 }
 
 export function resetScreenRenderer(): void {

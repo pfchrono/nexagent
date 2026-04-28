@@ -1,86 +1,84 @@
 # AGENTS.md
 
-This file provides guidance for coding agents working in the `nexagent` repository.
+Canonical guidance for coding agents working in `nexagent`.
 
-This repo is currently an early `nexagent` runtime baseline, not the full planned hybrid harness. Current source of truth lives in repo-local docs, config, and code that actually exists here. Do not assume upstream Free-Code transport, GUI, or broader compatibility surfaces already exist here just because a local runtime now does.
+`nexagent` is a working local terminal-first AI coding harness. Treat repo code, config, tests, and `README.md` as current operating truth. Do not assume upstream Free-Code, Hermes, OpenCode, or Codex behavior exists unless matching implementation exists here.
 
-## What exists today
+## Current Runtime
 
-The repo currently centers on:
+- TypeScript CLI/runtime under `src/`
+- terminal TUI in `src/cli.ts`
+- provider transports: `cli-exec`, `http-responses`, `codex-http`
+- layered prompt/instruction assembly in `src/runtime/instructions.ts`
+- guarded repo-local internal tools:
+  - `read_file`
+  - `write_file`
+  - `apply_patch`
+  - `list_dir`
+  - `search_content`
+  - `search_files`
+  - `git_status`
+  - `git_diff`
+  - `shell_command`
+  - `archivist_save`
+  - `archivist_checkpoint`
+- slash commands including `/status`, `/provider`, `/model`, `/tools`, `/memory`, `/skill`, `/attach`, `/mouse`, `/approval`, `/compact`, `/diff`, `/rg`
+- `$skill` shorthand routed into `/skill`
+- guarded `!<command>` shell transcript command
+- `--yolo` session mode that bypasses guarded approvals while preserving destructive shell/tool blocks
+- provider-gated image attachment flow for HTTP transports
+- cockpit-style TUI surfaces: paced assistant replies, turn metadata, warning lane, turn blocks, risk/outcome/action rows, navigation hints, capability panel
 
-- `openspec/` for current OpenSpec config and future spec material when present
-- `AGENTS.md` for repo-local operating instructions
-- `CLAUDE.md` for assistant compatibility
-- `.claude/settings.json` for local assistant defaults
-- `.mcp.json` for MCP server configuration
-- `.omc/` for local harness state and agent artifacts
-- `.codesight/` for optional repo analysis/cache data
-- `src/` for the current TypeScript CLI/runtime baseline
-- `package.json`, `tsconfig.json`, and lockfiles for local build/run commands
+## Canonical Docs
 
-Assume the current baseline includes a runnable CLI and local runtime modules when those files are present. Do not assume provider transport, GUI, or upstream-complete compatibility paths exist unless you can point to the files implementing them.
+- `AGENTS.md` is canonical agent guidance.
+- `CLAUDE.md` exists only as compatibility shim and should point here.
+- `README.md` is canonical user-facing project overview.
+- Archived historical docs live under `archive/`.
 
-## Current objective
+Do not split durable agent instructions between `AGENTS.md` and `CLAUDE.md`.
 
-The immediate objective is to turn this repository into a working local `nexagent` AI harness while staying aligned with current repo-local planning truth.
+## Commands
 
-Read these first before changing repo shape, runtime boundaries, or product behavior:
+Use existing package scripts only:
 
-- `Plan.md`
-- `.planning/ROADMAP.md`
-- `.planning/STATE.md`
-- `AGENTS.md`
-- `CLAUDE.md`
+- `bun run build` — TypeScript compile
+- `bun run test` or `bun test ./test/*.test.ts` — test suite
+- `bun run dev` — run TypeScript CLI via loader
+- `bun run start` — run built `dist/cli.js`
+- `bun run compile` — build platform binaries
 
-## Repo rules
+Do not invent commands. If command surface changes, update `package.json`, `README.md`, and this file.
 
-- Prefer minimal, reversible changes.
-- Keep repository instructions aligned with files that actually exist.
-- Remove inherited upstream guidance when it describes code, commands, or architecture that is not present in this repo.
-- Do not invent build or test commands before the corresponding toolchain files exist.
-- Keep compatibility filenames like `CLAUDE.md` when they still help local assistant workflows.
-- Treat repo-local configuration as the current control plane.
+## Repo Rules
 
-## Decision precedence
+- Prefer small, reversible changes.
+- Match existing TypeScript style.
+- Keep runtime behavior grounded in tests.
+- Do not refactor unrelated systems during feature work.
+- Do not mass-add local state directories such as `.bun/`, `.nexagent/`, `.codex/`, `.npm/`, `.opencode/`, `.rtk/`, or generated scratch files.
+- Preserve destructive-command safety. `--yolo` is not permission to bypass destructive shell/tool blocks.
+- Treat uncommitted changes as user work unless you made them.
 
-When behavior is ambiguous, use this order:
+## Decision Precedence
+
+When behavior is ambiguous:
 
 1. direct user request
-2. repo-local instructions (`AGENTS.md`, `CLAUDE.md`)
-3. repo-local configuration (`.claude/settings.json`, `.mcp.json`)
-4. current OpenSpec files when present
-5. inherited assumptions from upstream projects or tools
+2. `AGENTS.md`
+3. `README.md`
+4. repo-local config (`.nexagent/`, `.claude/settings.json`, `.mcp.json`)
+5. current code and tests
+6. donor/upstream references
 
-## Tooling guidance
+## Donor Boundary
 
-- Use read/search/edit tools for direct file work.
-- Use MCP tools when they provide better context than manual file scanning.
-- Use shell only for actions that genuinely require shell execution.
-- Do not install packages or bootstrap a runtime unless the task actually requires it.
+Free-Code, Hermes, OpenCode, Codex-fresh, and other donor repos are reference material only. Never describe donor behavior as implemented unless matching `nexagent` code exists in this repo.
 
-## Documentation hygiene
+## Documentation Hygiene
 
-When adapting inherited files for `nexagent`:
-
-- keep what is compatibility-critical,
-- rewrite what is misleading,
-- delete references to nonexistent source trees, providers, binaries, or transports,
-- prefer short accurate instructions over speculative architecture prose.
-
-## OpenSpec discipline
-
-If intent or scope changes, update matching repo-local planning file instead of leaving it implicit.
-
-Typical mapping:
-
-- product direction and build order → `Plan.md`
-- milestone and phase truth → `.planning/ROADMAP.md`
-- active handoff state → `.planning/STATE.md`
-- future OpenSpec requirements or specs → `openspec/` files that actually exist
-
-## Safety and scope
-
-- Keep edits tightly scoped to the request.
-- Avoid carrying over upstream branding or product claims unless they are still true for `nexagent`.
-- Before deleting or rewriting repo instructions, confirm they are not the last remaining record of important local behavior.
-- If you introduce a real runtime, add only the smallest accurate set of commands and paths needed for future agents to operate it.
+- Keep implemented-feature claims tied to code.
+- Replace stale inherited text instead of preserving fiction.
+- Update `README.md` for user-facing behavior changes.
+- Update `AGENTS.md` for durable agent behavior changes.
+- Keep `CLAUDE.md` as pointer-only compatibility file.

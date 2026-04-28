@@ -50,6 +50,7 @@ export interface RuntimeCommandModeState {
   cavemanMode: boolean;
   deadpoolMode: boolean;
   statusline: boolean;
+  mouseMode: "auto" | "scroll" | "select";
 }
 
 export interface RuntimeOperationControlsDefaults {
@@ -105,6 +106,7 @@ export function createRuntimeState(runtime: RuntimeBootstrap): RuntimeState {
       cavemanMode: runtime.persisted?.commandModes?.cavemanMode ?? false,
       deadpoolMode: runtime.persisted?.commandModes?.deadpoolMode ?? false,
       statusline: runtime.persisted?.commandModes?.statusline ?? false,
+      mouseMode: runtime.persisted?.commandModes?.mouseMode ?? "auto",
     },
     operationDefaults: {
       requireApprovalForGuarded: runtime.persisted?.operationControls?.requireApprovalForGuarded ?? false,

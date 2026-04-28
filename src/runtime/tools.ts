@@ -238,9 +238,9 @@ export function executeInternalTool(session: RuntimeSession, call: InternalToolC
     case "list_dir":
       return executeListDirTool(session, asOptionalString(call.arguments?.path));
     case "search_content":
-      return executeSearchContentTool(session, asString(call.arguments?.pattern, ""), asOptionalString(call.arguments?.path));
+      return executeSearchContentTool(session, asString(call.arguments?.pattern ?? call.arguments?.query, ""), asOptionalString(call.arguments?.path));
     case "search_files":
-      return executeSearchFilesTool(session, asString(call.arguments?.pattern, ""), asOptionalString(call.arguments?.path));
+      return executeSearchFilesTool(session, asString(call.arguments?.pattern ?? call.arguments?.query, ""), asOptionalString(call.arguments?.path));
     case "git_status":
       return executeGitStatusTool(session);
     case "git_diff":

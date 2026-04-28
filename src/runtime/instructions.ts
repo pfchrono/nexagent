@@ -48,6 +48,13 @@ export interface InstructionContext {
       preview: string | null;
     };
   };
+  activeSkill?: {
+    name: string;
+    source: string;
+    path: string;
+    args: string;
+    content: string;
+  };
 }
 
 export interface AssembledPrompt {
@@ -60,6 +67,7 @@ export type PromptSectionKey =
   | "responseStyle"
   | "executionGuidance"
   | "repoBehavior"
+  | "activeSkill"
   | "taskContext"
   | "importedDefaults"
   | "toolAvailability"
@@ -82,6 +90,7 @@ export interface PromptLayers {
   responseStyle: string[];
   executionGuidance: string[];
   explicitInvocation: string;
+  activeSkill: string[];
   repoBehavior: string[];
   taskContext: string[];
   importedDefaults: string[];
@@ -99,6 +108,7 @@ export interface PromptLayerSummary {
   responseStyle: string;
   executionGuidance: string;
   repoBehavior: string;
+  activeSkill: string;
   taskContext: string;
   importedDefaults: string;
   toolAvailability: string;
@@ -180,6 +190,7 @@ export function buildPromptLayers(session: InstructionContext, explicitInvocatio
     executionGuidance,
     explicitInvocation: explicitInvocation.trim(),
     repoBehavior,
+    activeSkill: buildActiveSkillContext(session),
     taskContext,
     importedDefaults,
     toolAvailability: buildToolAvailability(session),
@@ -204,6 +215,7 @@ export function summarizePromptLayers(layers: PromptLayers): PromptLayerSummary 
     identity: summarizeLayerEntries(layers.identity),
     responseStyle: summarizeLayerEntries(layers.responseStyle),
     executionGuidance: summarizeLayerEntries(layers.executionGuidance),
+    activeSkill: summarizeLayerEntries(layers.activeSkill),
     repoBehavior: summarizeLayerEntries(layers.repoBehavior),
     taskContext: summarizeLayerEntries(layers.taskContext),
     importedDefaults: summarizeLayerEntries(layers.importedDefaults),
@@ -242,6 +254,24 @@ function buildToolAvailability(session: InstructionContext): string[] {
   }
 
   return [...details, ...formatInternalToolPromptGuidance()];
+}
+
+function buildActiveSkillContext(session: InstructionContext): string[] {
+  if (!session.activeSkill) {
+    return [];
+  }
+
+  const skill = session.activeSkill;
+  const guidance = [
+    `Active skill: ${skill.name}`,
+    `Source: ${skill.path}`,
+    `Args: ${skill.args || "(none)"}`,
+    `Skill scope: ${skill.source}`,
+    "",
+    `SKILL.md:${""}`,
+    skill.content.trim(),
+  ].filter(Boolean);
+  return [guidance.join("\n").trim()];
 }
 
 function buildConversationContext(session: InstructionContext): string[] {
@@ -320,6 +350,7 @@ function buildPromptSections(layers: PromptLayers): PromptSection[] {
     createPromptSection("identity", "System identity", "stable", layers.identity),
     createPromptSection("responseStyle", "Response style", "stable", layers.responseStyle),
     createPromptSection("executionGuidance", "Execution guidance", "stable", layers.executionGuidance),
+    createPromptSection("activeSkill", "Active skill", "dynamic", layers.activeSkill),
     createPromptSection("repoBehavior", "Repo behavior", "stable", layers.repoBehavior),
     createPromptSection("taskContext", "Task context", "stable", layers.taskContext),
     createPromptSection("importedDefaults", "Imported defaults", "stable", layers.importedDefaults),
@@ -384,6 +415,7 @@ function countInstructionEntries(layers: PromptLayers): number {
     layers.responseStyle.length +
     layers.executionGuidance.length +
     layers.repoBehavior.length +
+    layers.activeSkill.length +
     layers.taskContext.length +
     layers.importedDefaults.length +
     layers.toolAvailability.length +

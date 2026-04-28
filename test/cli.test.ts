@@ -60,7 +60,7 @@ test("renderRuntimeTui formats runtime state", async () => {
   assert.match(output, /^\u001b\[\?1049h\u001b\[\?25l\u001b\[H/);
   assert.match(output, /nexagent :: agent tui/);
   assert.match(output, /provider codex \| session abc/);
-  assert.match(output, /◜◆◝ Bootstrapping/);
+  assert.match(output, /◜◆◝ │ gpt-5\.4@codex/);
   assert.match(output, /╭ home/);
   assert.match(output, /Welcome back\./);
   assert.match(output, /Recent activity/);
@@ -92,6 +92,56 @@ test("renderRuntimeTui keeps composer body free of side rails", async () => {
   assert.doesNotMatch(plain, /│ > ▌/);
 });
 
+test("renderRuntimeTui shows active turn metadata badges", async () => {
+  const { renderRuntimeTui } = await import("../src/cli.js");
+  const view: RuntimeTuiView = {
+    title: "nexagent",
+    statusline: null,
+    metadata: [["session", "abc"], ["provider", "codex"], ["cwd", "/repo"], ["status", "running"], ["detail", "provider request"], ["lastActivity", "2026-04-28T07:20:00Z"], ["lastTokens", "in~10 out~4"]],
+    routing: [["mode", "cli-exec"], ["models", "codex=gpt-5.4"]],
+    auth: [],
+    instructions: [],
+    mcp: [],
+    hooks: [],
+    imports: [],
+    archivist: [],
+  };
+
+  const output = renderRuntimeTui(view, { columns: 100, rows: 40 });
+  const plain = output.replace(/\u001b\[[0-9;?]*[A-Za-z]/g, "");
+
+  assert.match(plain, /turn · 2026-04-28T07:20:00Z · cli-exec · codex\/gpt-5\.4 · tools 0 · running · in~10 out~4/);
+});
+
+test("renderRuntimeTui shows cockpit turn panels and recovery affordances", async () => {
+  const { renderRuntimeTui } = await import("../src/cli.js");
+  const view: RuntimeTuiView = {
+    title: "nexagent",
+    statusline: null,
+    metadata: [["session", "abc"], ["provider", "codex"], ["cwd", "/repo"], ["status", "error"], ["detail", "provider failed"], ["lastActivity", "2026-04-28T07:30:00Z"], ["lastTokens", "in~12 out~0"], ["toolPolicy", "repo-local-guarded"]],
+    routing: [["mode", "cli-exec"], ["models", "codex=gpt-5.4"], ["capabilities", "tools+text"], ["authGate", "ready"]],
+    auth: [],
+    instructions: [],
+    mcp: [],
+    hooks: [],
+    imports: [],
+    archivist: [],
+  };
+
+  const output = renderRuntimeTui(view, { columns: 120, rows: 40 });
+  const plain = output.replace(/\u001b\[[0-9;?]*[A-Za-z]/g, "");
+
+  assert.match(plain, /warning lane/);
+  assert.match(plain, /turn blocks/);
+  assert.match(plain, /diff summary/);
+  assert.match(plain, /risk high · confidence blocked/);
+  assert.match(plain, /outcome: failed/);
+  assert.match(plain, /actions: \[retry \/continue\]/);
+  assert.match(plain, /nav: Tab sections/);
+  assert.match(plain, /density: compact cards/);
+  assert.match(plain, /terminal capabilities/);
+});
+
 test("parseCommand preserves empty run prompt for resolvePrompt", async () => {
   const { parseCommand } = await import("../src/cli.js");
 
@@ -116,12 +166,12 @@ test("applyYoloMode is session scoped and leaves persisted defaults intact", asy
   assert.equal(session.operationDefaults.requireApprovalForGuarded, true);
 });
 
-test("formatProgressChrome keeps semantic verb stable while emblem animates", async () => {
+test("formatProgressChrome shows verb only while running", async () => {
   const { formatProgressChrome } = await import("../src/cli.js");
 
   assert.equal(
     formatProgressChrome(0, { status: "ready", detail: "runtime baseline" }),
-    "◜◆◝ Bootstrapping · ready · runtime baseline",
+    "◜◆◝",
   );
   assert.equal(
     formatProgressChrome(5, { status: "running", detail: "provider request" }),
@@ -131,6 +181,18 @@ test("formatProgressChrome keeps semantic verb stable while emblem animates", as
     formatProgressChrome(6, { status: "running", detail: "provider request" }),
     "◟◆◞ Thinking · running · provider request",
   );
+});
+
+test("buildPacedReplyFrames reveals assistant reply monotonically", async () => {
+  const { buildPacedReplyFrames } = await import("../src/cli.js");
+
+  const frames = buildPacedReplyFrames("hello streaming reply", 4);
+
+  assert.equal(frames.length, 4);
+  assert.equal(frames.at(-1), "hello streaming reply");
+  for (let index = 1; index < frames.length; index += 1) {
+    assert.ok(frames[index].startsWith(frames[index - 1]));
+  }
 });
 
 function createSession(provider = "codex"): RuntimeSession {
@@ -345,6 +407,7 @@ test("runRuntimeCommand exposes command catalog through help", async () => {
     "/memory [--verbose|save <text>|checkpoint [reason]|session [focus]] - inspect or persist archivist memory/checkpoints",
     "/attach <image-path> - attach local image for next prompt (http transports only)",
     "/detach - clear queued image attachment",
+    "!<command> - run guarded shell command and add output to transcript",
   ];
   for (const line of required) {
     assert.ok(outputLines.includes(line), `${line} missing`);
@@ -795,6 +858,16 @@ test("runRuntimeCommand supports local tool commands", async () => {
     assert.match(rgResult?.output ?? "", /notes\.txt:3:needle here/);
     assert.match(rgResult?.output ?? "", /guide\.md:2:needle again/);
 
+    assert.deepEqual(runRuntimeCommand(session, "!printf 'hello\\n'"), {
+      ok: true,
+      output: "$ printf 'hello\\n'\nhello",
+      activity: "shell · printf 'hello\\n'",
+    });
+
+    const blockedShell = runRuntimeCommand(session, "!rm -rf notes.txt");
+    assert.equal(blockedShell?.ok, false);
+    assert.match(blockedShell?.message ?? "", /shell policy blocked command; destructive pattern matched/);
+
     assert.deepEqual(runRuntimeCommand(session, "/hooks"), {
       ok: true,
       output: "status: none\nsource: none\nevents: none\ncommands: 0\ninvalid: none",
@@ -942,6 +1015,35 @@ test("autocompletePromptBuffer completes slash commands", async () => {
   assert.match(describePromptHint(createSession(), "/p") ?? "", /\/provider/);
   assert.equal(autocompletePromptBuffer(createSession(), "/h").value, "/help ");
   assert.match(autocompletePromptBuffer(createSession(), "/h").hint ?? "", /commands:/);
+});
+
+test("autocompletePromptBuffer completes trailing skill shorthand inside prompt text", async () => {
+  const { autocompletePromptBuffer, describePromptHint } = await import("../src/cli.js");
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-cli-skill-complete-"));
+
+  try {
+    await mkdir(path.join(cwd, ".codex", "skills", "zz-memory"), { recursive: true });
+    await writeFile(path.join(cwd, ".codex", "skills", "zz-memory", "SKILL.md"), [
+      "---",
+      "name: zz-memory",
+      "description: test memory skill",
+      "---",
+      "",
+      "# zz-memory",
+    ].join("\n"));
+
+    const session = createSession();
+    session.cwd = cwd;
+    session.repo.root = cwd;
+
+    const completion = autocompletePromptBuffer(session, "ok so use $zz-m");
+
+    assert.equal(completion.value, "ok so use $zz-memory ");
+    assert.equal(completion.suggestions[0]?.value, "ok so use $zz-memory ");
+    assert.match(describePromptHint(session, "ok so use $zz-m") ?? "", /zz-memory/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
 });
 
 test("autocompletePromptBuffer completes repo paths", async () => {
