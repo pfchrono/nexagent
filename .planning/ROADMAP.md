@@ -178,7 +178,7 @@ Parities are explicit: don’t ship blindly, compare UX and turn-flow behaviors 
 | 43. Composer and statusline polish | 1/1 | Complete | `43-01` |
 | 44. TUI/runtime module split | 1/1 | Complete | `44-01` |
 | 45. Future capability prep | 1/1 | Complete | `45-01` |
-| 46. YOLO guarded-mode implementation | 1/1 | Complete   | 2026-04-28 |
+| 46. YOLO guarded-mode implementation | 1/1 | Complete    | 2026-04-28 |
 | 47. Image attachment pipeline baseline | 1/1 | Complete | `47-01` |
 | 48. Skill command baseline (`/skill` + `$skill`) | 1/1 | Complete | `48-01` |
 | 48.1. Dual mouse interaction mode | 1/1 | Complete | `48.1-01` |
