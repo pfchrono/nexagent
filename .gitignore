@@ -4,4 +4,6 @@ dist/
 .claude/
 .codesight/
 .omc/
+.planning/
+openspec/
 .compound-engineering/*.local.yaml
