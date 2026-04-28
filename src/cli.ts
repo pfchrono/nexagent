@@ -1693,7 +1693,8 @@ function handleApprovalCommand(session: RuntimeSession, args: string[]): Runtime
 
   const nextValue = ENABLE_ARGS.has(arg) ? true : DISABLE_ARGS.has(arg) ? false : !session.operationControls.requireApprovalForGuarded;
   session.operationControls.requireApprovalForGuarded = nextValue;
-  savePersistedRuntimeState(session);
+  session.operationDefaults.requireApprovalForGuarded = nextValue;
+  savePersistedRuntimeState(session, { persistCurrentApproval: true });
   return { ok: true, output: formatOperationControlsStatus(session), activity: `approval ${nextValue ? "on" : "off"}` };
 }
 

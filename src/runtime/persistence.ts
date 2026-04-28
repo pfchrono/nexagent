@@ -20,10 +20,15 @@ export interface PersistedCommandModes {
   cavemanMode?: boolean;
   deadpoolMode?: boolean;
   statusline?: boolean;
+  mouseMode?: "auto" | "scroll" | "select";
 }
 
 export interface PersistedOperationControls {
   requireApprovalForGuarded?: boolean;
+}
+
+export interface SavePersistedRuntimeStateOptions {
+  persistCurrentApproval?: boolean;
 }
 
 const SESSION_STATE_FILE = path.join(".nexagent", "session.json");
@@ -38,8 +43,11 @@ export async function loadPersistedRuntimeState(cwd: string): Promise<PersistedR
   }
 }
 
-export function savePersistedRuntimeState(session: RuntimeSession): void {
+export function savePersistedRuntimeState(session: RuntimeSession, options: SavePersistedRuntimeStateOptions = {}): void {
   try {
+    const requireApprovalForGuarded = session.operationControls.yoloMode && !options.persistCurrentApproval
+      ? session.operationDefaults.requireApprovalForGuarded
+      : session.operationControls.requireApprovalForGuarded;
     const state: PersistedRuntimeState = {
       provider: session.providerTransport.activeProvider,
       providerModels: Object.fromEntries(
@@ -51,9 +59,10 @@ export function savePersistedRuntimeState(session: RuntimeSession): void {
         cavemanMode: session.commandModes.cavemanMode,
         deadpoolMode: session.commandModes.deadpoolMode,
         statusline: session.commandModes.statusline,
+        mouseMode: session.commandModes.mouseMode,
       },
       operationControls: {
-        requireApprovalForGuarded: session.operationControls.requireApprovalForGuarded,
+        requireApprovalForGuarded,
       },
       auth: session.auth,
       savedAt: new Date().toISOString(),
@@ -140,6 +149,12 @@ function normalizeCommandModes(value: unknown): PersistedCommandModes | undefine
     cavemanMode: modes.cavemanMode === true,
     deadpoolMode: modes.deadpoolMode === true,
     statusline: modes.statusline === true,
+    mouseMode:
+      modes.mouseMode === "scroll"
+        ? "scroll"
+        : modes.mouseMode === "select"
+          ? "select"
+          : "auto",
   };
 }
 

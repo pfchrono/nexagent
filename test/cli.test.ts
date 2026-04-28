@@ -453,6 +453,48 @@ test("approval on re-enables guarded approval inside yolo session", async () => 
   assert.match(result?.output ?? "", /yoloMode: true/);
 });
 
+test("non-approval saves do not persist yolo approval override", async () => {
+  const { loadPersistedRuntimeState } = await import("../src/runtime/persistence.js");
+  const { runRuntimeCommand } = await import("../src/cli.js");
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-yolo-persist-"));
+  const session = createSession();
+  session.cwd = cwd;
+  session.operationDefaults.requireApprovalForGuarded = true;
+  session.operationControls.yoloMode = true;
+  session.operationControls.requireApprovalForGuarded = false;
+
+  try {
+    const result = runRuntimeCommand(session, "/statusline on");
+    assert.equal(result?.ok, true);
+
+    const persisted = await loadPersistedRuntimeState(cwd);
+    assert.equal(persisted?.operationControls?.requireApprovalForGuarded, true);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("approval command persists explicit override in yolo session", async () => {
+  const { loadPersistedRuntimeState } = await import("../src/runtime/persistence.js");
+  const { runRuntimeCommand } = await import("../src/cli.js");
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-yolo-approval-"));
+  const session = createSession();
+  session.cwd = cwd;
+  session.operationDefaults.requireApprovalForGuarded = false;
+  session.operationControls.yoloMode = true;
+  session.operationControls.requireApprovalForGuarded = false;
+
+  try {
+    const result = runRuntimeCommand(session, "/approval on");
+    assert.equal(result?.ok, true);
+
+    const persisted = await loadPersistedRuntimeState(cwd);
+    assert.equal(persisted?.operationControls?.requireApprovalForGuarded, true);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test("runRuntimeCommand continue command reflects blockers and run-state", async () => {
   const { runRuntimeCommand } = await import("../src/cli.js");
   const blockedSession = createSession();

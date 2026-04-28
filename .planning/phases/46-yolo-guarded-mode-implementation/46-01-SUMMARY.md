@@ -22,6 +22,7 @@ key-files:
     - .planning/phases/46-yolo-guarded-mode-implementation/46-01-SUMMARY.md
   modified:
     - src/cli.ts
+    - src/runtime/persistence.ts
     - src/runtime/session.ts
     - test/cli.test.ts
     - test/provider.test.ts
@@ -52,7 +53,7 @@ completed: 2026-04-28
 - **Started:** 2026-04-28T06:02:00Z
 - **Completed:** 2026-04-28T06:25:56Z
 - **Tasks:** 5 completed
-- **Files modified:** 6
+- **Files modified:** 7
 
 ## Accomplishments
 
@@ -69,12 +70,14 @@ completed: 2026-04-28
 4. **Task 4: Surface YOLO visibly in operator UI** - `3eb4624` (feat)
 5. **Task 5: Approval override behavior** - `990c86c` (test)
 6. **Auto-fix: approval status fixture** - `8a86c72` (fix)
+7. **Verification gap closure: preserve approval defaults during YOLO saves** - this commit (fix)
 
 ## Files Created/Modified
 
-- `src/cli.ts` - Parses `--yolo`, applies session override, and reports explicit approval/yolo status.
+- `src/cli.ts` - Parses `--yolo`, applies session override, persists explicit approval changes, and reports explicit approval/yolo status.
+- `src/runtime/persistence.ts` - Preserves persisted approval defaults during YOLO sessions unless `/approval` explicitly changes them.
 - `src/runtime/session.ts` - Adds `yoloMode` and `applyYoloMode()`.
-- `test/cli.test.ts` - Covers parser behavior, status visibility, and `/approval on` override.
+- `test/cli.test.ts` - Covers parser behavior, status visibility, YOLO persistence isolation, and `/approval on` override.
 - `test/provider.test.ts` - Updates approval output expectation for new `yoloMode` line.
 - `test/tools.test.ts` - Covers destructive shell denial while YOLO is active.
 - `test/instructions.test.ts` - Updates runtime session fixture for `yoloMode`.
@@ -100,6 +103,15 @@ completed: 2026-04-28
 **Total deviations:** 1 auto-fixed (Rule 1)
 **Impact on plan:** Contract update required by planned visible YOLO status; no scope expansion.
 
+### Verification Gap Closure
+
+**1. Prevented non-approval saves from persisting YOLO approval override**
+- **Found during:** Phase goal verification
+- **Issue:** `savePersistedRuntimeState()` wrote the current session approval gate, so a YOLO session could persist `requireApprovalForGuarded=false` during unrelated saves like `/statusline on`.
+- **Fix:** Persistence now saves `operationDefaults.requireApprovalForGuarded` while `yoloMode` is active unless the caller explicitly persists current approval; `/approval on|off` updates the persisted default intentionally.
+- **Files modified:** `src/runtime/persistence.ts`, `src/cli.ts`, `test/cli.test.ts`
+- **Verification:** `bun test test/cli.test.ts test/provider.test.ts test/tools.test.ts test/instructions.test.ts`; `bun run build`
+
 ## Issues Encountered
 
 - Worktree already had unrelated dirty files before execution. Task commits staged only plan-touched files; unrelated dirty files remain uncommitted.
@@ -108,6 +120,8 @@ completed: 2026-04-28
 
 - `npm run build` - PASS
 - `bun test test/cli.test.ts test/provider.test.ts test/tools.test.ts` - PASS, 72 tests
+- `bun test test/cli.test.ts test/provider.test.ts test/tools.test.ts test/instructions.test.ts` - PASS, 78 tests
+- `bun run build` - PASS
 - `node dist/cli.js --yolo` - PASS
 - `node dist/cli.js --yolo run "/status"` - PASS, output includes `approval: approval=yolo`
 - `node dist/cli.js run --yolo "/approval status"` - PASS, output includes `yoloMode: true`
