@@ -332,6 +332,28 @@ test("executeInternalTool blocks destructive shell and caps long output", async 
   }
 });
 
+test("executeInternalTool blocks destructive shell while yolo mode is active", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-tools-yolo-shell-guard-"));
+
+  try {
+    const session = createSession(cwd);
+    session.operationControls.yoloMode = true;
+    session.operationControls.requireApprovalForGuarded = false;
+
+    const blocked = executeInternalTool(session, {
+      name: "shell_command",
+      arguments: {
+        command: "rm -rf .",
+      },
+    });
+
+    assert.equal(blocked.ok, false);
+    assert.match(blocked.output, /shell policy blocked command; destructive pattern matched/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test("executeInternalTool saves Archivist memory and checkpoint with bounded lineage", async () => {
   const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-tools-archivist-"));
 
