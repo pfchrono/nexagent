@@ -2634,6 +2634,7 @@ function completePathFromCwd(cwd: string, partialPath: string, selectedIndex = 0
   let entries: Array<{ label: string; isDirectory: boolean }>;
   try {
     entries = readdirSync(searchDir, { withFileTypes: true })
+      .filter((entry) => needle.startsWith(".") || !entry.name.startsWith("."))
       .filter((entry) => entry.name.startsWith(needle))
       .sort((left, right) => left.name.localeCompare(right.name))
       .map((entry) => ({ label: entry.name, isDirectory: entry.isDirectory() }));

@@ -985,12 +985,20 @@ test("autocompletePromptBuffer completes home and absolute path tokens without s
     await mkdir(path.join(home, "code", "nexagent"));
     await mkdir(path.join(cwd, "alpha"));
     await mkdir(path.join(cwd, "alpine"));
+    await mkdir(path.join(cwd, ".alpha-hidden"));
     await writeFile(path.join(cwd, "alpha", "notes.md"), "notes\n", "utf8");
     const session = { ...createSession(), cwd };
 
     const homeCompletion = autocompletePromptBuffer(session, "open ~/co");
     assert.equal(homeCompletion.value, "open ~/code/");
     assert.equal(homeCompletion.hint, "dir: ~/code/");
+    assert.deepEqual(homeCompletion.suggestions.map((suggestion) => suggestion.label), ["~/code/"]);
+
+    const visibleRelativeCompletion = autocompletePromptBuffer(session, "open ./");
+    assert.doesNotMatch(visibleRelativeCompletion.hint ?? "", /\.alpha-hidden/);
+
+    const hiddenRelativeCompletion = autocompletePromptBuffer(session, "open ./.");
+    assert.match(hiddenRelativeCompletion.hint ?? "", /\.alpha-hidden/);
 
     const absoluteCompletion = autocompletePromptBuffer(session, `${cwd}/alp`);
     assert.equal(absoluteCompletion.value, `${cwd}/alpha/`);
