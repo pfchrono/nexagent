@@ -84,6 +84,7 @@ export interface RuntimeApprovalRequest {
 
 export interface RuntimeOperationControlsState {
   requireApprovalForGuarded: boolean;
+  yoloMode: boolean;
   pendingApproval: RuntimeApprovalRequest | null;
   lastDecision: "approved" | "rejected" | "canceled" | null;
   cancelRequested: boolean;
@@ -99,6 +100,13 @@ export interface RuntimeSession extends RuntimeState {
   startedAt: string;
   action: RuntimeActionState;
   telemetry: RuntimeTurnTelemetryState;
+  activeSkill?: {
+    name: string;
+    source: string;
+    path: string;
+    args: string;
+    content: string;
+  };
   events: RuntimeEvent[];
   conversation: RuntimeConversationTurn[];
   compaction: RuntimeCompactionState;
@@ -169,6 +177,7 @@ export function createRuntimeCompactionState(): RuntimeCompactionState {
 export function createRuntimeOperationControlsState(): RuntimeOperationControlsState {
   return {
     requireApprovalForGuarded: false,
+    yoloMode: false,
     pendingApproval: null,
     lastDecision: null,
     cancelRequested: false,
@@ -178,6 +187,11 @@ export function createRuntimeOperationControlsState(): RuntimeOperationControlsS
     lastAppliedSteer: null,
     steerHistory: [],
   };
+}
+
+export function applyYoloMode(session: RuntimeSession): void {
+  session.operationControls.yoloMode = true;
+  session.operationControls.requireApprovalForGuarded = false;
 }
 
 export function setRuntimeAction(
@@ -411,6 +425,7 @@ export function syncRuntimeSession(session: RuntimeSession, runtime: RuntimeBoot
   const selectedProvider = session.providerRouting.modelSelection.activeProvider;
   const selectedTransportMode = session.providerTransport.mode;
   const conversation = session.conversation;
+  const activeSkill = session.activeSkill;
   const compaction = session.compaction;
   const telemetry = session.telemetry;
   const action = session.action;
@@ -422,6 +437,7 @@ export function syncRuntimeSession(session: RuntimeSession, runtime: RuntimeBoot
   session.telemetry = telemetry;
   session.events = events;
   session.conversation = conversation;
+  session.activeSkill = activeSkill;
   session.compaction = compaction;
   session.operationControls = operationControls;
 

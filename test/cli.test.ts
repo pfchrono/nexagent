@@ -80,6 +80,19 @@ test("parseCommand preserves empty run prompt for resolvePrompt", async () => {
   assert.deepEqual(parseCommand(["run", "--yolo", "say", "hi"]), { kind: "run", prompt: "say hi", yolo: true });
 });
 
+test("applyYoloMode is session scoped and leaves persisted defaults intact", async () => {
+  const { applyYoloMode } = await import("../src/runtime/session.js");
+  const session = createSession();
+  session.operationDefaults.requireApprovalForGuarded = true;
+  session.operationControls.requireApprovalForGuarded = true;
+
+  applyYoloMode(session);
+
+  assert.equal(session.operationControls.yoloMode, true);
+  assert.equal(session.operationControls.requireApprovalForGuarded, false);
+  assert.equal(session.operationDefaults.requireApprovalForGuarded, true);
+});
+
 test("formatProgressChrome keeps semantic verb stable while emblem animates", async () => {
   const { formatProgressChrome } = await import("../src/cli.js");
 
@@ -225,6 +238,7 @@ function createSession(provider = "codex"): RuntimeSession {
     events: [],
     operationControls: {
       requireApprovalForGuarded: false,
+      yoloMode: false,
       pendingApproval: null,
       lastDecision: null,
       cancelRequested: false,

@@ -120,6 +120,7 @@ function createSession(provider = "codex", model: string | null = "gpt-5.4"): Ru
     events: [],
     operationControls: {
       requireApprovalForGuarded: false,
+      yoloMode: false,
       pendingApproval: null,
       lastDecision: null,
       cancelRequested: false,

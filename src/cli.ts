@@ -17,6 +17,7 @@ import { CODEX_MODEL_CATALOG, DEFAULT_CODEX_MODEL, getCodexModelDefinition, norm
 import { ANSI, padLine, padVisibleLine, renderRule, renderScreen, resetScreenRenderer, tintLine, truncateLine, wrapText } from "./tui/primitives.js";
 import {
   applyTransportMode,
+  applyYoloMode,
   applyProviderSelection,
   compactConversation,
   createRuntimeSession,
@@ -394,6 +395,9 @@ async function main(): Promise<void> {
     const prompt = resolvePrompt(command.prompt, await readPipedStdin(process.stdin));
     const runtime = await bootstrapRuntime(process.cwd());
     const session = createRuntimeSession(runtime);
+    if (command.yolo) {
+      applyYoloMode(session);
+    }
     await runPromptCommand(session, prompt);
     return;
   }
@@ -401,6 +405,9 @@ async function main(): Promise<void> {
   if (!process.stdout.isTTY || !process.stdin.isTTY) {
     const runtime = await bootstrapRuntime(process.cwd());
     const session = createRuntimeSession(runtime);
+    if (command.yolo) {
+      applyYoloMode(session);
+    }
     process.stdout.write(`${JSON.stringify(createRuntimeInspectPayload(session), null, 2)}\n`);
     return;
   }
@@ -425,6 +432,9 @@ async function main(): Promise<void> {
     }
 
     const session = createRuntimeSession(runtime);
+    if (command.yolo) {
+      applyYoloMode(session);
+    }
     stopStartup();
     stopStartup = undefined;
     process.removeListener("SIGINT", onStartupSigint);

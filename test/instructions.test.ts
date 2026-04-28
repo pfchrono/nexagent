@@ -151,6 +151,7 @@ function createSession(cwd: string): RuntimeSession {
     events: [],
     operationControls: {
       requireApprovalForGuarded: false,
+      yoloMode: false,
       pendingApproval: null,
       lastDecision: null,
       cancelRequested: false,
@@ -248,6 +249,7 @@ test("assemblePrompt keeps precedence layers distinct before serialization", asy
         ["importedDefaults", "stable"],
         ["toolAvailability", "stable"],
         ["providerFallback", "stable"],
+        ["archivistContext", "dynamic"],
         ["explicitInvocation", "dynamic"],
       ],
     );

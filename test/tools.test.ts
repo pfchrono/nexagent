@@ -119,6 +119,7 @@ function createSession(cwd: string): RuntimeSession {
     events: [],
     operationControls: {
       requireApprovalForGuarded: false,
+      yoloMode: false,
       pendingApproval: null,
       lastDecision: null,
       cancelRequested: false,
@@ -179,6 +180,37 @@ test("executeInternalTool writes and patches file inside guarded repo roots", as
       output: "patched notes.txt (1 match)",
     });
     assert.equal(await readFile(filePath, "utf8"), "alpha\ngamma\n");
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("executeInternalTool accepts query alias for search tools", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-tools-search-alias-"));
+
+  try {
+    const session = createSession(cwd);
+    await writeFile(path.join(cwd, "ghost.ts"), "const ghostText = true;\n", "utf8");
+
+    const contentResult = executeInternalTool(session, {
+      name: "search_content",
+      arguments: {
+        path: ".",
+        query: "ghostText",
+      },
+    });
+    assert.equal(contentResult.ok, true);
+    assert.match(contentResult.output, /ghost\.ts:1:const ghostText = true;/);
+
+    const fileResult = executeInternalTool(session, {
+      name: "search_files",
+      arguments: {
+        path: ".",
+        query: "*.ts",
+      },
+    });
+    assert.equal(fileResult.ok, true);
+    assert.match(fileResult.output, /ghost\.ts/);
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }
