@@ -11,6 +11,7 @@ import { launchCodexLogin, probeCodexAuthStateSync } from "./runtime/auth.js";
 import { checkpointArchivistSession, saveArchivistMemory } from "./runtime/archivist.js";
 import { bootstrapRuntime } from "./runtime/bootstrap.js";
 import { buildPromptLayers, summarizePromptLayers } from "./runtime/instructions.js";
+import { checkpointNexsightSession, getNexsightStats, purgeNexsight, searchNexsight } from "./runtime/nexsight.js";
 import { loadPersistedPromptHistory, savePersistedPromptHistory, savePersistedRuntimeState } from "./runtime/persistence.js";
 import { executeInternalTool, getInternalToolDefinitions } from "./runtime/tools.js";
 import { CODEX_MODEL_CATALOG, DEFAULT_CODEX_MODEL, getCodexModelDefinition, normalizeCodexModel } from "./models.js";
@@ -52,6 +53,12 @@ export type { PromptCompletionResult, PromptCompletionSuggestion } from "./cli/a
 
 const SPINNER_FRAMES = ["-", "\\", "|", "/"] as const;
 const NEXAGENT_EMBLEM_FRAMES = ["◜◆◝", "◠◆◡", "◟◆◞", "◡◆◠"] as const;
+const PACED_REPLY_MAX_FRAMES = 120;
+const PACED_REPLY_FRAME_DELAY_MS = 35;
+const CHAT_HISTORY_SCROLLBACK_LINES = 800;
+const PROMPT_EVENT_DETAIL_MAX_CHARS = 12_000;
+const CHAT_HISTORY_RETENTION_MS = 6 * 60 * 60 * 1000;
+const CHAT_HISTORY_MIN_RECENT_EVENTS = 80;
 const PERIODIC_MEMORY_MIN_MS = 10 * 60 * 1000;
 const PERIODIC_MEMORY_MAX_MS = 20 * 60 * 1000;
 const PERIODIC_MEMORY_TICK_MS = 30 * 1000;
@@ -304,6 +311,7 @@ interface RuntimeTuiState {
   chatHistory: string[];
   liveAssistantReply: string | null;
   currentTurnActivity: string[];
+  currentTurnTraceDetails: string[];
   latestTurnTrace: string[];
   traceExpanded: boolean;
   promptCursor: number;
@@ -489,6 +497,14 @@ export function resolvePrompt(prompt: string | null, pipedInput: string | null):
   throw new Error('usage: nexagent run "prompt" or pipe stdin');
 }
 
+export function formatPromptEventDetail(prompt: string): string {
+  if (prompt.length <= PROMPT_EVENT_DETAIL_MAX_CHARS) {
+    return prompt;
+  }
+
+  return `${prompt.slice(0, PROMPT_EVENT_DETAIL_MAX_CHARS)}\n... prompt truncated after ${PROMPT_EVENT_DETAIL_MAX_CHARS} chars ...`;
+}
+
 export function createRuntimeInspectPayload(
   session: RuntimeSession,
 ): Omit<RuntimeSession, "instructionLayers"> & { instructionLayers: RuntimeSession["instructionLayerSummary"] } {
@@ -514,6 +530,7 @@ export function createRuntimeTuiView(session: RuntimeSession): RuntimeTuiView {
       ["branch", session.repo.branch ?? "detached"],
       ["git", formatRepoFreshness(session)],
       ["contextLeft", String(getRemainingContextTokens(session))],
+      ["contextLimit", String(getContextWindowForSession(session))],
       ["compact", formatCompactionSummary(session)],
       ["toolPolicy", session.toolPolicy.mode],
       ["approval", formatApprovalSummary(session)],
@@ -779,6 +796,7 @@ export async function runPromptCommand(session: RuntimeSession, prompt: string):
         summary: `command ${effectivePrompt.split(/\s+/)[0]} completed`,
         detail: commandResult.output,
       });
+      await maybeArchiveAgedChatHistory(session);
       process.stdout.write(`${commandResult.output}\n`);
       return;
     } else {
@@ -799,7 +817,7 @@ export async function runPromptCommand(session: RuntimeSession, prompt: string):
     kind: "prompt",
     status: "queued",
     summary: "user prompt accepted",
-    detail: effectivePrompt.length > 160 ? `${effectivePrompt.slice(0, 157)}...` : effectivePrompt,
+    detail: formatPromptEventDetail(effectivePrompt),
   });
   setRuntimeAction(session, "running", "provider request");
 
@@ -814,7 +832,9 @@ export async function runPromptCommand(session: RuntimeSession, prompt: string):
       recordConversationTurn(session, "user", effectivePrompt);
       recordConversationTurn(session, "assistant", result.output);
       recordTurnTelemetry(session, effectivePrompt, result.output);
+      checkpointNexsightSession(session, "turn");
       setRuntimeAction(session, "ready", `response received · ${result.provider}`);
+      await maybeArchiveAgedChatHistory(session);
       process.stdout.write(`${result.output}\n`);
       return;
     }
@@ -892,6 +912,8 @@ export function runRuntimeCommand(session: RuntimeSession, input: string): Runti
       return handleCompactCommand(session, args);
     case "/tools":
       return handleToolsCommand(session, args);
+    case "/nexsight":
+      return handleNexsightCommand(session, args);
     case "/pwd":
       return handlePwdCommand(session, args);
     case "/ls":
@@ -1368,6 +1390,9 @@ function handleStyleToggleCommand(
 
   const nextValue = ENABLE_ARGS.has(arg) ? true : DISABLE_ARGS.has(arg) ? false : !session.commandModes[mode];
   session.commandModes[mode] = nextValue;
+  if (mode === "cavemanMode" || mode === "deadpoolMode") {
+    refreshInstructionState(session);
+  }
   savePersistedRuntimeState(session);
   return {
     ok: true,
@@ -1406,6 +1431,60 @@ function handleToolsCommand(session: RuntimeSession, args: string[]): RuntimeCom
     ok: true,
     output: formatToolPolicyStatus(session, detailMode),
     activity: "tools status",
+  };
+}
+
+function handleNexsightCommand(session: RuntimeSession, args: string[]): RuntimeCommandResult {
+  const [subcommand = "stats", ...rest] = args;
+  if (subcommand === "stats" || subcommand === "status") {
+    const result = getNexsightStats(session);
+    return result.ok
+      ? { ok: true, output: result.output, activity: "nexsight stats" }
+      : { ok: false, message: result.output, activity: "nexsight failed · stats" };
+  }
+  if (subcommand === "doctor") {
+    return {
+      ok: true,
+      output: formatDiagnosticSection("nexsight", "compact", [
+        ["store", path.join(session.cwd, ".nexagent", "nexsight", "index.json")],
+        ["execute", "shell,javascript"],
+        ["index", "json chunks; repo batch; session checkpoints"],
+        ["routing", "large outputs should use nexsight_execute/index/search"],
+      ]).join("\n"),
+      activity: "nexsight doctor",
+    };
+  }
+  if (subcommand === "purge") {
+    const result = purgeNexsight(session);
+    return result.ok
+      ? { ok: true, output: result.output, activity: "nexsight purge" }
+      : { ok: false, message: result.output, activity: "nexsight failed · purge" };
+  }
+  if (subcommand === "search") {
+    const query = rest.join(" ").trim();
+    if (!query) {
+      return { ok: false, message: "usage: /nexsight search <query>", activity: "command failed · /nexsight search usage" };
+    }
+    const result = searchNexsight(session, { query });
+    return result.ok
+      ? { ok: true, output: result.output, activity: `nexsight search · ${query}` }
+      : { ok: false, message: result.output, activity: `nexsight failed · ${query}` };
+  }
+  if (subcommand === "index") {
+    const root = rest[0] ?? ".";
+    const pattern = rest[1];
+    return toolResultToCommandResult("nexsight", "index", executeInternalTool(session, {
+      name: "nexsight_batch",
+      arguments: {
+        root,
+        ...(pattern ? { pattern } : {}),
+      },
+    }));
+  }
+  return {
+    ok: false,
+    message: "usage: /nexsight [stats|index <path> [pattern]|search <query>|purge|doctor]",
+    activity: "command failed · /nexsight usage",
   };
 }
 
@@ -1973,7 +2052,9 @@ function formatToolPolicyStatus(session: RuntimeSession, detailMode: DetailMode 
   const internalTools = getInternalToolDefinitions().map((tool) => tool.name).join(", ");
   return formatDiagnosticSection("tool-policy", detailMode, [
     ["mode", session.toolPolicy.mode],
+    ["readable", (session.toolPolicy.readRoots ?? ["all non-protected paths"]).join(" | ")],
     ["allowed", session.toolPolicy.allowedRoots.join(" | ")],
+    ["yoloWrites", session.operationControls.yoloMode ? "readable workspace paths" : "repo write roots only"],
     ["writes", session.toolPolicy.writes],
     ["deletes", session.toolPolicy.deletes],
     ["shell", session.toolPolicy.shell],
@@ -1982,7 +2063,9 @@ function formatToolPolicyStatus(session: RuntimeSession, detailMode: DetailMode 
     ["ripgrep", hasRipgrep() ? "available" : "missing"],
   ], [
     ["mode", session.toolPolicy.mode],
+    ["readable", (session.toolPolicy.readRoots ?? ["all non-protected paths"]).join(" | ")],
     ["allowed", session.toolPolicy.allowedRoots.join(" | ")],
+    ["yoloWrites", session.operationControls.yoloMode ? "readable workspace paths" : "repo write roots only"],
     ["protected", `${session.toolPolicy.protectedRoots.slice(0, 8).join(" | ")}${session.toolPolicy.protectedRoots.length > 8 ? " | ..." : ""}`],
     ["shell", session.toolPolicy.shell],
     ["shellGuard", "repo-pinned; destructive-blocked; timeout=5000ms; output<=120 lines"],
@@ -2051,18 +2134,42 @@ function formatStyleModeName(mode: "cavemanMode" | "deadpoolMode" | "statusline"
 function formatStyleModeStatus(session: RuntimeSession, mode: "cavemanMode" | "deadpoolMode" | "statusline"): string {
   const enabled = session.commandModes[mode];
   if (mode === "cavemanMode") {
-    return enabled
-      ? `Caveman mode ON. Style stack: ${formatStyleStack(session)}.`
-      : `Caveman mode OFF. Style stack: ${formatStyleStack(session)}.`;
+    if (enabled) {
+      return session.commandModes.deadpoolMode
+        ? `Caveman mode ON. Deadpool mode still ON. Replies now compressed hard, with Deadpool voice kept terse. ${formatStyleStackMessage(session)}`
+        : "Caveman mode ON. Responses now ultra-compressed. ~75% fewer tokens. Technical accuracy preserved.";
+    }
+    return session.commandModes.deadpoolMode
+      ? "Caveman mode OFF. Deadpool mode still ON."
+      : "Caveman mode OFF. Responses back to normal.";
   }
   if (mode === "deadpoolMode") {
-    return enabled
-      ? `Deadpool mode ON. Style stack: ${formatStyleStack(session)}.`
-      : `Deadpool mode OFF. Style stack: ${formatStyleStack(session)}.`;
+    if (enabled) {
+      return session.commandModes.cavemanMode
+        ? `Deadpool mode ON. Caveman mode still ON. Replies keep antihero voice, but compressed. ${formatStyleStackMessage(session)}`
+        : "Deadpool mode ON. Replies now use snarky antihero voice. Code and structured output stay normal.";
+    }
+    return session.commandModes.cavemanMode
+      ? `Deadpool mode OFF. Caveman mode still ON. ${formatStyleStackMessage(session)}`
+      : `Deadpool mode OFF. Replies back to normal voice. ${formatStyleStackMessage(session)}`;
   }
   return enabled
     ? `Statusline ON. Footer now shows ${formatStatusline(session)}.`
     : "Statusline OFF.";
+}
+
+function formatStyleStackMessage(session: RuntimeSession): string {
+  const active: string[] = [];
+  if (session.commandModes.deadpoolMode) {
+    active.push("deadpool");
+  }
+  if (session.commandModes.cavemanMode) {
+    active.push("caveman");
+  }
+  if (active.length === 0) {
+    return "Style stack: normal.";
+  }
+  return `Style stack: ${active.join(" + ")}.`;
 }
 
 function formatStyleStack(session: RuntimeSession): string {
@@ -2079,6 +2186,10 @@ function formatStyleStack(session: RuntimeSession): string {
 
 function formatTurnTokens(session: RuntimeSession): string {
   return `in~${session.telemetry.lastInputTokens} out~${session.telemetry.lastOutputTokens}`;
+}
+
+function getContextWindowForSession(session: RuntimeSession): number {
+  return getCodexModelDefinition(getCurrentProviderModel(session))?.contextWindow ?? 128000;
 }
 
 function formatCommandCatalog(): string {
@@ -2098,7 +2209,7 @@ function formatStatusline(session: RuntimeSession): string {
     `mouse=${getConfiguredMouseMode(session)}/${getEffectiveMouseMode(session).mode}`,
     formatStyleStack(session),
     formatTurnTokens(session),
-    `ctx~${getRemainingContextTokens(session)}`,
+    formatContextMeter(getRemainingContextTokens(session), getContextWindowForSession(session)),
   ].join(" | ");
 }
 
@@ -2871,6 +2982,7 @@ async function runRuntimeTui(session: RuntimeSession): Promise<void> {
             summary: `command ${effectivePrompt.split(/\s+/)[0]} ${commandResult.ok ? "completed" : "failed"}`,
             detail: commandResult.ok ? commandResult.output : commandResult.message,
           });
+          await maybeArchiveAgedChatHistory(session);
           state.action = session.action;
           pushActivity(commandResult.activity);
           render();
@@ -2889,7 +3001,7 @@ async function runRuntimeTui(session: RuntimeSession): Promise<void> {
         kind: "prompt",
         status: "queued",
         summary: "user prompt accepted",
-        detail: effectivePrompt.length > 160 ? `${effectivePrompt.slice(0, 157)}...` : effectivePrompt,
+        detail: formatPromptEventDetail(effectivePrompt),
       });
       setRuntimeAction(session, "running", "provider request");
       state.action = session.action;
@@ -2924,7 +3036,9 @@ async function runRuntimeTui(session: RuntimeSession): Promise<void> {
           recordConversationTurn(session, "assistant", result.output);
           state.liveAssistantReply = null;
           recordTurnTelemetry(session, effectivePrompt, result.output);
+          checkpointNexsightSession(session, "turn");
           setRuntimeAction(session, "ready", `response received · ${result.provider}`);
+          await maybeArchiveAgedChatHistory(session);
           state.action = session.action;
           pushActivity(`request ok · ${result.provider}`);
           if (queuedAttachment) {
@@ -3384,6 +3498,7 @@ async function runRuntimeTui(session: RuntimeSession): Promise<void> {
     };
 
     const animationInterval = setInterval(() => {
+      state.action = session.action;
       if (!state.action.pending) {
         return;
       }
@@ -3403,6 +3518,12 @@ async function runRuntimeTui(session: RuntimeSession): Promise<void> {
         .then((saved) => {
           if (saved) {
             pushActivity("memory checkpoint auto · periodic");
+          }
+          return maybeArchiveAgedChatHistory(session);
+        })
+        .then((archived) => {
+          if (archived) {
+            pushActivity("chat history archived · aged");
           }
         })
         .catch((error) => {
@@ -3455,6 +3576,7 @@ function createDefaultRuntimeTuiState(view: RuntimeTuiView): RuntimeTuiState {
     chatHistory: [],
     liveAssistantReply: null,
     currentTurnActivity: [],
+    currentTurnTraceDetails: [],
     latestTurnTrace: [],
     traceExpanded: false,
     promptCursor: 0,
@@ -3496,7 +3618,7 @@ function syncTuiEventBuffers(session: RuntimeSession, state: RuntimeTuiState): v
   state.transcript = recent.length > 0
     ? recent.flatMap((event) => formatTranscriptEvent(event))
     : ["assistant: no messages yet"];
-  state.chatHistory = buildChatHistoryFromSession(session).slice(-120);
+  state.chatHistory = buildChatHistoryFromSession(session).slice(-CHAT_HISTORY_SCROLLBACK_LINES);
   state.liveAssistantReply = null;
   const lastPromptIndex = [...session.events].map((event) => event.kind).lastIndexOf("prompt");
   const latestTurnEvents = (lastPromptIndex >= 0 ? session.events.slice(lastPromptIndex) : recent)
@@ -3505,6 +3627,10 @@ function syncTuiEventBuffers(session: RuntimeSession, state: RuntimeTuiState): v
     .slice(-16)
     .flatMap((event) => formatTranscriptEvent(event))
     .slice(-40);
+  state.currentTurnTraceDetails = latestTurnEvents
+    .slice(-24)
+    .flatMap((event) => formatVerboseTraceEvent(event))
+    .slice(-80);
   state.latestTurnTrace = summarizeTurnEvents(latestTurnEvents);
   state.latestUserMessage = [...session.conversation].reverse().find((turn) => turn.role === "user")?.content ?? null;
   state.latestAssistantMessage = [...session.conversation].reverse().find((turn) => turn.role === "assistant")?.content ?? null;
@@ -3528,9 +3654,19 @@ export function buildChatHistoryFromSession(session: RuntimeSession): string[] {
   const lines: string[] = [];
   const assistantReplies = session.conversation.filter((turn) => turn.role === "assistant");
   let assistantIndex = 0;
+  let currentTurnEvents: RuntimeSession["events"] = [];
+
+  const flushTurnEvents = () => {
+    const turnLines = formatInlineTurnBlock(currentTurnEvents);
+    if (turnLines.length > 0) {
+      lines.push(...turnLines);
+    }
+    currentTurnEvents = [];
+  };
 
   for (const event of session.events) {
     if (event.kind === "prompt" && event.detail) {
+      flushTurnEvents();
       if (lines.length > 0 && lines[lines.length - 1] !== "") {
         lines.push("");
       }
@@ -3539,17 +3675,22 @@ export function buildChatHistoryFromSession(session: RuntimeSession): string[] {
     }
 
     if (event.kind === "assistant" && event.status === "completed") {
+      flushTurnEvents();
       const reply = assistantReplies[assistantIndex]?.content ?? event.detail;
       assistantIndex += 1;
       if (!reply) {
         continue;
       }
       lines.push(`agent: ${reply}`);
+      if (assistantIndex === assistantReplies.length && (session.telemetry.lastInputTokens > 0 || session.telemetry.lastOutputTokens > 0)) {
+        lines.push(`turn-detail: tokens ${formatTurnTokens(session)}`);
+      }
       lines.push("");
       continue;
     }
 
     if (event.kind === "command") {
+      flushTurnEvents();
       const commandName = event.summary.match(/command\s+(\S+)/)?.[1] ?? "command";
       if (lines.length > 0 && lines[lines.length - 1] !== "") {
         lines.push("");
@@ -3557,11 +3698,53 @@ export function buildChatHistoryFromSession(session: RuntimeSession): string[] {
       lines.push(`you: ${commandName}`);
       lines.push(...formatCommandBoundary(event));
       lines.push("");
+      continue;
+    }
+
+    if (!["system", "compact"].includes(event.kind)) {
+      currentTurnEvents.push(event);
     }
   }
 
+  flushTurnEvents();
+
   while (lines.length > 0 && lines[lines.length - 1] === "") {
     lines.pop();
+  }
+
+  return lines;
+}
+
+function formatInlineTurnBlock(events: RuntimeSession["events"]): string[] {
+  if (events.length === 0) {
+    return [];
+  }
+
+  const providerStarted = events.some((event) => event.kind === "provider" && event.status === "started");
+  const providerFailed = events.find((event) => event.kind === "provider" && event.status === "failed");
+  const toolEvents = events.filter((event) => event.kind === "tool");
+  const toolStarted = toolEvents.filter((event) => event.status === "started");
+  const toolFinal = toolEvents.filter((event) => ["completed", "failed", "blocked", "canceled"].includes(event.status));
+  const controlEvents = events.filter((event) => event.kind === "control");
+  const toolNames = [...new Set((toolStarted.length > 0 ? toolStarted : toolEvents)
+    .map((event) => event.summary.match(/tool\s+([a-z0-9_]+)/i)?.[1] ?? null)
+    .filter((value): value is string => value !== null))];
+  const lines: string[] = [];
+
+  if (providerStarted) {
+    lines.push("turn: Thinking");
+  }
+  if (toolNames.length > 0) {
+    lines.push(`turn: Tool calls (${String(toolNames.length)})`);
+    for (const event of toolFinal.slice(-12)) {
+      lines.push(`turn-detail: ${formatCompactToolEvent(event)}`);
+    }
+  }
+  for (const event of controlEvents.slice(-4)) {
+    lines.push(`turn-detail: ${event.summary}`);
+  }
+  if (providerFailed) {
+    lines.push(`turn-detail: ${providerFailed.summary}`);
   }
 
   return lines;
@@ -3587,6 +3770,113 @@ export function formatTranscriptEvent(event: RuntimeSession["events"][number]): 
     lines.push(`… ${String(rest.length)} more line${rest.length === 1 ? "" : "s"} hidden`);
   }
   return lines;
+}
+
+function formatVerboseTraceEvent(event: RuntimeSession["events"][number]): string[] {
+  if (event.kind === "tool") {
+    return [`${event.at} · ${formatCompactToolEvent(event)}`];
+  }
+
+  const header = `${event.at} · ${event.kind} · ${event.status} · ${event.summary}`;
+  if (!event.detail) {
+    return [header];
+  }
+
+  const detailLines = event.detail.split("\n");
+  return [
+    header,
+    ...detailLines.map((line) => `  ${line}`),
+  ];
+}
+
+function formatCompactToolEvent(event: RuntimeSession["events"][number]): string {
+  const name = event.summary.match(/tool\s+([a-z0-9_]+)/i)?.[1] ?? "tool";
+  const meta = parseToolEventDetail(event.detail ?? "");
+  const pieces = [formatToolDisplayName(name), event.status];
+  if (meta.duration) {
+    pieces.push(meta.duration);
+  }
+  if (meta.outputTokens) {
+    pieces.push(meta.outputTokens);
+  }
+  if (meta.risk && meta.risk !== "low") {
+    pieces.push(meta.risk);
+  }
+  const outputSummary = summarizeToolOutput(name, meta.output, event.status);
+  if (outputSummary) {
+    pieces.push(outputSummary);
+  }
+  return pieces.join(" · ");
+}
+
+function formatToolDisplayName(name: string): string {
+  const labels: Record<string, string> = {
+    read_file: "File Read",
+    write_file: "File Write",
+    apply_patch: "Patch Apply",
+    preview_patch: "Patch Preview",
+    list_dir: "Dir List",
+    search_content: "Text Search",
+    search_files: "File Search",
+    web_fetch: "Web Fetch",
+    web_search: "Web Search",
+    git_status: "Git Status",
+    git_diff: "Git Diff",
+    shell_command: "Shell",
+    nexsight_execute: "Nexsight Run",
+    nexsight_index: "Nexsight Index",
+    nexsight_search: "Nexsight Search",
+    archivist_save: "Memory Save",
+    archivist_checkpoint: "Checkpoint",
+  };
+  return labels[name] ?? name.replace(/_/g, " ").replace(/\b\w/g, (value) => value.toUpperCase());
+}
+
+function summarizeToolOutput(name: string, output: string | null, status: string): string | null {
+  if (!output || output === "none") {
+    return null;
+  }
+
+  if (name === "list_dir") {
+    const files = output.match(/\bfile\b/g)?.length ?? 0;
+    const dirs = output.match(/\bdir\b/g)?.length ?? 0;
+    const entries = files + dirs;
+    if (entries > 0) {
+      return `${entries} entries${files > 0 || dirs > 0 ? ` (${files} files, ${dirs} dirs)` : ""}`;
+    }
+  }
+
+  if (name === "search_files" || name === "search_content") {
+    const matches = output === "(no matches)" ? 0 : Math.max(1, output.split(/\s+/).filter(Boolean).length);
+    return `${matches} matches`;
+  }
+
+  if (name === "read_file") {
+    const lines = output.match(/\n/g)?.length ?? 0;
+    return lines > 0 ? `${lines + 1} lines` : "read";
+  }
+
+  if (status === "failed" || status === "blocked" || status === "canceled") {
+    return truncateLine(output, 72);
+  }
+
+  if (name === "write_file" || name === "apply_patch" || name === "preview_patch" || name === "git_status" || name === "git_diff") {
+    return truncateLine(output, 72);
+  }
+
+  return null;
+}
+
+function parseToolEventDetail(detail: string): { risk: string | null; duration: string | null; outputTokens: string | null; output: string | null } {
+  if (!detail) {
+    return { risk: null, duration: null, outputTokens: null, output: null };
+  }
+
+  const duration = detail.match(/duration=([^;]+)/)?.[1]?.trim() ?? null;
+  const outputTokens = detail.match(/out~\d+/)?.[0] ?? null;
+  const output = detail.match(/output=([\s\S]+)/)?.[1]?.replace(/\s+/g, " ").trim() ?? null;
+  const risk = detail.split(";")[0]?.trim() ?? null;
+  return { risk, duration, outputTokens, output };
 }
 
 function renderRuntimeTuiState(state: RuntimeTuiState, terminalSize?: Partial<TerminalSize>): string {
@@ -3664,7 +3954,7 @@ export function formatProgressChrome(spinnerTick: number, action: Pick<RuntimeSe
   return `${emblem} ${verb} · ${action.status} · ${action.detail}`;
 }
 
-export function buildPacedReplyFrames(reply: string, maxFrames = 32): string[] {
+export function buildPacedReplyFrames(reply: string, maxFrames = PACED_REPLY_MAX_FRAMES): string[] {
   const normalized = reply.trimEnd();
   if (normalized.length === 0) {
     return [];
@@ -3672,14 +3962,28 @@ export function buildPacedReplyFrames(reply: string, maxFrames = 32): string[] {
 
   const frameCount = Math.min(maxFrames, normalized.length);
   const frames: string[] = [];
+  let previousEnd = 0;
   for (let index = 1; index <= frameCount; index += 1) {
-    const end = Math.ceil((normalized.length * index) / frameCount);
+    const rawEnd = Math.ceil((normalized.length * index) / frameCount);
+    const end = index === frameCount ? normalized.length : findPacedReplyBoundary(normalized, rawEnd, previousEnd);
     const frame = normalized.slice(0, end);
     if (frame !== frames[frames.length - 1]) {
       frames.push(frame);
+      previousEnd = end;
     }
   }
   return frames;
+}
+
+function findPacedReplyBoundary(reply: string, targetEnd: number, previousEnd: number): number {
+  const minEnd = Math.min(reply.length, Math.max(previousEnd + 1, targetEnd));
+  const lookaheadEnd = Math.min(reply.length, minEnd + 18);
+  for (let index = minEnd; index < lookaheadEnd; index += 1) {
+    if (/\s|[.,;:!?)]/.test(reply[index] ?? "")) {
+      return index + 1;
+    }
+  }
+  return minEnd;
 }
 
 async function renderPacedAssistantReply(
@@ -3691,7 +3995,7 @@ async function renderPacedAssistantReply(
   for (const frame of frames) {
     state.liveAssistantReply = frame;
     render();
-    await new Promise((resolve) => setTimeout(resolve, 8));
+    await new Promise((resolve) => setTimeout(resolve, PACED_REPLY_FRAME_DELAY_MS));
   }
 }
 
@@ -3817,14 +4121,13 @@ function renderWorkspacePanel(
   const composerHint = state.promptBuffer.length > 0 ? describePromptHint({ cwd: lookupValue(state.view.metadata, "cwd") }, state.promptBuffer) : "start typing or use slash command";
   const promptComposerLines = renderPromptForComposer(composer, width);
   const chatLines = renderConversationTranscript(state.chatHistory, width, state.liveAssistantReply);
-  const turnHeader = renderTurnHeaderBadges(state, width);
   const operatorPanels = renderOperatorTurnPanels(state, width);
   const footerStatus = buildFooterStatus(state, width);
   const hasTrace = state.latestTurnTrace.length > 0 || state.currentTurnActivity.length > 0;
   const expandedTraceLines: string[] = [
-    "▾ trace open · Ctrl+T collapse",
-    ...(state.latestTurnTrace.length > 0 ? ["", ...state.latestTurnTrace] : []),
-    ...(state.currentTurnActivity.length > 0 ? ["", ...state.currentTurnActivity] : []),
+    "▾ Ctrl+T collapse",
+    ...(state.latestTurnTrace.length > 0 ? ["", "summary", ...state.latestTurnTrace] : []),
+    ...(state.currentTurnTraceDetails.length > 0 ? ["", "events", ...state.currentTurnTraceDetails] : []),
   ];
   const fullTraceBlock = hasTrace && state.traceExpanded
     ? [
@@ -3857,14 +4160,14 @@ function renderWorkspacePanel(
   ];
 
   return {
-    top: [],
+    top: renderWorkspaceTopStatus(state, width),
     middle: [
       ...renderControlCard(state, width),
       ...(state.modelPickerOpen
         ? renderModelPicker(state, width)
         : state.historyPopupOpen
           ? renderHistoryPopup(state, width)
-          : [...turnHeader, ...operatorPanels, ...chatLines]),
+          : [...operatorPanels, ...chatLines]),
       ...(compactTraceBlock.length > 0 ? ["", ...compactTraceBlock] : []),
       ...(fullTraceBlock.length > 0 ? ["", ...fullTraceBlock] : []),
     ],
@@ -3879,23 +4182,79 @@ function buildFooterStatus(state: RuntimeTuiState, width: number): string {
   const turns = lookupMetadataValue(state.view.metadata, "turns", "0");
   const tokens = lookupMetadataValue(state.view.metadata, "lastTokens", "in~0 out~0");
   const cwd = lookupValue(state.view.metadata, "cwd");
+  const contextMeter = formatContextMeterFromState(state);
   const model = lookupActiveModel(state) ?? "none";
   const verb = selectProgressVerb(state.action);
   const runBadge = state.action.pending
-    ? `${NEXAGENT_EMBLEM_FRAMES[((state.spinnerFrame % NEXAGENT_EMBLEM_FRAMES.length) + NEXAGENT_EMBLEM_FRAMES.length) % NEXAGENT_EMBLEM_FRAMES.length]} ${verb}`
+    ? `${formatActiveEmblemFrame(state.spinnerFrame)} ${verb}`
     : NEXAGENT_EMBLEM_FRAMES[0];
-  const trace = state.latestTurnTrace.length > 0 || state.currentTurnActivity.length > 0
-    ? ` │ trace ${state.traceExpanded ? "open" : "closed"}`
-    : "";
-  const scroll = formatScrollState(state, width);
-  const scrollPart = scroll ? ` │ ${scroll}` : "";
   const copyPart = state.copyStatus ? ` │ ${state.copyStatus}` : "";
   const attachmentPart = state.pendingImageAttachment ? " │ image 1" : "";
   const approvalPart = state.pendingApprovalTool ? ` │ approval ${state.pendingApprovalTool}` : "";
   const steerPart = state.steerMessage ? ` │ steer ${state.steerState ?? "queued"}` : "";
   const modePart = state.composerFocusMode ? " │ focus composer" : "";
   const legacyStatusline = state.view.statusline ? ` │ ${state.view.statusline}` : "";
-  return truncateLine(`${runBadge} │ ${model}@${provider} │ turns ${turns} │ ${tokens}${trace}${scrollPart}${attachmentPart}${approvalPart}${steerPart}${copyPart}${modePart}${legacyStatusline} │ ${cwd}`, width);
+  return truncateLine(`${runBadge} │ ${model}@${provider} │ turns ${turns} │ ${tokens} │ ${contextMeter}${attachmentPart}${approvalPart}${steerPart}${copyPart}${modePart}${legacyStatusline} │ ${formatShortPath(cwd)}`, width);
+}
+
+function formatActiveEmblemFrame(frame: number): string {
+  const emblem = NEXAGENT_EMBLEM_FRAMES[((frame % NEXAGENT_EMBLEM_FRAMES.length) + NEXAGENT_EMBLEM_FRAMES.length) % NEXAGENT_EMBLEM_FRAMES.length];
+  const spinner = SPINNER_FRAMES[((frame % SPINNER_FRAMES.length) + SPINNER_FRAMES.length) % SPINNER_FRAMES.length];
+  return `${spinner}${emblem}`;
+}
+
+function renderWorkspaceTopStatus(state: RuntimeTuiState, width: number): string[] {
+  const scroll = formatScrollState(state, width);
+  if (!scroll) {
+    return [];
+  }
+
+  return [tintLine(padLeftVisible(scroll, width), ANSI.dim)];
+}
+
+function padLeftVisible(value: string, width: number): string {
+  return truncateLine(value.padStart(width, " "), width);
+}
+
+function formatContextMeterFromState(state: RuntimeTuiState): string {
+  const left = Number.parseInt(lookupMetadataValue(state.view.metadata, "contextLeft", "0"), 10);
+  const limit = Number.parseInt(lookupMetadataValue(state.view.metadata, "contextLimit", "0"), 10);
+  return formatContextMeter(Number.isFinite(left) ? left : 0, Number.isFinite(limit) ? limit : 0);
+}
+
+function formatContextMeter(left: number, limit: number): string {
+  const safeLimit = limit > 0 ? limit : 128000;
+  const safeLeft = Math.max(0, Math.min(left, safeLimit));
+  const used = safeLimit - safeLeft;
+  const usedRatio = safeLimit === 0 ? 0 : used / safeLimit;
+  const slots = 10;
+  const filled = Math.max(0, Math.min(slots, Math.round(usedRatio * slots)));
+  const graph = `${"#".repeat(filled)}${"-".repeat(slots - filled)}`;
+  return `ctx [${graph}] ${Math.round(usedRatio * 100)}% ${formatCompactNumber(safeLeft)}/${formatCompactNumber(safeLimit)} free`;
+}
+
+function formatCompactNumber(value: number): string {
+  if (value >= 1000) {
+    return `${Math.round(value / 1000)}k`;
+  }
+  return String(value);
+}
+
+function formatShortPath(value: string): string {
+  const home = process.env.HOME;
+  const normalized = home && value.startsWith(home) ? `~${value.slice(home.length)}` : value;
+  if (normalized.length <= 44) {
+    return normalized;
+  }
+
+  const parts = normalized.split("/").filter(Boolean);
+  if (normalized.startsWith("~/") && parts.length >= 3) {
+    return `~/${["...", ...parts.slice(-2)].join("/")}`;
+  }
+  if (parts.length >= 3) {
+    return `/${["...", ...parts.slice(-2)].join("/")}`;
+  }
+  return truncateLine(normalized, 44);
 }
 
 function renderTurnHeaderBadges(state: RuntimeTuiState, width: number): string[] {
@@ -3915,15 +4274,6 @@ function renderTurnHeaderBadges(state: RuntimeTuiState, width: number): string[]
 function renderOperatorTurnPanels(state: RuntimeTuiState, width: number): string[] {
   return [
     ...renderPinnedWarningLane(state, width),
-    ...renderIntentEchoLine(state, width),
-    ...renderStructuredTurnBlocks(state, width),
-    ...renderDiffSummaryCard(state, width),
-    ...renderRiskBadgeLine(state, width),
-    ...renderOutcomeFooter(state, width),
-    ...renderInlineActionChips(state, width),
-    ...renderKeyboardNavigationLine(width),
-    ...renderDensityControlLine(width),
-    ...renderTerminalCapabilityPanel(state, width),
   ];
 }
 
@@ -4200,8 +4550,8 @@ function renderModelPicker(state: RuntimeTuiState, width: number): string[] {
 }
 
 function renderCollapsedTraceSummary(state: RuntimeTuiState, width: number): string[] {
-  const totalEntries = state.latestTurnTrace.length + state.currentTurnActivity.length;
-  return renderMessageBox("trace", `▸ trace closed · Ctrl+T expand · ${totalEntries} entries`, width);
+  const totalEntries = state.currentTurnTraceDetails.length || (state.latestTurnTrace.length + state.currentTurnActivity.length);
+  return renderMessageBox("trace", `▸ Ctrl+T expand · ${totalEntries} entries`, width);
 }
 
 function renderControlCard(state: RuntimeTuiState, width: number): string[] {
@@ -4272,6 +4622,16 @@ function renderConversationTranscript(lines: string[], width: number, liveAssist
       continue;
     }
 
+    if (line.startsWith("turn: ")) {
+      rendered.push(...renderInlineTurnLine(line.slice(6), width, false));
+      continue;
+    }
+
+    if (line.startsWith("turn-detail: ")) {
+      rendered.push(...renderInlineTurnLine(line.slice(13), width, true));
+      continue;
+    }
+
     rendered.push(...wrapText(line, width));
   }
 
@@ -4283,6 +4643,15 @@ function renderConversationTranscript(lines: string[], width: number, liveAssist
   }
 
   return rendered;
+}
+
+function renderInlineTurnLine(value: string, width: number, detail: boolean): string[] {
+  const prefix = detail ? "   └─ " : "└─ ";
+  const available = Math.max(12, width - prefix.length);
+  return wrapText(value, available).map((line, index) => {
+    const leader = index === 0 ? prefix : " ".repeat(prefix.length);
+    return tintLine(truncateLine(`${leader}${line}`, width), detail ? ANSI.dim : ANSI.trace);
+  });
 }
 
 function stripActivityTimestamp(line: string): string {
@@ -4689,6 +5058,64 @@ async function maybeAutoPersistMemory(session: RuntimeSession, prompt: string): 
     "pre-compaction",
     ["auto", "compaction-threshold", "session"],
   );
+}
+
+export async function maybeArchiveAgedChatHistory(session: RuntimeSession, now = Date.now()): Promise<boolean> {
+  const cutoff = now - CHAT_HISTORY_RETENTION_MS;
+  if (session.events.length <= CHAT_HISTORY_MIN_RECENT_EVENTS) {
+    return false;
+  }
+
+  const protectedStart = Math.max(0, session.events.length - CHAT_HISTORY_MIN_RECENT_EVENTS);
+  const agedEvents = session.events.filter((event, index) =>
+    index < protectedStart
+    && event.kind !== "system"
+    && event.kind !== "compact"
+    && Date.parse(event.at) < cutoff
+  );
+  if (agedEvents.length === 0) {
+    return false;
+  }
+
+  const firstAt = agedEvents[0]?.at ?? "unknown";
+  const lastAt = agedEvents.at(-1)?.at ?? "unknown";
+  const eventCounts = agedEvents.reduce<Record<string, number>>((counts, event) => {
+    counts[event.kind] = (counts[event.kind] ?? 0) + 1;
+    return counts;
+  }, {});
+  const countSummary = Object.entries(eventCounts)
+    .map(([kind, count]) => `${kind}=${String(count)}`)
+    .join(", ");
+  const digestLines = agedEvents
+    .flatMap((event) => formatTranscriptEvent(event))
+    .map((line) => normalizeCompactText(line))
+    .filter((line) => line.length > 0)
+    .slice(-40);
+
+  if (session.archivist.enabled) {
+    await saveArchivistMemory(session, {
+      summary: `aged chat history ${firstAt}..${lastAt}; events=${String(agedEvents.length)}`,
+      content: [
+        `Archived aged chat history before local transcript pruning.`,
+        `Range: ${firstAt}..${lastAt}`,
+        `Counts: ${countSummary || "none"}`,
+        "",
+        ...digestLines,
+      ].join("\n"),
+      type: "chat-history-archive",
+      tags: ["auto", "chat-history", "aged"],
+    });
+  }
+
+  const aged = new Set(agedEvents);
+  session.events = session.events.filter((event) => !aged.has(event));
+  recordRuntimeEvent(session, {
+    kind: "compact",
+    status: "completed",
+    summary: "aged chat history archived",
+    detail: `events=${String(agedEvents.length)}; range=${firstAt}..${lastAt}; archivist=${session.archivist.enabled ? "saved" : "disabled"}`,
+  });
+  return true;
 }
 
 async function maybePersistCompactionMemory(session: RuntimeSession, prompt: string, beforeTokens: number, afterTokens: number): Promise<void> {

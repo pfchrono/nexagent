@@ -1,22 +1,32 @@
 import { execFileSync, spawnSync } from "node:child_process";
+import { lookup } from "node:dns/promises";
 import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { isIP } from "node:net";
 import path from "node:path";
 
 import { checkpointArchivistSession, saveArchivistMemory } from "./archivist.js";
 import { buildPatchPreview, searchFilesWithIgnore } from "./core-helpers.js";
+import { batchIndexNexsight, executeNexsight, indexNexsight, indexNexsightFile, searchNexsight } from "./nexsight.js";
 import type { RuntimeSession } from "./session.js";
 
 export type InternalToolName =
   | "read_file"
   | "write_file"
   | "apply_patch"
+  | "batch_edit"
   | "preview_patch"
   | "list_dir"
   | "search_content"
   | "search_files"
+  | "web_fetch"
+  | "web_search"
   | "git_status"
   | "git_diff"
   | "shell_command"
+  | "nexsight_execute"
+  | "nexsight_index"
+  | "nexsight_batch"
+  | "nexsight_search"
   | "archivist_save"
   | "archivist_checkpoint";
 
@@ -42,6 +52,8 @@ const SHELL_MAX_LINES = 120;
 const SHELL_MAX_CHARS = 12_000;
 const DIFF_MAX_LINES = 400;
 const DIFF_MAX_CHARS = 20_000;
+const WEB_TIMEOUT_MS = 8_000;
+const WEB_MAX_CHARS = 12_000;
 const BLOCKED_SHELL_PATTERNS = [
   /\brm\s+-rf\b/i,
   /\brm\s+-r\b/i,
@@ -67,7 +79,7 @@ export function getInternalToolDefinitions(): readonly InternalToolDefinition[] 
   return [
     {
       name: "read_file",
-      description: "Read UTF-8 text file inside repo-local allowed roots.",
+      description: "Read UTF-8 text file from workspace/reference paths unless protected by safety policy.",
       inputSchema: {
         type: "object",
         properties: {
@@ -79,7 +91,7 @@ export function getInternalToolDefinitions(): readonly InternalToolDefinition[] 
     },
     {
       name: "write_file",
-      description: "Write UTF-8 text file inside repo-local allowed roots.",
+      description: "Write UTF-8 text file inside repo-local write roots.",
       inputSchema: {
         type: "object",
         properties: {
@@ -92,7 +104,7 @@ export function getInternalToolDefinitions(): readonly InternalToolDefinition[] 
     },
     {
       name: "apply_patch",
-      description: "Apply exact text replacement inside existing UTF-8 file inside repo-local allowed roots.",
+      description: "Apply exact text replacement inside existing UTF-8 file inside repo-local write roots.",
       inputSchema: {
         type: "object",
         properties: {
@@ -102,6 +114,22 @@ export function getInternalToolDefinitions(): readonly InternalToolDefinition[] 
           replaceAll: { type: "boolean", description: "Replace every exact match when true." },
         },
         required: ["path", "find", "replace"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "batch_edit",
+      description: "Apply multiple guarded file edits in one atomic batch. Supports write, replace, insert_before, insert_after, prepend, and append; validates every path and anchor before writing anything.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          edits: {
+            type: "array",
+            description: "Edit operations. Each item needs type and path. replace uses find/replace. insert_before/insert_after uses anchor/content. write uses content.",
+            items: { type: "object" },
+          },
+        },
+        required: ["edits"],
         additionalProperties: false,
       },
     },
@@ -122,7 +150,7 @@ export function getInternalToolDefinitions(): readonly InternalToolDefinition[] 
     },
     {
       name: "list_dir",
-      description: "List directory contents inside repo-local allowed roots.",
+      description: "List directory contents from workspace/reference paths unless protected by safety policy.",
       inputSchema: {
         type: "object",
         properties: {
@@ -158,6 +186,31 @@ export function getInternalToolDefinitions(): readonly InternalToolDefinition[] 
       },
     },
     {
+      name: "web_fetch",
+      description: "Fetch a public HTTP(S) page and return capped text content for research.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          url: { type: "string", description: "Public http(s) URL to fetch." },
+        },
+        required: ["url"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "web_search",
+      description: "Search the public web and return capped result titles, URLs, and snippets.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "Search query." },
+          limit: { type: "number", description: "Maximum result count, capped at 8." },
+        },
+        required: ["query"],
+        additionalProperties: false,
+      },
+    },
+    {
       name: "git_status",
       description: "Show repo branch and freshness status for current working tree.",
       inputSchema: {
@@ -186,6 +239,65 @@ export function getInternalToolDefinitions(): readonly InternalToolDefinition[] 
           command: { type: "string", description: "Shell command to run from current working directory." },
         },
         required: ["command"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "nexsight_execute",
+      description: "Run sandboxed analysis code and return only bounded stdout/stderr. Use for counts, parsing, filtering, and data processing.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          language: { type: "string", enum: ["shell", "javascript", "python"], description: "Execution language. Defaults to shell when command is provided; otherwise inferred from code or javascript." },
+          code: { type: "string", description: "Script to run from current working directory." },
+          command: { type: "string", description: "Shell command alias for code; implies language=shell when language is omitted." },
+          cmd: { type: "string", description: "Short shell command alias for command." },
+          script: { type: "string", description: "Script alias for code." },
+          task: { type: "string", description: "Natural-language task context. Not executable by itself; provide code or command too." },
+          reason: { type: "string", description: "Short reason for using Nexsight." },
+          timeoutMs: { type: "number", description: "Optional timeout, capped at 30000ms." },
+        },
+        required: [],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "nexsight_index",
+      description: "Index bounded file or text content into the local nexsight search store.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          source: { type: "string", description: "Stable source label for later search." },
+          path: { type: "string", description: "Optional readable file path to index." },
+          content: { type: "string", description: "Optional text content to index when path is omitted." },
+        },
+        required: ["source"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "nexsight_batch",
+      description: "Index text files under a readable repo root into nexsight with ignore rules and bounded file count.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          root: { type: "string", description: "Optional root path relative to current working directory." },
+          pattern: { type: "string", description: "Optional glob suffix, such as *.ts or *.md." },
+          limit: { type: "number", description: "Maximum files to index, capped at 400." },
+        },
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "nexsight_search",
+      description: "Search the local nexsight index and return small ranked excerpts.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "Search query." },
+          limit: { type: "number", description: "Maximum result count, capped at 12." },
+        },
+        required: ["query"],
         additionalProperties: false,
       },
     },
@@ -252,6 +364,8 @@ export function executeInternalTool(session: RuntimeSession, call: InternalToolC
         asString(call.arguments?.replace, ""),
         asBoolean(call.arguments?.replaceAll),
       );
+    case "batch_edit":
+      return executeBatchEditTool(session, call.arguments ?? {});
     case "preview_patch":
       return executePreviewPatchTool(
         session,
@@ -266,12 +380,26 @@ export function executeInternalTool(session: RuntimeSession, call: InternalToolC
       return executeSearchContentTool(session, asString(call.arguments?.pattern ?? call.arguments?.query, ""), asOptionalString(call.arguments?.path));
     case "search_files":
       return executeSearchFilesTool(session, asString(call.arguments?.pattern ?? call.arguments?.query, ""), asOptionalString(call.arguments?.path));
+    case "web_fetch":
+    case "web_search":
+      return pending(call.name, "async");
     case "git_status":
       return executeGitStatusTool(session);
     case "git_diff":
       return executeGitDiffTool(session, asOptionalString(call.arguments?.path));
     case "shell_command":
       return executeShellCommandTool(session, asString(call.arguments?.command, ""));
+    case "nexsight_execute":
+      return executeNexsightExecuteTool(session, call.arguments ?? {});
+    case "nexsight_index":
+      return executeNexsightIndexTool(session, call.arguments ?? {});
+    case "nexsight_batch":
+      return executeNexsightBatchTool(session, call.arguments ?? {});
+    case "nexsight_search":
+      return toToolResult("nexsight_search", searchNexsight(session, {
+        query: asString(call.arguments?.query, ""),
+        limit: asNumber(call.arguments?.limit, 5),
+      }));
     case "archivist_save":
       return pending("archivist_save", "async");
     case "archivist_checkpoint":
@@ -281,6 +409,10 @@ export function executeInternalTool(session: RuntimeSession, call: InternalToolC
 
 export async function executeInternalToolAsync(session: RuntimeSession, call: InternalToolCall): Promise<InternalToolResult> {
   switch (call.name) {
+    case "web_fetch":
+      return await executeWebFetchTool(asString(call.arguments?.url, ""));
+    case "web_search":
+      return await executeWebSearchTool(asString(call.arguments?.query, ""), asNumber(call.arguments?.limit, 5));
     case "archivist_save":
       return await executeArchivistSaveTool(
         session,
@@ -297,10 +429,19 @@ export async function executeInternalToolAsync(session: RuntimeSession, call: In
 }
 
 export function classifyInternalToolRisk(call: InternalToolCall): "low" | "guarded" {
+  if (call.name === "nexsight_execute") {
+    return isNexsightShellCall(call.arguments ?? {}) ? "guarded" : "low";
+  }
+
   return call.name === "shell_command"
     || call.name === "write_file"
     || call.name === "apply_patch"
+    || call.name === "batch_edit"
     || call.name === "preview_patch"
+    || call.name === "web_fetch"
+    || call.name === "web_search"
+    || call.name === "nexsight_index"
+    || call.name === "nexsight_batch"
     || call.name === "archivist_save"
     || call.name === "archivist_checkpoint"
     ? "guarded"
@@ -311,10 +452,45 @@ export function resolveRepoPath(session: RuntimeSession, inputPath?: string): st
   if (!inputPath || inputPath === ".") {
     return session.cwd;
   }
-  return path.resolve(session.cwd, inputPath);
+  return path.resolve(session.cwd, expandHomePath(inputPath));
+}
+
+function expandHomePath(inputPath: string): string {
+  const home = process.env.HOME ?? process.env.USERPROFILE ?? "";
+  if (!home) {
+    return inputPath;
+  }
+  if (inputPath === "~") {
+    return home;
+  }
+  if (inputPath.startsWith("~/")) {
+    return path.join(home, inputPath.slice(2));
+  }
+  return inputPath;
 }
 
 export function validateRepoToolPath(session: RuntimeSession, targetPath: string): string | null {
+  return validateWriteToolPath(session, targetPath);
+}
+
+export function validateReadToolPath(session: RuntimeSession, targetPath: string): string | null {
+  const resolvedPath = path.resolve(targetPath);
+
+  for (const protectedRoot of session.toolPolicy.protectedRoots) {
+    if (isWithinRoot(resolvedPath, protectedRoot)) {
+      return `tool policy blocked ${resolvedPath}; protected path`;
+    }
+  }
+
+  const readRoots = session.toolPolicy.readRoots ?? [];
+  if (readRoots.length === 0 || readRoots.some((root) => isWithinRoot(resolvedPath, root))) {
+    return null;
+  }
+
+  return `tool policy blocked ${resolvedPath}; outside readable workspace roots`;
+}
+
+export function validateWriteToolPath(session: RuntimeSession, targetPath: string): string | null {
   const resolvedPath = path.resolve(targetPath);
 
   for (const protectedRoot of session.toolPolicy.protectedRoots) {
@@ -327,12 +503,20 @@ export function validateRepoToolPath(session: RuntimeSession, targetPath: string
     return null;
   }
 
+  if (session.operationControls.yoloMode) {
+    const writeRoots = session.toolPolicy.readRoots ?? [];
+    if (writeRoots.length === 0 || writeRoots.some((root) => isWithinRoot(resolvedPath, root))) {
+      return null;
+    }
+    return `tool policy blocked ${resolvedPath}; outside yolo workspace roots`;
+  }
+
   return `tool policy blocked ${resolvedPath}; outside repo-local roots`;
 }
 
 function executeReadFileTool(session: RuntimeSession, inputPath: string): InternalToolResult {
   const targetPath = resolveRepoPath(session, inputPath);
-  const policyFailure = validateRepoToolPath(session, targetPath);
+  const policyFailure = validateReadToolPath(session, targetPath);
   if (policyFailure) {
     return fail("read_file", policyFailure);
   }
@@ -351,7 +535,7 @@ function executeReadFileTool(session: RuntimeSession, inputPath: string): Intern
 
 function executeListDirTool(session: RuntimeSession, inputPath?: string): InternalToolResult {
   const targetPath = resolveRepoPath(session, inputPath);
-  const policyFailure = validateRepoToolPath(session, targetPath);
+  const policyFailure = validateReadToolPath(session, targetPath);
   if (policyFailure) {
     return fail("list_dir", policyFailure);
   }
@@ -368,7 +552,7 @@ function executeListDirTool(session: RuntimeSession, inputPath?: string): Intern
 
 function executeWriteFileTool(session: RuntimeSession, inputPath: string, content: string): InternalToolResult {
   const targetPath = resolveRepoPath(session, inputPath);
-  const policyFailure = validateRepoToolPath(session, targetPath);
+  const policyFailure = validateWriteToolPath(session, targetPath);
   if (policyFailure) {
     return fail("write_file", policyFailure);
   }
@@ -394,7 +578,7 @@ function executeApplyPatchTool(
   }
 
   const targetPath = resolveRepoPath(session, inputPath);
-  const policyFailure = validateRepoToolPath(session, targetPath);
+  const policyFailure = validateWriteToolPath(session, targetPath);
   if (policyFailure) {
     return fail("apply_patch", policyFailure);
   }
@@ -422,6 +606,174 @@ function executeApplyPatchTool(
   }
 }
 
+type BatchEditOperation = {
+  type: "write" | "replace" | "insert_before" | "insert_after" | "prepend" | "append";
+  path: string;
+  content?: string;
+  find?: string;
+  replace?: string;
+  anchor?: string;
+  replaceAll?: boolean;
+};
+
+function executeBatchEditTool(session: RuntimeSession, args: Record<string, unknown>): InternalToolResult {
+  const edits = parseBatchEditOperations(args.edits ?? args.operations ?? args.changes);
+  if (!edits.ok) {
+    return fail("batch_edit", edits.error);
+  }
+  if (edits.value.length === 0) {
+    return fail("batch_edit", "edits required");
+  }
+  if (edits.value.length > 40) {
+    return fail("batch_edit", "too many edits; maximum is 40");
+  }
+
+  const currentByPath = new Map<string, string>();
+  const nextByPath = new Map<string, string>();
+  const summaries: string[] = [];
+
+  for (let index = 0; index < edits.value.length; index += 1) {
+    const edit = edits.value[index];
+    const targetPath = resolveRepoPath(session, edit.path);
+    const policyFailure = validateWriteToolPath(session, targetPath);
+    if (policyFailure) {
+      return fail("batch_edit", `edit ${String(index + 1)} blocked: ${policyFailure}`);
+    }
+
+    try {
+      const current = nextByPath.get(targetPath) ?? readBatchEditCurrent(targetPath, currentByPath);
+      const next = applyBatchEditOperation(session, targetPath, current, edit, index + 1);
+      if (!next.ok) {
+        return fail("batch_edit", next.error);
+      }
+      nextByPath.set(targetPath, next.value);
+      summaries.push(next.summary);
+    } catch (error) {
+      return fail("batch_edit", `edit ${String(index + 1)} failed: ${formatToolError(targetPath, error)}`);
+    }
+  }
+
+  for (const [targetPath, next] of nextByPath) {
+    mkdirSync(path.dirname(targetPath), { recursive: true });
+    writeFileSync(targetPath, next, "utf8");
+  }
+
+  return ok("batch_edit", [
+    `batch edited ${String(nextByPath.size)} file${nextByPath.size === 1 ? "" : "s"} with ${String(edits.value.length)} operation${edits.value.length === 1 ? "" : "s"}`,
+    ...summaries.slice(0, 20),
+    summaries.length > 20 ? `... ${String(summaries.length - 20)} more operations` : "",
+  ].filter(Boolean).join("\n"));
+}
+
+function parseBatchEditOperations(value: unknown): { ok: true; value: BatchEditOperation[] } | { ok: false; error: string } {
+  if (!Array.isArray(value)) {
+    return { ok: false, error: "edits array required" };
+  }
+
+  const edits: BatchEditOperation[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    const raw = value[index];
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      return { ok: false, error: `edit ${String(index + 1)} must be an object` };
+    }
+    const record = raw as Record<string, unknown>;
+    const type = asString(record.type ?? record.op, "") as BatchEditOperation["type"];
+    const inputPath = asString(record.path, "");
+    if (!["write", "replace", "insert_before", "insert_after", "prepend", "append"].includes(type)) {
+      return { ok: false, error: `edit ${String(index + 1)} has unsupported type` };
+    }
+    if (!inputPath) {
+      return { ok: false, error: `edit ${String(index + 1)} path required` };
+    }
+    edits.push({
+      type,
+      path: inputPath,
+      content: asOptionalString(record.content),
+      find: asOptionalString(record.find),
+      replace: asOptionalString(record.replace),
+      anchor: asOptionalString(record.anchor ?? record.after ?? record.before),
+      replaceAll: asBoolean(record.replaceAll),
+    });
+  }
+
+  return { ok: true, value: edits };
+}
+
+function readBatchEditCurrent(targetPath: string, currentByPath: Map<string, string>): string {
+  if (currentByPath.has(targetPath)) {
+    return currentByPath.get(targetPath) ?? "";
+  }
+  let current = "";
+  try {
+    current = readFileSync(targetPath, "utf8");
+  } catch {
+    current = "";
+  }
+  currentByPath.set(targetPath, current);
+  return current;
+}
+
+function applyBatchEditOperation(
+  session: RuntimeSession,
+  targetPath: string,
+  current: string,
+  edit: BatchEditOperation,
+  index: number,
+): { ok: true; value: string; summary: string } | { ok: false; error: string } {
+  const label = `${String(index)} ${formatToolPath(session, targetPath)} ${edit.type}`;
+  if (edit.type === "write") {
+    if (edit.content === undefined) {
+      return { ok: false, error: `edit ${label}: content required` };
+    }
+    return { ok: true, value: edit.content, summary: `${label} (${String(edit.content.length)} chars)` };
+  }
+  if (edit.type === "prepend") {
+    if (edit.content === undefined) {
+      return { ok: false, error: `edit ${label}: content required` };
+    }
+    return { ok: true, value: `${edit.content}${current}`, summary: `${label} (${String(edit.content.length)} chars)` };
+  }
+  if (edit.type === "append") {
+    if (edit.content === undefined) {
+      return { ok: false, error: `edit ${label}: content required` };
+    }
+    return { ok: true, value: `${current}${edit.content}`, summary: `${label} (${String(edit.content.length)} chars)` };
+  }
+  if (edit.type === "replace") {
+    if (!edit.find) {
+      return { ok: false, error: `edit ${label}: find required` };
+    }
+    const replacement = edit.replace ?? "";
+    const occurrences = current.split(edit.find).length - 1;
+    if (occurrences === 0) {
+      return { ok: false, error: `edit ${label}: find text not found` };
+    }
+    if (!edit.replaceAll && occurrences > 1) {
+      return { ok: false, error: `edit ${label}: find text ambiguous (${String(occurrences)} matches)` };
+    }
+    const value = edit.replaceAll ? current.split(edit.find).join(replacement) : current.replace(edit.find, replacement);
+    return { ok: true, value, summary: `${label} (${String(occurrences)} match${occurrences === 1 ? "" : "es"})` };
+  }
+
+  if (!edit.anchor) {
+    return { ok: false, error: `edit ${label}: anchor required` };
+  }
+  if (edit.content === undefined) {
+    return { ok: false, error: `edit ${label}: content required` };
+  }
+  const occurrences = current.split(edit.anchor).length - 1;
+  if (occurrences === 0) {
+    return { ok: false, error: `edit ${label}: anchor not found` };
+  }
+  if (occurrences > 1) {
+    return { ok: false, error: `edit ${label}: anchor ambiguous (${String(occurrences)} matches)` };
+  }
+  const value = edit.type === "insert_before"
+    ? current.replace(edit.anchor, `${edit.content}${edit.anchor}`)
+    : current.replace(edit.anchor, `${edit.anchor}${edit.content}`);
+  return { ok: true, value, summary: `${label} (anchor matched)` };
+}
+
 function executePreviewPatchTool(
   session: RuntimeSession,
   inputPath: string,
@@ -434,7 +786,7 @@ function executePreviewPatchTool(
   }
 
   const targetPath = resolveRepoPath(session, inputPath);
-  const policyFailure = validateRepoToolPath(session, targetPath);
+  const policyFailure = validateWriteToolPath(session, targetPath);
   if (policyFailure) {
     return fail("preview_patch", policyFailure);
   }
@@ -467,7 +819,7 @@ function executeSearchContentTool(session: RuntimeSession, pattern: string, inpu
   }
 
   const targetPath = resolveRepoPath(session, inputPath);
-  const policyFailure = validateRepoToolPath(session, targetPath);
+  const policyFailure = validateReadToolPath(session, targetPath);
   if (policyFailure) {
     return fail("search_content", policyFailure);
   }
@@ -502,7 +854,7 @@ function executeSearchFilesTool(session: RuntimeSession, pattern: string, inputP
   }
 
   const targetPath = resolveRepoPath(session, inputPath);
-  const policyFailure = validateRepoToolPath(session, targetPath);
+  const policyFailure = validateReadToolPath(session, targetPath);
   if (policyFailure) {
     return fail("search_files", policyFailure);
   }
@@ -614,9 +966,97 @@ function executeShellCommandTool(session: RuntimeSession, command: string): Inte
       return fail("shell_command", `shell exit ${String(result.status ?? 1)}\n${capped}`);
     }
 
-    return ok("shell_command", capped);
+    return ok("shell_command", withNexsightRouteHint(capped));
   } catch (error) {
     return fail("shell_command", `shell failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+function withNexsightRouteHint(output: string): string {
+  const lines = output.split(/\r?\n/);
+  return output.length > SHELL_MAX_CHARS / 2 || lines.length > SHELL_MAX_LINES / 2
+    ? `${output}\n\nnexsight: large output; use nexsight_execute to summarize or nexsight_index to store/search it.`
+    : output;
+}
+
+async function executeWebFetchTool(inputUrl: string): Promise<InternalToolResult> {
+  const url = inputUrl.trim();
+  if (!url) {
+    return fail("web_fetch", "url required");
+  }
+
+  const safetyFailure = await validatePublicHttpUrl(url);
+  if (safetyFailure) {
+    return fail("web_fetch", safetyFailure);
+  }
+
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), WEB_TIMEOUT_MS);
+    const response = await fetch(url, {
+      redirect: "follow",
+      signal: controller.signal,
+      headers: {
+        "accept": "text/html,text/plain,application/json;q=0.9,*/*;q=0.1",
+        "user-agent": "nexagent/0.1 web_fetch",
+      },
+    });
+    clearTimeout(timeout);
+
+    if (!response.ok) {
+      return fail("web_fetch", `fetch failed ${String(response.status)} ${response.statusText}`);
+    }
+
+    const contentType = response.headers.get("content-type") ?? "unknown";
+    const text = await response.text();
+    return ok("web_fetch", withNexsightRouteHint(capWebOutput(`url: ${response.url}\ncontent-type: ${contentType}\n\n${htmlToText(text)}`)));
+  } catch (error) {
+    return fail("web_fetch", `fetch failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+async function executeWebSearchTool(query: string, limit: number): Promise<InternalToolResult> {
+  const trimmed = query.trim();
+  if (!trimmed) {
+    return fail("web_search", "query required");
+  }
+
+  const resultLimit = Math.max(1, Math.min(8, Math.floor(limit)));
+  const searchUrl = `https://duckduckgo.com/html/?q=${encodeURIComponent(trimmed)}`;
+  const safetyFailure = await validatePublicHttpUrl(searchUrl);
+  if (safetyFailure) {
+    return fail("web_search", safetyFailure);
+  }
+
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), WEB_TIMEOUT_MS);
+    const response = await fetch(searchUrl, {
+      redirect: "follow",
+      signal: controller.signal,
+      headers: {
+        "accept": "text/html",
+        "user-agent": "nexagent/0.1 web_search",
+      },
+    });
+    clearTimeout(timeout);
+
+    if (!response.ok) {
+      return fail("web_search", `search failed ${String(response.status)} ${response.statusText}`);
+    }
+
+    const html = await response.text();
+    const results = parseDuckDuckGoResults(html).slice(0, resultLimit);
+    if (results.length === 0) {
+      return ok("web_search", "(no results)");
+    }
+    return ok("web_search", results.map((result, index) => [
+      `${String(index + 1)}. ${result.title}`,
+      `   ${result.url}`,
+      result.snippet ? `   ${result.snippet}` : "",
+    ].filter(Boolean).join("\n")).join("\n\n"));
+  } catch (error) {
+    return fail("web_search", `search failed: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
@@ -633,6 +1073,85 @@ async function executeArchivistSaveTool(
   } catch (error) {
     return fail("archivist_save", error instanceof Error ? error.message : String(error));
   }
+}
+
+function executeNexsightIndexTool(session: RuntimeSession, args: Record<string, unknown>): InternalToolResult {
+  const source = asString(args.source, "");
+  const content = asOptionalString(args.content);
+  const inputPath = asOptionalString(args.path);
+  if (inputPath) {
+    const targetPath = resolveRepoPath(session, inputPath);
+    const policyFailure = validateReadToolPath(session, targetPath);
+    if (policyFailure) {
+      return fail("nexsight_index", policyFailure);
+    }
+    return toToolResult("nexsight_index", indexNexsightFile(session, source || inputPath, targetPath));
+  }
+  return toToolResult("nexsight_index", indexNexsight(session, { source, content: content ?? "" }));
+}
+
+function executeNexsightExecuteTool(session: RuntimeSession, args: Record<string, unknown>): InternalToolResult {
+  const command = asOptionalString(args.command ?? args.cmd);
+  const code = asString(args.code ?? command ?? args.script, "");
+  const requestedLanguage = normalizeNexsightLanguage(asOptionalString(args.language ?? args.lang));
+  const language = requestedLanguage ?? inferNexsightLanguage(code, Boolean(command));
+  return toToolResult("nexsight_execute", executeNexsight(session, {
+    language,
+    code,
+    timeoutMs: asNumber(args.timeoutMs, 30_000),
+  }));
+}
+
+function isNexsightShellCall(args: Record<string, unknown>): boolean {
+  const language = normalizeNexsightLanguage(asOptionalString(args.language ?? args.lang));
+  return language === "shell" || Boolean(asOptionalString(args.command ?? args.cmd));
+}
+
+function normalizeNexsightLanguage(value?: string): string | undefined {
+  const language = value?.trim().toLowerCase();
+  if (!language) {
+    return undefined;
+  }
+  if (language === "js" || language === "node") {
+    return "javascript";
+  }
+  if (language === "py") {
+    return "python";
+  }
+  if (language === "sh" || language === "bash") {
+    return "shell";
+  }
+  return language;
+}
+
+function inferNexsightLanguage(code: string, hasCommand: boolean): string {
+  if (hasCommand) {
+    return "shell";
+  }
+  const trimmed = code.trim();
+  if (/^(from\s+\S+\s+import\s+|import\s+(os|sys|json|pathlib|subprocess|re)\b|print\s*\(|for\s+\w+\s+in\s+|def\s+\w+\s*\()/m.test(trimmed)) {
+    return "python";
+  }
+  if (/^(find|rg|grep|ls|cat|sed|awk|printf|git|python3?)\b/m.test(trimmed)) {
+    return "shell";
+  }
+  return "javascript";
+}
+
+function executeNexsightBatchTool(session: RuntimeSession, args: Record<string, unknown>): InternalToolResult {
+  const inputPath = asOptionalString(args.root);
+  if (inputPath) {
+    const targetPath = resolveRepoPath(session, inputPath);
+    const policyFailure = validateReadToolPath(session, targetPath);
+    if (policyFailure) {
+      return fail("nexsight_batch", policyFailure);
+    }
+  }
+  return toToolResult("nexsight_batch", batchIndexNexsight(session, {
+    root: inputPath,
+    pattern: asOptionalString(args.pattern),
+    limit: asNumber(args.limit, 100),
+  }));
 }
 
 async function executeArchivistCheckpointTool(session: RuntimeSession, reason?: string): Promise<InternalToolResult> {
@@ -772,6 +1291,10 @@ function asBoolean(value: unknown): boolean {
   return value === true;
 }
 
+function asNumber(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
 function asStringArray(value: unknown): string[] | undefined {
   if (!Array.isArray(value)) {
     return undefined;
@@ -803,12 +1326,114 @@ function capDiffOutput(output: string): string {
   return capped;
 }
 
+function capWebOutput(output: string): string {
+  const normalized = output.replace(/\r/g, "").replace(/\n{3,}/g, "\n\n").trim();
+  return normalized.length > WEB_MAX_CHARS ? `${normalized.slice(0, WEB_MAX_CHARS)}\n... web output truncated ...` : normalized;
+}
+
+async function validatePublicHttpUrl(inputUrl: string): Promise<string | null> {
+  let parsed: URL;
+  try {
+    parsed = new URL(inputUrl);
+  } catch {
+    return "invalid URL";
+  }
+
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    return "only http and https URLs are allowed";
+  }
+
+  const hostname = parsed.hostname.toLowerCase();
+  if (hostname === "localhost" || hostname.endsWith(".localhost")) {
+    return "local host URLs are blocked";
+  }
+
+  if (isPrivateAddress(hostname)) {
+    return "private network URLs are blocked";
+  }
+
+  try {
+    const addresses = await lookup(hostname, { all: true, verbatim: true });
+    if (addresses.some((address) => isPrivateAddress(address.address))) {
+      return "private network URLs are blocked";
+    }
+  } catch {
+    return `unable to resolve host: ${hostname}`;
+  }
+
+  return null;
+}
+
+function isPrivateAddress(value: string): boolean {
+  const version = isIP(value);
+  if (version === 4) {
+    const parts = value.split(".").map((part) => Number.parseInt(part, 10));
+    const [a = 0, b = 0] = parts;
+    return a === 0
+      || a === 10
+      || a === 127
+      || (a === 169 && b === 254)
+      || (a === 172 && b >= 16 && b <= 31)
+      || (a === 192 && b === 168);
+  }
+  if (version === 6) {
+    return value === "::1" || value.startsWith("fc") || value.startsWith("fd") || value.startsWith("fe80:");
+  }
+  return false;
+}
+
+function htmlToText(value: string): string {
+  return decodeHtmlEntities(value
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " "));
+}
+
+function parseDuckDuckGoResults(html: string): Array<{ title: string; url: string; snippet: string }> {
+  const results: Array<{ title: string; url: string; snippet: string }> = [];
+  const resultRegex = /<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?<a[^>]+class="result__snippet"[^>]*>([\s\S]*?)<\/a>/gi;
+  let match: RegExpExecArray | null;
+  while ((match = resultRegex.exec(html)) && results.length < 8) {
+    results.push({
+      title: htmlToText(match[2] ?? ""),
+      url: normalizeDuckDuckGoUrl(decodeHtmlEntities(match[1] ?? "")),
+      snippet: htmlToText(match[3] ?? ""),
+    });
+  }
+  return results;
+}
+
+function normalizeDuckDuckGoUrl(value: string): string {
+  try {
+    const parsed = new URL(value, "https://duckduckgo.com");
+    const uddg = parsed.searchParams.get("uddg");
+    return uddg ? decodeURIComponent(uddg) : parsed.toString();
+  } catch {
+    return value;
+  }
+}
+
+function decodeHtmlEntities(value: string): string {
+  return value
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&#x2F;/g, "/");
+}
+
 function ok(tool: InternalToolName, output: string): InternalToolResult {
   return { ok: true, tool, output };
 }
 
 function fail(tool: InternalToolName, output: string): InternalToolResult {
   return { ok: false, tool, output };
+}
+
+function toToolResult(tool: InternalToolName, result: { ok: boolean; output: string }): InternalToolResult {
+  return { ok: result.ok, tool, output: result.output };
 }
 
 function pending(tool: InternalToolName, detail: string): InternalToolResult {

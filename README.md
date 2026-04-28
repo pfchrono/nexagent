@@ -13,11 +13,15 @@ Terminal-first AI coding harness for local operator-driven development.
   - `codex-http`
 - Assembles repo-local instructions, MCP context, runtime state, and memory context into provider prompts.
 - Exposes guarded internal tools for repo reads, writes, diffs, searches, shell commands, and Archivist memory.
+- Exposes Nexsight tools for bounded code/data execution, local indexing, and context search with SQLite FTS when available.
+- Provides guarded web fetch/search and batch edit helpers for research and multi-file patch workflows.
 - Provides slash commands for status, provider/model control, tools, memory, skill routing, mouse behavior, approvals, compaction, file reads/searches, diffs, and image attachments.
 - Supports `$skill` shorthand for skill routing.
 - Supports `!<command>` for guarded shell command transcript output.
 - Supports `--yolo` session mode for guarded approval bypass while preserving destructive shell/tool blocks.
+- Supports `/cavemanmode` and `/deadpoolmode` instruction overlays for concise/operator-style model replies.
 - Shows cockpit-style TUI panels for turn metadata, warnings, structured actions/results, risk/outcome state, recovery actions, navigation hints, and terminal capabilities.
+- Includes an opt-in OpenTUI shell baseline via `--opentui` for the ongoing v1.5 terminal UI rewrite.
 
 ## Repository Layout
 
@@ -25,6 +29,7 @@ Terminal-first AI coding harness for local operator-driven development.
 - `src/runtime/` — config, session state, instructions, tools, persistence, memory
 - `src/provider*.ts` — provider request routing and transports
 - `src/tui/` — terminal primitives
+- `src/opentui/` — opt-in OpenTUI shell baseline and runtime view adapter
 - `test/` — CLI, provider, runtime config, instructions, and tool tests
 - `.planning/` — project roadmap, state, requirements, phase artifacts, audits
 - `.nexagent/`, `.claude/`, `.mcp.json` — local runtime and assistant configuration
@@ -87,6 +92,14 @@ Run with YOLO guarded approval bypass:
 bun run dev -- --yolo run "continue current task"
 ```
 
+Run the opt-in OpenTUI shell baseline:
+
+```bash
+bun run dev -- --opentui
+```
+
+OpenTUI is not the default path yet. Current shell work is focused on boot/render/input safety before the composer, command surface, transcript scroll, and cockpit controls are moved over.
+
 ## Common Runtime Commands
 
 Inside TUI:
@@ -97,6 +110,7 @@ Inside TUI:
 - `/provider transport ...` — transport mode switch
 - `/model` — model status or switch
 - `/tools` — internal tool policy and availability
+- `/tools nexsight` — Nexsight store/status helpers
 - `/memory` — Archivist memory status and commands
 - `/skill` — list or route skills
 - `/attach <image-path>` — queue image attachment for HTTP transports
@@ -106,11 +120,41 @@ Inside TUI:
 - `/diff`, `/rg`, `/find`, `/read`, `/ls`, `/pwd` — repo-local utility commands
 - `!<command>` — guarded shell command transcript output
 
+## Nexsight
+
+Nexsight is the built-in context/code intelligence helper inspired by `context-mode`.
+It is meant for tasks that would otherwise dump large raw files or command output into chat.
+
+Current tool surface:
+
+- `nexsight_execute` — run bounded `shell`, `javascript`, or `python` snippets from the session cwd.
+- `nexsight_index` — index a file or text payload into the local search store.
+- `nexsight_batch` — index a bounded set of repo text files with ignore rules.
+- `nexsight_search` — query indexed excerpts.
+
+Storage lives under `.nexagent/` for local runtime state. When `better-sqlite3` is available, Nexsight uses SQLite FTS; otherwise it falls back to a JSON chunk store.
+
+Use Nexsight for broad repo exploration, counting, parsing, filtering, summarizing, and context search. Use direct file tools for small known files or exact edits.
+
+## Dogfood Guardrails
+
+Recent dogfood work tightened the provider loop:
+
+- malformed tool-call markup is nudged back into valid internal tool calls instead of leaking raw tags to chat
+- file-change claims require write evidence from `write_file`, `apply_patch`, `batch_edit`, or shell edits
+- non-actionable "say apply now" replies are nudged to continue when the task is already authorized
+- explicit Nexsight tasks are routed back toward Nexsight tools
+- tool events include duration and bounded output token estimates for the trace
+
+These guardrails are not a replacement for review. They reduce common harness failure modes while keeping operator-visible trace evidence.
+
 ## Safety Model
 
 Internal tools are repo-local and guarded. Shell output is bounded. Destructive shell patterns remain blocked, including in `--yolo` mode.
 
 Do not treat `--yolo` as permission to run destructive commands.
+
+Readable reference paths may be broader than writable roots so the model can inspect nearby repositories for context. Writes remain guarded to configured write roots unless explicit yolo/session policy allows a broader write, and protected/system paths stay blocked.
 
 ## Planning State
 

@@ -21,8 +21,53 @@ test("createOpenTuiRuntimeView maps runtime session without mutation", () => {
     turnCount: 2,
     approval: "open",
     toolPolicy: "repo-local-guarded",
+    headerTitle: "nexagent :: opentui",
+    providerLabel: "codex/gpt-5.4",
+    sessionLabel: "session session_test | turns 2",
+    statusLabel: "ready - runtime baseline",
+    cwdLabel: "/repo",
+    transcriptLines: ["No transcript yet"],
+    composerHint: "Type prompt. Enter submit. Esc clear/cancel. Ctrl+C quit.",
+    footerLabel: "approval open | tools repo-local-guarded",
+    traceCollapsedLabel: "trace closed - Ctrl+T expand",
+    traceExpandedLabel: "trace open - Ctrl+T collapse",
+    traceSummaryLines: ["no turn events"],
+    traceDetailLines: ["trace empty"],
   });
   assert.equal(JSON.stringify(session.action), before);
+});
+
+test("createOpenTuiRuntimeView maps transcript and trace lines", () => {
+  const session = createSession();
+  session.conversation = [
+    { role: "user", content: "inspect repo\nsecond line", tokens: 2 },
+    { role: "assistant", content: "done", tokens: 1 },
+  ];
+  session.events = [
+    {
+      at: "2025-01-01T00:00:01.000Z",
+      kind: "provider",
+      status: "started",
+      summary: "provider request started",
+      detail: "transport=codex-http",
+    },
+    {
+      at: "2025-01-01T00:00:02.000Z",
+      kind: "tool",
+      status: "completed",
+      summary: "tool nexsight_execute completed",
+      detail: "out~12",
+    },
+  ];
+
+  const view = createOpenTuiRuntimeView(session);
+
+  assert.deepEqual(view.transcriptLines, ["you: inspect repo second line", "agent: done"]);
+  assert.deepEqual(view.traceSummaryLines, [
+    "provider started - provider request started",
+    "tool completed - tool nexsight_execute completed",
+  ]);
+  assert.match(view.traceDetailLines.join("\n"), /transport=codex-http/);
 });
 
 function createSession(): RuntimeSession {

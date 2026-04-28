@@ -4,7 +4,7 @@ import { CODEX_EXEC_ADAPTER, invokeCodexExecTransport } from "./provider/codex-e
 import { getCodexModelDefinition, isCodexApiSupportedModel, normalizeCodexModel } from "./models.js";
 import { applyArchivistRetrieval } from "./runtime/archivist.js";
 import { assemblePrompt } from "./runtime/instructions.js";
-import { consumeOperatorSteer, recordRuntimeEvent, setRuntimeAction } from "./runtime/session.js";
+import { consumeOperatorSteer, estimateTokenCount, recordRuntimeEvent, setRuntimeAction } from "./runtime/session.js";
 import type { RuntimeApprovalRequest, RuntimeSession } from "./runtime/session.js";
 import { classifyInternalToolRisk, executeInternalToolAsync, type InternalToolCall, type InternalToolResult } from "./runtime/tools.js";
 
@@ -67,7 +67,32 @@ export interface CodexInvokers {
 }
 
 const TOOL_CALL_PATTERN = /<nexagent_tool_call>([\s\S]+?)<\/nexagent_tool_call>/;
+const TOOL_CALL_MARKUP_PATTERN = /<\s*\/?\s*nexagent_tool_call\b/i;
 const MAX_INTERNAL_TOOL_STEPS = 6;
+const CONTINUATION_NUDGE = [
+  "The previous response deferred action or asked for confirmation instead of executing.",
+  "The user has already authorized this task.",
+  "Continue now with concrete tool use or complete the task.",
+  "Do not provide shell snippets or manual commands for the user to run when an internal tool can do it.",
+  "Do not ask for another confirmation unless a real approval gate or blocker prevents progress.",
+  "If no file/tool action is needed, provide the final verified result.",
+].join(" ");
+const WRITE_EVIDENCE_NUDGE = [
+  "The previous response claimed files were written or updated, but this turn has no write tool evidence.",
+  "Use write_file, apply_patch, or a shell command that performs the edit, then verify it.",
+  "If no file change was actually needed, correct the final answer and do not claim changes.",
+].join(" ");
+const MALFORMED_TOOL_CALL_NUDGE = [
+  "The previous response emitted malformed nexagent tool-call markup as visible text.",
+  "Do not show raw <nexagent_tool_call> text to the user.",
+  "Retry with exactly one valid tool block: <nexagent_tool_call>{\"name\":\"tool_name\",\"arguments\":{}}</nexagent_tool_call>.",
+].join(" ");
+const NEXSIGHT_TOOL_NUDGE = [
+  "This task should use Nexsight because it asks for broad repo/context analysis or explicitly names Nexsight.",
+  "Do not use read_file, list_dir, search_content, search_files, or shell_command for this broad inspection step.",
+  "Direct tools are fine only for a known small file/path, exact file content, or a narrower follow-up after Nexsight has routed the work.",
+  "Retry with exactly one Nexsight tool call: nexsight_execute, nexsight_index, nexsight_batch, or nexsight_search.",
+].join(" ");
 
 export async function executeProviderRequest(
   request: ProviderRequest,
@@ -115,6 +140,7 @@ export async function executeProviderRequest(
   }
 
   try {
+    const turnEventStart = request.session.events.length;
     recordRuntimeEvent(request.session, {
       kind: "provider",
       status: "started",
@@ -170,6 +196,36 @@ export async function executeProviderRequest(
       }
       const toolCall = parseInternalToolCall(output);
       if (!toolCall) {
+        if (containsToolCallMarkup(output) && step < MAX_INTERNAL_TOOL_STEPS - 1) {
+          recordRuntimeEvent(request.session, {
+            kind: "control",
+            status: "queued",
+            summary: "malformed tool call nudge applied",
+            detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
+          });
+          prompt = `${assembled.prompt}\n\n${toolTranscript.length > 0 ? `Internal tool transcript:\n${toolTranscript.join("\n\n")}\n\n` : ""}${MALFORMED_TOOL_CALL_NUDGE}`;
+          continue;
+        }
+        if (claimsFileMutation(output) && !hasWriteEvidence(request.session, turnEventStart) && step < MAX_INTERNAL_TOOL_STEPS - 1) {
+          recordRuntimeEvent(request.session, {
+            kind: "control",
+            status: "queued",
+            summary: "write evidence nudge applied",
+            detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
+          });
+          prompt = `${assembled.prompt}\n\n${toolTranscript.length > 0 ? `Internal tool transcript:\n${toolTranscript.join("\n\n")}\n\n` : ""}${WRITE_EVIDENCE_NUDGE}`;
+          continue;
+        }
+        if (isNonActionableDeferral(output) && step < MAX_INTERNAL_TOOL_STEPS - 1) {
+          recordRuntimeEvent(request.session, {
+            kind: "control",
+            status: "queued",
+            summary: "continuation nudge applied",
+            detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
+          });
+          prompt = `${assembled.prompt}\n\n${toolTranscript.length > 0 ? `Internal tool transcript:\n${toolTranscript.join("\n\n")}\n\n` : ""}${CONTINUATION_NUDGE}`;
+          continue;
+        }
         recordRuntimeEvent(request.session, {
           kind: "assistant",
           status: "completed",
@@ -191,6 +247,17 @@ export async function executeProviderRequest(
           fallbackApplied: false,
           output,
         };
+      }
+
+      if (needsNexsightToolOnly(request.prompt, toolCall) && !isNexsightToolCall(toolCall) && step < MAX_INTERNAL_TOOL_STEPS - 1) {
+        recordRuntimeEvent(request.session, {
+          kind: "control",
+          status: "queued",
+          summary: "nexsight tool nudge applied",
+          detail: toolCall.name,
+        });
+        prompt = `${assembled.prompt}\n\n${toolTranscript.length > 0 ? `Internal tool transcript:\n${toolTranscript.join("\n\n")}\n\n` : ""}${NEXSIGHT_TOOL_NUDGE}`;
+        continue;
       }
 
       const toolResult = await executeToolWithRuntimeActivity(request.session, toolCall);
@@ -331,6 +398,7 @@ async function executeOpenAiNativeToolLoop(
 ): Promise<ProviderResult> {
   let previousResponseId: string | undefined;
   let nativeInput: unknown = buildNativeInputFromPrompt(request.prompt, request.attachments);
+  const turnEventStart = request.session.events.length;
 
   for (let step = 0; step < MAX_INTERNAL_TOOL_STEPS; step += 1) {
     if (request.session.operationControls.cancelRequested) {
@@ -368,6 +436,36 @@ async function executeOpenAiNativeToolLoop(
       const output = invocation.output.trimEnd();
       if (output.length === 0) {
         return createEmptyOutputFailure(request.session.provider, model, transport.id);
+      }
+      if (containsToolCallMarkup(output) && step < MAX_INTERNAL_TOOL_STEPS - 1) {
+        recordRuntimeEvent(request.session, {
+          kind: "control",
+          status: "queued",
+          summary: "malformed tool call nudge applied",
+          detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
+        });
+        nativeInput = [{ role: "user", content: MALFORMED_TOOL_CALL_NUDGE }];
+        continue;
+      }
+      if (claimsFileMutation(output) && !hasWriteEvidence(request.session, turnEventStart) && step < MAX_INTERNAL_TOOL_STEPS - 1) {
+        recordRuntimeEvent(request.session, {
+          kind: "control",
+          status: "queued",
+          summary: "write evidence nudge applied",
+          detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
+        });
+        nativeInput = [{ role: "user", content: WRITE_EVIDENCE_NUDGE }];
+        continue;
+      }
+      if (isNonActionableDeferral(output) && step < MAX_INTERNAL_TOOL_STEPS - 1) {
+        recordRuntimeEvent(request.session, {
+          kind: "control",
+          status: "queued",
+          summary: "continuation nudge applied",
+          detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
+        });
+        nativeInput = [{ role: "user", content: CONTINUATION_NUDGE }];
+        continue;
       }
       recordRuntimeEvent(request.session, {
         kind: "assistant",
@@ -496,6 +594,7 @@ async function withAbortController<T>(
 async function executeToolWithRuntimeActivity(session: RuntimeSession, call: InternalToolCall): Promise<InternalToolResult> {
   const risk = classifyInternalToolRisk(call);
   const argsPreview = formatToolArgumentsPreview(call.arguments);
+  const startedAt = Date.now();
   recordRuntimeEvent(session, {
     kind: "tool",
     status: "started",
@@ -518,15 +617,24 @@ async function executeToolWithRuntimeActivity(session: RuntimeSession, call: Int
   }
   setRuntimeAction(session, "running", `tool ${call.name} · ${risk}`);
   const result = await executeInternalToolAsync(session, call);
+  const durationMs = Date.now() - startedAt;
   setRuntimeAction(session, result.ok ? "ready" : "error", `tool ${call.name} ${result.ok ? "complete" : "failed"} · ${risk}`);
   const outputPreview = truncateToolOutput(result.output);
+  const outputTokens = estimateTokenCount(result.output);
   recordRuntimeEvent(session, {
     kind: "tool",
     status: result.ok ? "completed" : "failed",
     summary: `tool ${call.name} ${result.ok ? "completed" : "failed"}`,
-    detail: `${risk}; output=${outputPreview}`,
+    detail: `${risk}; duration=${formatToolDuration(durationMs)}; out~${outputTokens}; output=${outputPreview}`,
   });
   return result;
+}
+
+function formatToolDuration(durationMs: number): string {
+  if (durationMs < 1000) {
+    return `${durationMs}ms`;
+  }
+  return `${(durationMs / 1000).toFixed(1)}s`;
 }
 
 function formatToolArgumentsPreview(value: unknown): string {
@@ -622,19 +730,187 @@ function sleep(ms: number): Promise<void> {
 
 function parseInternalToolCall(output: string): InternalToolCall | null {
   const match = output.match(TOOL_CALL_PATTERN);
-  if (!match) {
-    return null;
-  }
-
-  try {
-    const parsed = JSON.parse(match[1] ?? "") as InternalToolCall;
-    if (!parsed || typeof parsed !== "object" || typeof parsed.name !== "string") {
+  if (match) {
+    const parsed = parseToolCallJson(match[1] ?? "");
+    if (!parsed || typeof parsed.name !== "string") {
       return null;
     }
     return parsed;
-  } catch {
+  }
+
+  return parseAttributeStyleToolCall(output);
+}
+
+function parseToolCallJson(value: string): InternalToolCall | null {
+  const trimmed = value.trim();
+  for (const candidate of [trimmed, escapeControlCharsInJsonStrings(trimmed)]) {
+    try {
+      const parsed = JSON.parse(candidate) as InternalToolCall;
+      if (!parsed || typeof parsed !== "object") {
+        continue;
+      }
+      return parsed;
+    } catch {
+      // Try repaired candidate next.
+    }
+  }
+  return null;
+}
+
+function escapeControlCharsInJsonStrings(value: string): string {
+  let output = "";
+  let inString = false;
+  let escaped = false;
+
+  for (const char of value) {
+    if (escaped) {
+      output += char;
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      output += char;
+      escaped = true;
+      continue;
+    }
+    if (char === '"') {
+      output += char;
+      inString = !inString;
+      continue;
+    }
+    if (inString && char === "\n") {
+      output += "\\n";
+      continue;
+    }
+    if (inString && char === "\r") {
+      output += "\\r";
+      continue;
+    }
+    if (inString && char === "\t") {
+      output += "\\t";
+      continue;
+    }
+    output += char;
+  }
+
+  return output;
+}
+
+function containsToolCallMarkup(output: string): boolean {
+  return TOOL_CALL_MARKUP_PATTERN.test(output);
+}
+
+function needsNexsightToolOnly(prompt: string, call: InternalToolCall): boolean {
+  if (!isGenericInspectionTool(call)) {
+    return false;
+  }
+  if (/\bnexsight\b/i.test(prompt)) {
+    return true;
+  }
+
+  const lower = prompt.toLowerCase();
+  const asksForBroadInspection = /\b(inspect|explore|examine|analy[sz]e|summari[sz]e|scan|map|inventory|count|find|search)\b/.test(lower);
+  const broadTarget = /\b(repo|codebase|project|workspace|directory|tree|files|structure|architecture|layout|dependencies|tests?)\b/.test(lower)
+    || /~\/|\/home\/|\.\/|\.\b/.test(lower);
+  const exactFileRequest = /\b(read|open|show|cat)\b/.test(lower) && /\b[\w.-]+\.[a-z0-9]+\b/i.test(prompt);
+  return asksForBroadInspection && broadTarget && !exactFileRequest;
+}
+
+function isNexsightToolCall(call: InternalToolCall): boolean {
+  return call.name === "nexsight_execute"
+    || call.name === "nexsight_index"
+    || call.name === "nexsight_batch"
+    || call.name === "nexsight_search";
+}
+
+function isGenericInspectionTool(call: InternalToolCall): boolean {
+  return call.name === "read_file"
+    || call.name === "list_dir"
+    || call.name === "search_content"
+    || call.name === "search_files"
+    || call.name === "apply_patch"
+    || call.name === "write_file"
+    || call.name === "shell_command";
+}
+
+function parseAttributeStyleToolCall(output: string): InternalToolCall | null {
+  const opening = output.match(/<nexagent_tool_call\b([^>]*)>/i);
+  if (!opening) {
     return null;
   }
+
+  const attributes = opening[1] ?? "";
+  const name = readXmlAttribute(attributes, "name");
+  if (!name) {
+    return null;
+  }
+
+  const rawArguments = readXmlAttribute(attributes, "arguments") ?? extractJsonAfterToken(output, "arguments");
+  const parsedArguments = parseToolArguments(rawArguments ?? "{}");
+  if (!parsedArguments) {
+    return null;
+  }
+
+  return {
+    name: name as InternalToolCall["name"],
+    arguments: parsedArguments,
+  };
+}
+
+function readXmlAttribute(attributes: string, name: string): string | null {
+  const match = attributes.match(new RegExp(`\\b${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`, "i"));
+  const value = match?.[1] ?? match?.[2] ?? null;
+  return value ? decodeXmlAttribute(value) : null;
+}
+
+function decodeXmlAttribute(value: string): string {
+  return value
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, "&");
+}
+
+function extractJsonAfterToken(value: string, token: string): string | null {
+  const tokenIndex = value.toLowerCase().indexOf(token.toLowerCase());
+  if (tokenIndex < 0) {
+    return null;
+  }
+  const objectStart = value.indexOf("{", tokenIndex);
+  if (objectStart < 0) {
+    return null;
+  }
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = objectStart; index < value.length; index += 1) {
+    const char = value[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (char === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) {
+      continue;
+    }
+    if (char === "{") {
+      depth += 1;
+    } else if (char === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return value.slice(objectStart, index + 1);
+      }
+    }
+  }
+  return null;
 }
 
 function formatInternalToolExchange(step: number, call: InternalToolCall, result: InternalToolResult): string {
@@ -644,6 +920,88 @@ function formatInternalToolExchange(step: number, call: InternalToolCall, result
     `Tool result (${result.ok ? "ok" : "error"}):`,
     result.output,
   ].join("\n");
+}
+
+function isNonActionableDeferral(output: string): boolean {
+  const text = output.trim();
+  if (!text) {
+    return false;
+  }
+
+  if (TOOL_CALL_PATTERN.test(text) || /^(done|complete|completed|fixed|updated|implemented)\b/i.test(text)) {
+    return false;
+  }
+
+  const lower = text.toLowerCase();
+  const asksForUserToContinue = [
+    "if you want, i can",
+    "if you'd like, i can",
+    "i can proceed",
+    "i can do that now",
+    "please run this",
+    "run this and",
+    "you can run",
+    "you should run",
+    "reply with",
+    "say \"",
+    "say '",
+    "tell me to",
+    "want me to",
+    "should i",
+  ].some((phrase) => lower.includes(phrase));
+  const admitsNoAction = [
+    "i need to actually",
+    "i need to apply",
+    "i need to edit",
+    "i need to run",
+    "i haven't",
+    "i have not",
+    "i didn't",
+    "i did not",
+    "i don't have tool execution",
+    "no file-change evidence",
+  ].some((phrase) => lower.includes(phrase));
+  const concreteCompletionEvidence = [
+    "tests pass",
+    "verification passed",
+    "wrote ",
+    "updated ",
+    "created ",
+    "changed ",
+    "ran ",
+    "committed ",
+  ].some((phrase) => lower.includes(phrase));
+
+  return (asksForUserToContinue || admitsNoAction) && !concreteCompletionEvidence;
+}
+
+function claimsFileMutation(output: string): boolean {
+  const lower = output.toLowerCase();
+  const mutationClaim = [
+    "done — applied",
+    "done - applied",
+    "applied directly",
+    "i updated",
+    "updated readme",
+    "updated `readme",
+    "readme now includes",
+    "i added",
+    "added sections",
+    "wrote ",
+    "created ",
+    "modified ",
+    "changed ",
+  ].some((phrase) => lower.includes(phrase));
+  const fileMention = /\b(readme|\.md|\.ts|\.tsx|\.json|file|files)\b/i.test(output);
+  return mutationClaim && fileMention;
+}
+
+function hasWriteEvidence(session: RuntimeSession, sinceIndex: number): boolean {
+  return session.events.slice(sinceIndex).some((event) =>
+    event.kind === "tool"
+    && event.status === "completed"
+    && /tool\s+(write_file|apply_patch|shell_command)\s+completed/i.test(event.summary),
+  );
 }
 
 function parseNativeToolCall(payload: unknown): { responseId: string | undefined; callId: string; name: InternalToolCall["name"]; arguments: Record<string, unknown> } | null {

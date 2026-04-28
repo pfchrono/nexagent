@@ -203,12 +203,19 @@ test("assemblePrompt keeps precedence layers distinct before serialization", asy
       "Read relevant code before changing behavior, then keep edits scoped to requested outcome.",
       "Use available runtime tools and commands to act on code or repo state instead of only describing intent.",
       "Do not claim code, files, tests, or verification happened unless you actually performed them in this session.",
+      "Keep going until the user's query is completely resolved; only stop for a real blocker, approval gate, or completed verified result.",
+      "If a tool call fails, diagnose the failure and try a smaller or safer equivalent before stopping.",
+      "If a needed tool is unavailable, look for a repo-local or user-local install path and install/use it when safe; if needed, use web_search/web_fetch or MCP docs tools to find official install guidance; if root/admin/system installation is required, give the exact install instruction and continue with the best available fallback.",
       "When user asks to continue, keep going, start, or finish a task, continue working until task is complete or a real blocker stops progress.",
+      "If user replies with approval such as yes, do that, apply it, continue, or go ahead after you proposed concrete work, treat it as authorization to execute the proposed work now.",
       "When user authorizes a sequence of checks or steps, keep running remaining steps without asking again after each substep unless a blocker, failure, or approval gate stops progress.",
       "Prefer action over narration: inspect, edit, run checks, and verify before reporting outcome.",
       "For execution requests, do not answer with only intention or reassurance. Perform the work in the same turn unless blocked.",
+      "Do not tell the user to run commands, paste shell snippets, or confirm next steps when you have a tool that can perform the action.",
+      "Do not ask user to say apply it, confirm, or continue when they already gave approval; use tools or state the real blocker.",
       "Do not say you are about to run checks, continue later, or report back soon. Run the checks or state the blocker now.",
       "If user asks for smoke tests, debugging, implementation, or verification, use tools and produce actual results instead of a promise.",
+      "If task requires external context, first use available local repos, readable roots, MCP tools, or web tools before asking the user for pasted context.",
       "If user asks for exact, full, verbatim, or complete file/chat/transcript content, preserve exact content instead of summarizing. If exact content is unavailable, say what is missing plainly.",
       "Report verification truthfully. If checks were not run or failed, say so plainly.",
     ]);
@@ -226,10 +233,22 @@ test("assemblePrompt keeps precedence layers distinct before serialization", asy
     assert.deepEqual(assembled.layers.toolAvailability, [
       `Working directory: ${cwd}`,
       "Loaded MCP servers: context7",
+      "Readable roots: all non-protected paths. Any child path under a readable root is readable unless it is protected.",
+      `Writable roots: ${cwd}. Non-yolo writes are limited to these roots.`,
+      "Yolo mode: write tools may edit readable roots, but protected/system paths remain blocked.",
+      "Path rule: absolute paths and ~/ paths are supported; if a requested path is under a readable root, inspect it with tools instead of refusing because it is outside cwd.",
       "Enabled MCP servers: context7",
+      "MCP guidance: if an enabled MCP server/tool is relevant, call it through the available tool interface instead of saying it is unavailable or asking the user to run it.",
+      "Tool decision rule: inspect with read_file, list_dir, search_content, search_files, nexsight_batch, or nexsight_search before editing; use nexsight_execute for counts/parsing/filtering so raw data stays out of chat; write with write_file/apply_patch for small edits or batch_edit for multi-file/multi-anchor edits that must validate insertion points before writing; verify with git_diff, git_status, shell_command, nexsight_execute, or focused tests.",
+      "Nexsight rule: for broad repo/codebase/directory inspection, counting, filtering, summarizing, semantic search, or any output that could be large, prefer Nexsight first: use nexsight_execute to compute concise results, nexsight_batch/nexsight_index to store context, and nexsight_search to retrieve relevant excerpts. Use direct read/list/search only for known small files/paths, exact content requests, or narrow follow-ups after Nexsight routes the work.",
+      "Nexsight execute rule: nexsight_execute needs executable code or command, plus a short reason when useful. Do not pass only a natural-language task. It supports javascript, python, and shell; Python-looking code is inferred as python when language is omitted.",
+      "Web/tool reference rule: use web_fetch/web_search or relevant MCP tools for current external facts, docs, URLs, and references; do not invent current facts from memory.",
+      "Tool execution rule: when a runnable command or file edit is needed, emit the tool call directly; do not output command blocks for the user to execute.",
+      "Tool failure rule: if a broad command or path fails, retry with a narrower path, absolute path, or read/list/search tool before asking user for help.",
+      "Missing tool rule: if a command/tool is missing, search package scripts, node_modules/.bin, local bins, available MCP/tool registries, and official web docs when needed; install project-local dependencies only when safe and scoped; ask user only for root/admin installs.",
       "Internal tool protocol: when tool use is required, respond with only one XML block:",
       '<nexagent_tool_call>{"name":"read_file","arguments":{"path":"src/cli.ts"}}</nexagent_tool_call>',
-      "Available internal tools: read_file, write_file, apply_patch, preview_patch, list_dir, search_content, search_files, git_status, git_diff, shell_command, archivist_save, archivist_checkpoint",
+      "Available internal tools: read_file, write_file, apply_patch, batch_edit, preview_patch, list_dir, search_content, search_files, web_fetch, web_search, git_status, git_diff, shell_command, nexsight_execute, nexsight_index, nexsight_batch, nexsight_search, archivist_save, archivist_checkpoint",
       "Use tools for repo inspection instead of narrating intended actions.",
     ]);
     assert.deepEqual(assembled.layers.providerFallback, [
@@ -294,6 +313,32 @@ test("assemblePrompt includes compacted conversation context when present", asyn
     assert.match(assembled.prompt, /Compacted context summary:/);
     assert.match(assembled.prompt, /Compaction snapshot:/);
     assert.match(assembled.prompt, /user: show current status/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("assemblePrompt injects Free-Code-style caveman and deadpool sections", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-instructions-style-"));
+
+  try {
+    const session = createSession(cwd);
+    session.commandModes.cavemanMode = true;
+    session.commandModes.deadpoolMode = true;
+
+    const assembled = await assemblePrompt({
+      session,
+      prompt: "explain parser fix",
+    });
+
+    assert.equal(assembled.layers.responseStyle.length, 2);
+    assert.match(assembled.layers.responseStyle.join("\n"), /# Communication Style: Caveman Mode/);
+    assert.match(assembled.layers.responseStyle.join("\n"), /Cut ~75% of tokens while keeping full technical accuracy/);
+    assert.match(assembled.layers.responseStyle.join("\n"), /Pattern: \[thing\] \[action\] \[reason\]\. \[next step\]\./);
+    assert.match(assembled.layers.responseStyle.join("\n"), /# Communication Style: Deadpool Mode/);
+    assert.match(assembled.layers.responseStyle.join("\n"), /MUST sound recognizably Deadpool-flavored/);
+    assert.match(assembled.layers.responseStyle.join("\n"), /If Caveman mode is also enabled, keep jokes short, compressed, and secondary/);
+    assert.match(assembled.prompt, /Response style:/);
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }

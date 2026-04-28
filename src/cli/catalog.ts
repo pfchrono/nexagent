@@ -19,6 +19,7 @@ export const COMMAND_CATALOG = [
   { name: "/steer", usage: "/steer <message>", description: "queue operator steer note for next tool/model step" },
   { name: "/compact", usage: "/compact [status]", description: "compact session context now or inspect compaction state" },
   { name: "/tools", usage: "/tools [--verbose]", description: "show repo-local tool policy and safety guards" },
+  { name: "/nexsight", usage: "/nexsight [stats|index <path> [pattern]|search <query>|purge|doctor]", description: "manage local nexsight execution/index/search context store" },
   { name: "/pwd", usage: "/pwd", description: "show current working directory" },
   { name: "/ls", usage: "/ls [path]", description: "list directory contents from session cwd" },
   { name: "/read", usage: "/read <path>", description: "read text file contents" },

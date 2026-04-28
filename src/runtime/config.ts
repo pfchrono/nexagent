@@ -39,7 +39,8 @@ export interface RepoFreshness {
 }
 
 export interface ToolPolicy {
-  mode: "repo-local-guarded";
+  mode: "workspace-guarded";
+  readRoots?: string[];
   allowedRoots: string[];
   protectedRoots: string[];
   shell: "limited";
@@ -659,15 +660,23 @@ function createToolPolicy(cwd: string): ToolPolicy {
           path.join(home, ".aws"),
           path.join(home, ".config", "gh"),
           path.join(home, ".codex"),
+          path.join(home, ".docker"),
+          path.join(home, ".env"),
+          path.join(home, ".git-credentials"),
           path.join(home, ".gnupg"),
+          path.join(home, ".kube"),
           path.join(home, ".npmrc"),
+          path.join(home, ".op"),
           path.join(home, ".ssh"),
+          path.join(home, ".bash_history"),
+          path.join(home, ".zsh_history"),
         ]
       : []),
   ];
 
   return {
-    mode: "repo-local-guarded",
+    mode: "workspace-guarded",
+    readRoots: [home, cwd].filter((root, index, roots) => root.length > 0 && roots.indexOf(root) === index),
     allowedRoots: [cwd],
     protectedRoots: Array.from(new Set(protectedRoots)),
     shell: "limited",

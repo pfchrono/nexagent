@@ -364,6 +364,367 @@ test("executeProviderRequest executes internal tool loop before final answer", a
   });
 });
 
+test("executeProviderRequest accepts attribute-style internal tool calls", async () => {
+  const session = createSession();
+  const result = await executeProviderRequest(
+    {
+      session,
+      prompt: "check git",
+    },
+    {
+      exec: async (request) => {
+        if (!request.prompt.includes("Internal tool transcript")) {
+          return {
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            output: '<nexagent_tool_call name="git_status" arguments="{}"></nexagent_tool_call>',
+          };
+        }
+
+        return {
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+          output: "repo clean",
+        };
+      },
+      http: async () => {
+        throw new Error("http should not be used");
+      },
+      codexHttp: async () => {
+        throw new Error("codex-http should not be used");
+      },
+    },
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.output, "repo clean");
+  assert.equal(
+    session.events.some((event) => event.kind === "tool" && event.summary === "tool git_status completed"),
+    true,
+  );
+});
+
+test("executeProviderRequest repairs multiline JSON strings in tool markup", async () => {
+  const session = createSession();
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-provider-nexsight-"));
+  session.cwd = cwd;
+  session.repo.root = cwd;
+  session.toolPolicy.allowedRoots = [cwd];
+  const prompts: string[] = [];
+
+  try {
+    const result = await executeProviderRequest(
+      {
+        session,
+        prompt: "run nexsight command",
+      },
+      {
+        exec: async (request) => {
+          prompts.push(request.prompt);
+          if (prompts.length === 1) {
+            return {
+              exitCode: 0,
+              stdout: "",
+              stderr: "",
+              output: `<nexagent_tool_call>{"name":"nexsight_execute","arguments":{"code":"console.log('line-one')
+console.log('line-two')"}} </nexagent_tool_call>`,
+            };
+          }
+
+          return {
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            output: "done",
+          };
+        },
+        http: async () => {
+          throw new Error("http should not be used");
+        },
+        codexHttp: async () => {
+          throw new Error("codex-http should not be used");
+        },
+      },
+    );
+
+    assert.equal(result.ok, true);
+    assert.equal(prompts.length, 2);
+    assert.match(prompts[1] ?? "", /Tool result \(ok\):/);
+    assert.match(prompts[1] ?? "", /line-one/);
+    assert.match(prompts[1] ?? "", /line-two/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("executeProviderRequest redirects explicit Nexsight requests away from generic tools", async () => {
+  const session = createSession();
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-provider-nexsight-policy-"));
+  session.cwd = cwd;
+  session.repo.root = cwd;
+  session.toolPolicy.allowedRoots = [cwd];
+  const prompts: string[] = [];
+
+  try {
+    const result = await executeProviderRequest(
+      {
+        session,
+        prompt: "use nexsight to inspect the repo",
+      },
+      {
+        exec: async (request) => {
+          prompts.push(request.prompt);
+          if (prompts.length === 1) {
+            return {
+              exitCode: 0,
+              stdout: "",
+              stderr: "",
+              output: '<nexagent_tool_call>{"name":"list_dir","arguments":{"path":"."}}</nexagent_tool_call>',
+            };
+          }
+          if (prompts.length === 2) {
+            assert.match(request.prompt, /This task should use Nexsight/);
+            return {
+              exitCode: 0,
+              stdout: "",
+              stderr: "",
+              output: '<nexagent_tool_call>{"name":"nexsight_execute","arguments":{"code":"console.log(\\"used-nexsight\\")"}}</nexagent_tool_call>',
+            };
+          }
+
+          return {
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            output: "done",
+          };
+        },
+        http: async () => {
+          throw new Error("http should not be used");
+        },
+        codexHttp: async () => {
+          throw new Error("codex-http should not be used");
+        },
+      },
+    );
+
+    assert.equal(result.ok, true);
+    assert.equal(prompts.length, 3);
+    assert.equal(
+      session.events.some((event) => event.kind === "control" && event.summary === "nexsight tool nudge applied"),
+      true,
+    );
+    assert.equal(
+      session.events.some((event) => event.kind === "tool" && event.summary === "tool list_dir completed"),
+      false,
+    );
+    assert.equal(
+      session.events.some((event) => event.kind === "tool" && event.summary === "tool nexsight_execute completed"),
+      true,
+    );
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("executeProviderRequest nudges malformed tool markup instead of surfacing it", async () => {
+  const session = createSession();
+  const prompts: string[] = [];
+
+  const result = await executeProviderRequest(
+    {
+      session,
+      prompt: "write findings",
+    },
+    {
+      exec: async (request) => {
+        prompts.push(request.prompt);
+        if (prompts.length === 1) {
+          return {
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            output: '<nexagent_tool_call arguments="{}"></nexagent_tool_call>',
+          };
+        }
+        if (prompts.length === 2) {
+          return {
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            output: '<nexagent_tool_call>{"name":"git_status","arguments":{}}</nexagent_tool_call>',
+          };
+        }
+        return {
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+          output: "done",
+        };
+      },
+      http: async () => {
+        throw new Error("http should not be used");
+      },
+      codexHttp: async () => {
+        throw new Error("codex-http should not be used");
+      },
+    },
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.output, "done");
+  assert.match(prompts[1] ?? "", /Do not show raw <nexagent_tool_call> text/);
+  assert.equal(
+    session.events.some((event) => event.kind === "control" && event.summary === "malformed tool call nudge applied"),
+    true,
+  );
+});
+
+test("executeProviderRequest nudges non-actionable confirmation replies to continue", async () => {
+  const session = createSession();
+  const prompts: string[] = [];
+
+  const result = await executeProviderRequest(
+    {
+      session,
+      prompt: "yes do that also",
+    },
+    {
+      exec: async (request) => {
+        prompts.push(request.prompt);
+        if (prompts.length === 1) {
+          return {
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            output: "Please run this and I'll proceed after: cat >> Dogfood-findings-nexagent.md <<'EOF'\nNext steps\nEOF",
+          };
+        }
+        if (prompts.length === 2) {
+          return {
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            output: '<nexagent_tool_call>{"name":"git_status","arguments":{}}</nexagent_tool_call>',
+          };
+        }
+
+        return {
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+          output: "done",
+        };
+      },
+      http: async () => {
+        throw new Error("http should not be used");
+      },
+      codexHttp: async () => {
+        throw new Error("codex-http should not be used");
+      },
+    },
+  );
+
+  assert.equal(prompts.length, 3);
+  assert.match(prompts[1] ?? "", /The user has already authorized this task/);
+  assert.match(prompts[1] ?? "", /Do not provide shell snippets/);
+  assert.match(prompts[1] ?? "", /Do not ask for another confirmation/);
+  assert.equal(
+    session.events.some((event) => event.kind === "control" && event.summary === "continuation nudge applied"),
+    true,
+  );
+  assert.deepEqual(result, {
+    ok: true,
+    provider: "codex",
+    model: "gpt-5.4",
+    transport: "codex",
+    adapter: "codex-cli-exec",
+    fallbackApplied: false,
+    output: "done",
+  });
+});
+
+test("executeProviderRequest rejects file-change claims without write evidence", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-provider-write-evidence-"));
+
+  try {
+    const session = createSession();
+    session.cwd = cwd;
+    session.repo.root = cwd;
+    session.toolPolicy.allowedRoots = [cwd];
+    const prompts: string[] = [];
+
+    const result = await executeProviderRequest(
+      {
+        session,
+        prompt: "update README",
+      },
+      {
+        exec: async (request) => {
+          prompts.push(request.prompt);
+          if (prompts.length === 1) {
+            return {
+              exitCode: 0,
+              stdout: "",
+              stderr: "",
+              output: '<nexagent_tool_call>{"name":"read_file","arguments":{"path":"README.md"}}</nexagent_tool_call>',
+            };
+          }
+          if (prompts.length === 2) {
+            return {
+              exitCode: 0,
+              stdout: "",
+              stderr: "",
+              output: "Done — applied directly in README.md with both additions.",
+            };
+          }
+          if (prompts.length === 3) {
+            return {
+              exitCode: 0,
+              stdout: "",
+              stderr: "",
+              output: '<nexagent_tool_call>{"name":"write_file","arguments":{"path":"README.md","content":"updated\\n"}}</nexagent_tool_call>',
+            };
+          }
+
+          return {
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            output: "Done — README.md updated and verified.",
+          };
+        },
+        http: async () => {
+          throw new Error("http should not be used");
+        },
+        codexHttp: async () => {
+          throw new Error("codex-http should not be used");
+        },
+      },
+    );
+
+    assert.equal(prompts.length, 4);
+    assert.match(prompts[2] ?? "", /no write tool evidence/);
+    assert.equal(
+      session.events.some((event) => event.kind === "control" && event.summary === "write evidence nudge applied"),
+      true,
+    );
+    assert.deepEqual(result, {
+      ok: true,
+      provider: "codex",
+      model: "gpt-5.4",
+      transport: "codex",
+      adapter: "codex-cli-exec",
+      fallbackApplied: false,
+      output: "Done — README.md updated and verified.",
+    });
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test("executeProviderRequest updates runtime action for guarded shell tool", async () => {
   const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-provider-shell-"));
 

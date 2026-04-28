@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -92,7 +92,7 @@ test("renderRuntimeTui keeps composer body free of side rails", async () => {
   assert.doesNotMatch(plain, /│ > ▌/);
 });
 
-test("renderRuntimeTui shows active turn metadata badges", async () => {
+test("renderRuntimeTui shows active turn metadata in footer", async () => {
   const { renderRuntimeTui } = await import("../src/cli.js");
   const view: RuntimeTuiView = {
     title: "nexagent",
@@ -110,10 +110,10 @@ test("renderRuntimeTui shows active turn metadata badges", async () => {
   const output = renderRuntimeTui(view, { columns: 100, rows: 40 });
   const plain = output.replace(/\u001b\[[0-9;?]*[A-Za-z]/g, "");
 
-  assert.match(plain, /turn · 2026-04-28T07:20:00Z · cli-exec · codex\/gpt-5\.4 · tools 0 · running · in~10 out~4/);
+  assert.match(plain, /Thinking │ gpt-5\.4@codex │ turns 0 │ in~10 out~4/);
 });
 
-test("renderRuntimeTui shows cockpit turn panels and recovery affordances", async () => {
+test("renderRuntimeTui shows warning lane without pinned cockpit panels", async () => {
   const { renderRuntimeTui } = await import("../src/cli.js");
   const view: RuntimeTuiView = {
     title: "nexagent",
@@ -132,14 +132,11 @@ test("renderRuntimeTui shows cockpit turn panels and recovery affordances", asyn
   const plain = output.replace(/\u001b\[[0-9;?]*[A-Za-z]/g, "");
 
   assert.match(plain, /warning lane/);
-  assert.match(plain, /turn blocks/);
-  assert.match(plain, /diff summary/);
-  assert.match(plain, /risk high · confidence blocked/);
-  assert.match(plain, /outcome: failed/);
-  assert.match(plain, /actions: \[retry \/continue\]/);
-  assert.match(plain, /nav: Tab sections/);
-  assert.match(plain, /density: compact cards/);
-  assert.match(plain, /terminal capabilities/);
+  assert.doesNotMatch(plain, /diff summary/);
+  assert.doesNotMatch(plain, /risk high · confidence blocked/);
+  assert.doesNotMatch(plain, /outcome: failed/);
+  assert.doesNotMatch(plain, /actions: \[retry \/continue\]/);
+  assert.doesNotMatch(plain, /terminal capabilities/);
 });
 
 test("parseCommand preserves empty run prompt for resolvePrompt", async () => {
@@ -710,10 +707,12 @@ test("runRuntimeCommand toggles caveman mode", async () => {
 
   assert.deepEqual(result, {
     ok: true,
-    output: "Caveman mode ON. Style stack: caveman + mouse:auto.",
+    output: "Caveman mode ON. Responses now ultra-compressed. ~75% fewer tokens. Technical accuracy preserved.",
     activity: "caveman mode on",
   });
   assert.equal(session.commandModes.cavemanMode, true);
+  assert.match(session.instructionLayerSummary?.responseStyle ?? "", /Communication Style: Caveman Mode/);
+  assert.match(session.instructionLayerSummary?.responseStyle ?? "", /Cut ~75% of tokens/);
 });
 
 test("runRuntimeCommand toggles deadpool mode", async () => {
@@ -725,10 +724,12 @@ test("runRuntimeCommand toggles deadpool mode", async () => {
 
   assert.deepEqual(result, {
     ok: true,
-    output: "Deadpool mode ON. Style stack: deadpool + caveman + mouse:auto.",
+    output: "Deadpool mode ON. Caveman mode still ON. Replies keep antihero voice, but compressed. Style stack: deadpool + caveman.",
     activity: "deadpool mode on",
   });
   assert.equal(session.commandModes.deadpoolMode, true);
+  assert.match(session.instructionLayerSummary?.responseStyle ?? "", /Communication Style: Deadpool Mode/);
+  assert.match(session.instructionLayerSummary?.responseStyle ?? "", /recognizably Deadpool-flavored/);
 });
 
 test("runRuntimeCommand toggles statusline", async () => {
@@ -739,7 +740,7 @@ test("runRuntimeCommand toggles statusline", async () => {
 
   assert.deepEqual(result, {
     ok: true,
-    output: "Statusline ON. Footer now shows codex | gpt-5.4 | cli-exec | ready | approval=off | mouse=auto/scroll | mouse:auto | in~0 out~0 | ctx~272000.",
+    output: "Statusline ON. Footer now shows codex | gpt-5.4 | cli-exec | ready | approval=off | mouse=auto/scroll | mouse:auto | in~0 out~0 | ctx [----------] 0% 272k/272k free.",
     activity: "statusline on",
   });
   assert.equal(session.commandModes.statusline, true);
@@ -912,6 +913,34 @@ test("runRuntimeCommand reports tool policy", async () => {
   assert.match(verboseTools?.output ?? "", /timeout=5000ms/);
 });
 
+test("runRuntimeCommand manages nexsight store", async () => {
+  const { runRuntimeCommand } = await import("../src/cli.js");
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-nexsight-command-"));
+  try {
+    const session = createSession();
+    session.cwd = cwd;
+    session.repo.root = cwd;
+    session.toolPolicy.allowedRoots = [cwd];
+    await writeFile(path.join(cwd, "note.md"), "Nexsight command search target.\n", "utf8");
+
+    const index = runRuntimeCommand(session, "/nexsight index . *.md");
+    assert.equal(index?.ok, true);
+    assert.match(index?.output ?? "", /indexed repo \(1 files/);
+
+    const search = runRuntimeCommand(session, "/nexsight search command target");
+    assert.equal(search?.ok, true);
+    assert.match(search?.output ?? "", /note\.md/);
+
+    const stats = runRuntimeCommand(session, "/nexsight stats");
+    assert.equal(stats?.ok, true);
+    assert.match(stats?.output ?? "", /backend: sqlite-fts5/);
+    assert.match(stats?.output ?? "", /\.nexagent\/nexsight\/index\.db/);
+    assert.match(stats?.output ?? "", /chunks:/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test("formatTranscriptEvent and buildChatHistoryFromSession render command boundaries with timestamps", async () => {
   const { formatCommandBoundary, formatTranscriptEvent, buildChatHistoryFromSession } = await import("../src/cli.js");
   const commandEvent: RuntimeSession["events"][number] = {
@@ -937,6 +966,136 @@ test("formatTranscriptEvent and buildChatHistoryFromSession render command bound
   assert.match(history.join("\n"), /\[cmd-result\] 2025-01-01T12:00:00\.000Z · completed · command \/provider completed/);
 });
 
+test("buildChatHistoryFromSession places turn activity between prompt and reply", async () => {
+  const { buildChatHistoryFromSession } = await import("../src/cli.js");
+  const session = createSession();
+  session.conversation = [
+    { role: "user", content: "inspect repo", tokens: 2 },
+    { role: "assistant", content: "done", tokens: 1 },
+  ];
+  session.events = [
+    {
+      at: "2025-01-01T12:00:00.000Z",
+      kind: "prompt",
+      status: "queued",
+      summary: "user prompt accepted",
+      detail: "inspect repo",
+    },
+    {
+      at: "2025-01-01T12:00:00.100Z",
+      kind: "provider",
+      status: "started",
+      summary: "provider request started",
+      detail: "codex",
+    },
+    {
+      at: "2025-01-01T12:00:00.200Z",
+      kind: "tool",
+      status: "completed",
+      summary: "tool list_dir completed",
+      detail: "guarded; output=ok",
+    },
+    {
+      at: "2025-01-01T12:00:00.300Z",
+      kind: "assistant",
+      status: "completed",
+      summary: "assistant response completed",
+      detail: "done",
+    },
+  ];
+
+  const history = buildChatHistoryFromSession(session);
+
+  assert.deepEqual(history.slice(0, 5), [
+    "you: inspect repo",
+    "turn: Thinking",
+    "turn: Tool calls (1)",
+    "turn-detail: Dir List · completed · guarded",
+    "agent: done",
+  ]);
+  assert.ok(history.indexOf("agent: done") > history.indexOf("turn-detail: list_dir completed"));
+});
+
+test("formatPromptEventDetail preserves normal long prompts for transcript wrapping", async () => {
+  const { formatPromptEventDetail, buildChatHistoryFromSession } = await import("../src/cli.js");
+  const prompt = [
+    "Try doing a test with nexsight using them on ~/code/openclaw/",
+    "doing directory explore, a file read, and report what it gives back",
+    "and what we can do with that from there without cutting off prompt text.",
+  ].join(" ");
+  assert.ok(prompt.length > 160);
+  assert.equal(formatPromptEventDetail(prompt), prompt);
+
+  const session = createSession();
+  session.events = [
+    {
+      at: "2025-01-01T12:00:00.000Z",
+      kind: "prompt",
+      status: "queued",
+      summary: "user prompt accepted",
+      detail: formatPromptEventDetail(prompt),
+    },
+  ];
+
+  const history = buildChatHistoryFromSession(session);
+  assert.equal(history[0], `you: ${prompt}`);
+  assert.match(history[0] ?? "", /without cutting off prompt text\.$/);
+  assert.doesNotMatch(history[0] ?? "", /\.\.\.$/);
+});
+
+test("maybeArchiveAgedChatHistory stores old transcript with Archivist before pruning", async () => {
+  const { maybeArchiveAgedChatHistory } = await import("../src/cli.js");
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-aged-chat-"));
+  try {
+    const session = createSession();
+    session.cwd = cwd;
+    session.repo.root = cwd;
+    session.archivist.enabled = true;
+    session.archivist.boundary = "bounded-write";
+    session.archivist.storagePath = path.join(cwd, ".nexagent", "archivist.json");
+    session.events = [
+      {
+        at: "2025-01-01T00:00:00.000Z",
+        kind: "prompt",
+        status: "queued",
+        summary: "user prompt accepted",
+        detail: "old question",
+      },
+      {
+        at: "2025-01-01T00:00:01.000Z",
+        kind: "command",
+        status: "completed",
+        summary: "command !cat completed",
+        detail: "old output",
+      },
+      ...Array.from({ length: 80 }, (_, index): RuntimeSession["events"][number] => ({
+        at: `2025-01-01T07:${String(index).padStart(2, "0")}:00.000Z`,
+        kind: "tool",
+        status: "completed",
+        summary: `tool read_file completed ${String(index)}`,
+        detail: "recent",
+      })),
+    ];
+
+    const archived = await maybeArchiveAgedChatHistory(session, Date.parse("2025-01-01T07:30:00.000Z"));
+
+    assert.equal(archived, true);
+    assert.equal(session.events.some((event) => event.detail === "old question"), false);
+    assert.equal(session.events.some((event) => event.detail === "old output"), false);
+    assert.equal(session.events.some((event) => event.summary === "aged chat history archived"), true);
+
+    const raw = await readFile(session.archivist.storagePath, "utf8");
+    const store = JSON.parse(raw) as { entries: Array<{ type: string; summary: string; content: string }> };
+    const entry = store.entries.find((candidate) => candidate.type === "chat-history-archive");
+    assert.ok(entry);
+    assert.match(entry.summary, /aged chat history/);
+    assert.match(entry.content, /old question/);
+    assert.match(entry.content, /old output/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test("runRuntimeCommand supports verbose provider output", async () => {
   const { runRuntimeCommand } = await import("../src/cli.js");
   const result = runRuntimeCommand(createSession(), "/provider --verbose");
@@ -949,14 +1108,14 @@ test("runRuntimeCommand supports verbose provider output", async () => {
   assert.match(result?.output ?? "", /^caveats: /m);
 });
 
-test("runRuntimeCommand blocks reading outside repo-local roots", async () => {
+test("runRuntimeCommand blocks reading protected paths", async () => {
   const { runRuntimeCommand } = await import("../src/cli.js");
   const session = createSession();
 
-  assert.deepEqual(runRuntimeCommand(session, "/read ../secrets.txt"), {
+  assert.deepEqual(runRuntimeCommand(session, "/read /etc/passwd"), {
     ok: false,
-    message: "tool policy blocked /secrets.txt; outside repo-local roots",
-    activity: "command blocked · /secrets.txt",
+    message: "tool policy blocked /etc/passwd; protected path",
+    activity: "command blocked · /etc/passwd",
   });
 });
 
@@ -1183,7 +1342,7 @@ test("createRuntimeInspectPayload includes instruction layer summaries", async (
   const { createRuntimeInspectPayload } = await import("../src/cli.js");
   const payload = createRuntimeInspectPayload(createSession());
 
-  assert.equal(payload.instructionLayers.count, 29);
+  assert.equal(payload.instructionLayers.count, 47);
   assert.match(payload.instructionLayers.identity, /nexagent, local coding harness assistant/);
   assert.equal(payload.instructionLayers.responseStyle, "none");
   assert.match(payload.instructionLayers.executionGuidance, /Read relevant code before changing behavior/);
@@ -1191,7 +1350,7 @@ test("createRuntimeInspectPayload includes instruction layer summaries", async (
   assert.match(payload.instructionLayers.taskContext, /OpenSpec artifacts as current task context/);
   assert.match(payload.instructionLayers.taskContext, /openspec includes changes, SPEC\.md/);
   assert.match(payload.instructionLayers.toolAvailability, /Working directory: \/repo/);
-  assert.match(payload.instructionLayers.toolAvailability, /Available internal tools: read_file, write_file, apply_patch, preview_patch, list_dir, search_content, search_files, git_status, git_diff, shell_command, archivist_save, archivist_checkpoint/);
+  assert.match(payload.instructionLayers.toolAvailability, /Available internal tools: read_file, write_file, apply_patch, batch_edit, preview_patch, list_dir, search_content, search_files, web_fetch, web_search, git_status, git_diff, shell_command, nexsight_execute, nexsight_index, nexsight_batch, nexsight_search, archivist_save, archivist_checkpoint/);
   assert.match(payload.instructionLayers.providerFallback, /Active provider: codex/);
   assert.equal(payload.instructionLayers.stableSections, "identity, executionGuidance, repoBehavior, taskContext, toolAvailability, providerFallback");
   assert.equal(payload.instructionLayers.dynamicSections, "archivistContext");

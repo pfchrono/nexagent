@@ -88,6 +88,7 @@ export function createRuntimeState(runtime: RuntimeBootstrap): RuntimeState {
       provider,
       providerRouting,
       cwd: runtime.config.cwd,
+      toolPolicy: runtime.config.toolPolicy,
       mcpServers: runtime.mcp.serverNames,
       enabledMcpServers: runtime.config.enabledMcpServers,
       imports: runtime.config.imports,
