@@ -536,6 +536,7 @@ export function createRuntimeTuiView(session: RuntimeSession): RuntimeTuiView {
       ["contextLeft", String(getRemainingContextTokens(session))],
       ["compact", formatCompactionSummary(session)],
       ["toolPolicy", session.toolPolicy.mode],
+      ["approval", formatApprovalSummary(session)],
       ["ops", formatOperationSummary(session)],
       ["status", session.action.status],
       ["detail", session.action.detail],
@@ -2038,6 +2039,7 @@ export function formatRuntimeStatus(session: RuntimeSession, detailMode: DetailM
         ["git", formatRepoFreshness(session)],
         ["context-left", String(getRemainingContextTokens(session))],
         ["compact", formatCompactionSummary(session)],
+        ["approval", formatApprovalSummary(session)],
         ["turn", compactTurnSummary],
         ["ops", formatOperationSummary(session)],
         ["styles", formatStyleStack(session)],
@@ -2050,6 +2052,7 @@ export function formatRuntimeStatus(session: RuntimeSession, detailMode: DetailM
         ["context-left", String(getRemainingContextTokens(session))],
         ["compact", formatCompactionSummary(session)],
         ["tool-policy", session.toolPolicy.mode],
+        ["approval", formatApprovalSummary(session)],
         ["turn", compactTurnSummary],
         ["ops", formatOperationSummary(session)],
         ["styles", formatStyleStack(session)],
@@ -2071,6 +2074,7 @@ export function formatRuntimeStatus(session: RuntimeSession, detailMode: DetailM
     ["turn", compactTurnSummary],
     ["product", `${session.product} / ${formatRepoLabel(session)} / ${session.repo.branch ?? "detached"}`],
     ["provider", `${session.provider} / ${getCurrentProviderModel(session)} / ${session.providerTransport.mode}`],
+    ["approval", formatApprovalSummary(session)],
     ["tool-policy", `${session.toolPolicy.mode} · memory ${session.archivist.enabled ? "enabled" : "disabled"} · ${session.toolPolicy.writes}/${session.toolPolicy.deletes}`],
     ["git", `${formatRepoFreshness(session)} · ${getRemainingContextTokens(session)} tokens left`],
   ]).join("\n");
@@ -2145,6 +2149,7 @@ function formatOperationControlsStatus(session: RuntimeSession): string {
     : "none";
   return [
     `approvalRequired: ${String(session.operationControls.requireApprovalForGuarded)}`,
+    `yoloMode: ${String(session.operationControls.yoloMode)}`,
     `pendingApproval: ${pending}`,
     `lastDecision: ${session.operationControls.lastDecision ?? "none"}`,
     `cancelRequested: ${String(session.operationControls.cancelRequested)}`,
@@ -2198,6 +2203,13 @@ function formatCompactionStatus(session: RuntimeSession): string {
 
 function formatCompactionSummary(session: RuntimeSession): string {
   return `${Math.round(session.compaction.thresholdPercent * 100)}% · left ${getRemainingContextTokens(session)} · compacts ${session.compaction.compactCount}`;
+}
+
+function formatApprovalSummary(session: RuntimeSession): string {
+  if (session.operationControls.yoloMode) {
+    return "approval=yolo";
+  }
+  return `approval=${session.operationControls.requireApprovalForGuarded ? "on" : "off"}`;
 }
 
 export function formatOperationSummary(session: RuntimeSession): string {
@@ -2270,6 +2282,7 @@ function formatStatusline(session: RuntimeSession): string {
     getCurrentProviderModel(session),
     session.providerTransport.mode,
     session.providerTransport.authGate,
+    formatApprovalSummary(session),
     `mouse=${getConfiguredMouseMode(session)}/${getEffectiveMouseMode(session).mode}`,
     formatStyleStack(session),
     formatTurnTokens(session),

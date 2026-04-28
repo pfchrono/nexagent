@@ -377,8 +377,9 @@ test("runRuntimeCommand reports runtime status and style stack", async () => {
   assert.match(result?.output ?? "", /^tool-policy: /m);
   assert.match(result?.output ?? "", /memory/);
   assert.match(result?.output ?? "", /provider: codex \/ gpt-5.4 \/ cli-exec/);
+  assert.match(result?.output ?? "", /approval: approval=off/);
   assert.equal((result?.output ?? "").includes("configured:"), false);
-  assert.equal((result?.output ?? "").split("\n").length <= 7, true);
+  assert.equal((result?.output ?? "").split("\n").length <= 8, true);
 
   const verbose = runRuntimeCommand(session, "/status --verbose");
   assert.equal(verbose?.ok, true);
@@ -388,6 +389,7 @@ test("runRuntimeCommand reports runtime status and style stack", async () => {
   assert.match(verboseOutput, /^provider$/m);
   assert.match(verboseOutput, /^auth:$/m);
   assert.match(verboseOutput, /\bloggedIn: true\b/);
+  assert.match(verboseOutput, /yoloMode: false/);
   assert.match(verboseOutput, /^tool-policy$/m);
   assert.match(verboseOutput, /^memory$/m);
 });
@@ -413,6 +415,27 @@ test("formatRuntimeStatus compact includes turn state/objective/blocker", async 
   const runningOutput = formatRuntimeStatus(runningSession, "compact");
   assert.match(runningOutput, /state=running/);
   assert.match(runningOutput, /objective=provider request/);
+});
+
+test("status and statusline expose yolo mode", async () => {
+  const { createRuntimeTuiView, runRuntimeCommand } = await import("../src/cli.js");
+  const session = createSession();
+  session.operationControls.yoloMode = true;
+  session.operationControls.requireApprovalForGuarded = false;
+  session.commandModes.statusline = true;
+
+  const status = runRuntimeCommand(session, "/status");
+  assert.equal(status?.ok, true);
+  assert.match(status?.output ?? "", /approval: approval=yolo/);
+
+  const approvalStatus = runRuntimeCommand(session, "/approval status");
+  assert.equal(approvalStatus?.ok, true);
+  assert.match(approvalStatus?.output ?? "", /yoloMode: true/);
+  assert.match(approvalStatus?.output ?? "", /approvalRequired: false/);
+
+  const view = createRuntimeTuiView(session);
+  assert.match(view.statusline ?? "", /approval=yolo/);
+  assert.equal(new Map(view.metadata).get("approval"), "approval=yolo");
 });
 
 test("runRuntimeCommand continue command reflects blockers and run-state", async () => {
@@ -483,20 +506,20 @@ test("runRuntimeCommand controls approval and operator steer state", async () =>
 
   assert.deepEqual(runRuntimeCommand(session, "/approval on"), {
     ok: true,
-    output: "approvalRequired: true\npendingApproval: none\nlastDecision: none\ncancelRequested: false\nsteerState: none\nsteer: none\nlastAppliedSteer: none\nsteerHistory: none",
+    output: "approvalRequired: true\nyoloMode: false\npendingApproval: none\nlastDecision: none\ncancelRequested: false\nsteerState: none\nsteer: none\nlastAppliedSteer: none\nsteerHistory: none",
     activity: "approval on",
   });
   assert.equal(session.operationControls.requireApprovalForGuarded, true);
 
   assert.deepEqual(runRuntimeCommand(session, "/steer use smaller patch"), {
     ok: true,
-    output: "approvalRequired: true\npendingApproval: none\nlastDecision: none\ncancelRequested: false\nsteerState: queued\nsteer: use smaller patch\nlastAppliedSteer: none\nsteerHistory: queued:use smaller patch (ready for next tool/model boundary)",
+    output: "approvalRequired: true\nyoloMode: false\npendingApproval: none\nlastDecision: none\ncancelRequested: false\nsteerState: queued\nsteer: use smaller patch\nlastAppliedSteer: none\nsteerHistory: queued:use smaller patch (ready for next tool/model boundary)",
     activity: "steer queued",
   });
 
   assert.deepEqual(runRuntimeCommand(session, "/cancel"), {
     ok: true,
-    output: "approvalRequired: true\npendingApproval: none\nlastDecision: none\ncancelRequested: true\nsteerState: queued\nsteer: use smaller patch\nlastAppliedSteer: none\nsteerHistory: queued:use smaller patch (ready for next tool/model boundary)",
+    output: "approvalRequired: true\nyoloMode: false\npendingApproval: none\nlastDecision: none\ncancelRequested: true\nsteerState: queued\nsteer: use smaller patch\nlastAppliedSteer: none\nsteerHistory: queued:use smaller patch (ready for next tool/model boundary)",
     activity: "cancel requested",
   });
 });
@@ -510,7 +533,7 @@ test("runRuntimeCommand marks steer deferred while work is active", async () => 
 
   assert.deepEqual(runRuntimeCommand(session, "/steer wait for safer patch window"), {
     ok: true,
-    output: "approvalRequired: false\npendingApproval: none\nlastDecision: none\ncancelRequested: false\nsteerState: deferred\nsteer: wait for safer patch window\nlastAppliedSteer: none\nsteerHistory: deferred:wait for safer patch window (waiting for next tool/model boundary)",
+    output: "approvalRequired: false\nyoloMode: false\npendingApproval: none\nlastDecision: none\ncancelRequested: false\nsteerState: deferred\nsteer: wait for safer patch window\nlastAppliedSteer: none\nsteerHistory: deferred:wait for safer patch window (waiting for next tool/model boundary)",
     activity: "steer deferred",
   });
 });
@@ -572,7 +595,7 @@ test("runRuntimeCommand toggles statusline", async () => {
 
   assert.deepEqual(result, {
     ok: true,
-    output: "Statusline ON. Footer now shows codex | gpt-5.4 | cli-exec | ready | mouse=auto/scroll | mouse:auto | in~0 out~0 | ctx~272000.",
+    output: "Statusline ON. Footer now shows codex | gpt-5.4 | cli-exec | ready | approval=off | mouse=auto/scroll | mouse:auto | in~0 out~0 | ctx~272000.",
     activity: "statusline on",
   });
   assert.equal(session.commandModes.statusline, true);
@@ -967,6 +990,7 @@ test("createRuntimeTuiView includes grouped instruction sources", async () => {
   assert.equal(metadataRows.get("contextLeft"), "272000");
   assert.equal(metadataRows.get("compact"), "50% · left 272000 · compacts 0");
   assert.equal(metadataRows.get("toolPolicy"), "repo-local-guarded");
+  assert.equal(metadataRows.get("approval"), "approval=off");
   assert.equal(metadataRows.get("styles"), "mouse:auto");
   const routingRows = new Map(view.routing);
   assert.equal(routingRows.get("capabilities"), "turns=bounded; tool-calls=xml-loop; approval=guarded; steer=boundary-only; model-scope=local-cli");
