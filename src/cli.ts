@@ -4236,11 +4236,32 @@ function formatCompletionPreview(completion: PromptCompletionResult | null, fall
   }
   const selected = completion.suggestions[completion.selectedIndex];
   const preview = completion.value.trim().length > 0 ? completion.value : selected?.value ?? "";
-  const menu = completion.suggestions
-    .slice(0, 6)
-    .map((suggestion, index) => `${index === completion.selectedIndex ? ">" : " "} ${suggestion.label} — ${suggestion.hint}`)
-    .join("  ");
-  return `preview ${preview}  ${menu}`;
+  return `preview ${preview}`;
+}
+
+function renderCompletionMenu(completion: PromptCompletionResult | null, width: number): string[] {
+  if (!completion || completion.suggestions.length === 0) {
+    return [];
+  }
+
+  const windowSize = Math.min(8, completion.suggestions.length);
+  const start = Math.max(0, Math.min(
+    completion.suggestions.length - windowSize,
+    completion.selectedIndex - Math.floor(windowSize / 2),
+  ));
+  const visible = completion.suggestions.slice(start, start + windowSize);
+  const header = completion.suggestions.length > windowSize
+    ? `suggestions ${completion.selectedIndex + 1}/${completion.suggestions.length} · ↑/↓ select · Tab accept`
+    : "suggestions · ↑/↓ select · Tab accept";
+
+  return [
+    header,
+    ...visible.map((suggestion, offset) => {
+      const index = start + offset;
+      const marker = index === completion.selectedIndex ? ">" : " ";
+      return truncateLine(`${marker} ${suggestion.label.padEnd(28)} ${suggestion.hint}`, width);
+    }),
+  ];
 }
 
 function renderAgentPanel(state: RuntimeTuiState, width: number): string[] {
@@ -4264,6 +4285,7 @@ function renderAgentPanel(state: RuntimeTuiState, width: number): string[] {
     padLine("composer", width),
     ...promptComposerLines,
     ...wrapText(formatCompletionPreview(completion, composerHint), width),
+    ...renderCompletionMenu(completion, width),
     padLine("transcript", width),
     ...transcript.flatMap((entry) => wrapText(entry, width)),
   ];
@@ -4311,6 +4333,7 @@ function renderWorkspacePanel(
       ? wrapText(`image attached ${state.pendingImageAttachment.path}`, width).map((line) => tintLine(line, ANSI.preview))
       : []),
     ...wrapText(formatCompletionPreview(completion, composerHint), width).map((line) => tintLine(line, completion?.suggestions.length ? ANSI.preview : ANSI.dim)),
+    ...renderCompletionMenu(completion, width).map((line) => tintLine(line, ANSI.preview)),
     tintLine(truncateLine(composerMeta, width), ANSI.footer),
   ];
   const composerLines = [
@@ -4434,6 +4457,7 @@ function renderIdleHomePanel(
     ...promptComposerLines.map((line) => tintLine(line, ANSI.prompt)),
     ...wrapText(formatCompletionPreview(completion, composerHint), width)
       .map((line) => tintLine(line, completion?.suggestions.length ? ANSI.preview : ANSI.dim)),
+    ...renderCompletionMenu(completion, width).map((line) => tintLine(line, ANSI.preview)),
   ];
   const footerStatus = buildFooterStatus(state, width);
 
