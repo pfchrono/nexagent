@@ -563,7 +563,7 @@ test("plain approved prompt resumes pending guarded write action", async () => {
       fallbackApplied: false,
       output: "Done.",
     });
-    assert.equal(stdoutChunks.join(""), "approvalRequired: true\npendingApproval: none\nlastDecision: approved\ncancelRequested: false\nsteerState: none\nsteer: none\nlastAppliedSteer: none\nsteerHistory: none\n");
+    assert.equal(stdoutChunks.join(""), "approvalRequired: true\nyoloMode: false\npendingApproval: none\nlastDecision: approved\ncancelRequested: false\nsteerState: none\nsteer: none\nlastAppliedSteer: none\nsteerHistory: none\n");
     assert.equal(
       await readFile(path.join(cwd, "tmp", "dogfood-approval-test-2.txt"), "utf8"),
       "approval second test\n",
