@@ -26,16 +26,17 @@ Implement minimal usable `/skill` and `$skill` terminal routing baseline: discov
 - **D-06:** Include explicit recovery hint: run `/skill` to inspect full list.
 
 ### `$skill` argument handling
-- **D-07:** Pass raw trailing args unchanged to skill routing.
-- **D-08:** Do not normalize/rewrite arguments in baseline.
+- **D-07:** Use direct trigger form `$<skillname> ...` as shorthand entry.
+- **D-08:** Trigger form maps to `/skill <skillname> ...` routing internally while preserving raw trailing args unchanged.
+- **D-09:** Do not normalize/rewrite arguments in baseline.
 
 ### Persistence model
-- **D-09:** Baseline activation persistence is session-only.
-- **D-10:** No global auto-persist in this phase.
+- **D-10:** Baseline activation persistence is session-only.
+- **D-11:** No global auto-persist in this phase.
 
 ### Safety confirmations
-- **D-11:** No confirmation gate on normal skill switch/route in baseline.
-- **D-12:** Confirmation policy can be added in future high-risk phase if needed.
+- **D-12:** No confirmation gate on normal skill switch/route in baseline.
+- **D-13:** Confirmation policy can be added in future high-risk phase if needed.
 
 ### the agent's Discretion
 - Exact compact table column widths and truncation behavior.
@@ -83,7 +84,7 @@ Implement minimal usable `/skill` and `$skill` terminal routing baseline: discov
 ## Specific Ideas
 
 - Keep baseline fast and predictable; no hidden smart behavior on unknown skills.
-- Preserve raw args for `$skill` route to avoid mangling intent.
+- Preserve raw args for `$<skillname>` route to avoid mangling intent.
 - Make recovery path obvious when lookup fails (closest matches + list hint).
 
 </specifics>

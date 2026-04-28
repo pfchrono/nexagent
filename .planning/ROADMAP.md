@@ -336,3 +336,53 @@ Plans:
 
 Plans:
 - [ ] TBD (run /gsd-plan-phase 58 to break down)
+
+### Phase 59: Scroll and selection UX polish
+
+**Goal:** [To be planned]
+**Requirements**: TBD
+**Depends on:** Phase 58
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 59 to break down)
+
+### Phase 60: Turn card density controls
+
+**Goal:** [To be planned]
+**Requirements**: TBD
+**Depends on:** Phase 59
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 60 to break down)
+
+### Phase 61: Inline action chips for recovery
+
+**Goal:** [To be planned]
+**Requirements**: TBD
+**Depends on:** Phase 60
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 61 to break down)
+
+### Phase 62: Keyboard-first cockpit navigation
+
+**Goal:** [To be planned]
+**Requirements**: TBD
+**Depends on:** Phase 61
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 62 to break down)
+
+### Phase 63: Terminal capability diagnostics panel
+
+**Goal:** [To be planned]
+**Requirements**: TBD
+**Depends on:** Phase 62
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 63 to break down)
