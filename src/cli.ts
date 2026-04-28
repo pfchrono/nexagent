@@ -4475,9 +4475,10 @@ function renderTuiBlock(title: string, contentLines: string[], width: number): s
   const titleText = ` ${title} `;
   const horizontal = "─".repeat(Math.max(0, innerWidth - titleText.length));
   const lines = contentLines.length > 0 ? contentLines : ["none"];
+  const framelessBody = title.startsWith("composer");
   return [
     truncateLine(`╭${titleText}${horizontal}╮`, width),
-    ...lines.map((line) => truncateLine(`│ ${padLine(line, innerWidth)} │`, width)),
+    ...lines.map((line) => truncateLine(framelessBody ? `  ${line}` : `│ ${padLine(line, innerWidth)} │`, width)),
     truncateLine(`╰${"─".repeat(innerWidth + 2)}╯`, width),
   ];
 }
@@ -4687,6 +4688,7 @@ function renderMessageBox(title: string, value: string, width: number): string[]
     : width;
   const innerWidth = Math.max(12, boxWidth - 4);
   const style = title === "agent" ? ANSI.agent : title === "trace" ? ANSI.trace : ANSI.working;
+  const framelessBody = title === "agent";
   const top = tintLine(`╭${titleText}${"─".repeat(Math.max(0, innerWidth + 2 - titleText.length))}╮`, style);
   const bottom = tintLine(`╰${"─".repeat(innerWidth + 2)}╯`, style);
   const renderedValue = title === "agent" ? normalizeAgentReply(value) : value;
@@ -4699,7 +4701,7 @@ function renderMessageBox(title: string, value: string, width: number): string[]
 
   return [
     top,
-    ...bodyLines.map((line) => tintLine(`│ ${padLine(line, innerWidth)} │`, style)),
+    ...bodyLines.map((line) => tintLine(framelessBody ? `  ${line}` : `│ ${padLine(line, innerWidth)} │`, style)),
     bottom,
   ];
 }

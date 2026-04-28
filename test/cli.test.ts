@@ -69,6 +69,29 @@ test("renderRuntimeTui formats runtime state", async () => {
   assert.match(output, /\/provider/);
 });
 
+test("renderRuntimeTui keeps composer body free of side rails", async () => {
+  const { renderRuntimeTui } = await import("../src/cli.js");
+  const view: RuntimeTuiView = {
+    title: "nexagent",
+    statusline: "codex | ready",
+    metadata: [["session", "abc"], ["provider", "codex"], ["cwd", "/repo"], ["turns", "1"]],
+    routing: [["models", "codex=gpt-5.4"]],
+    auth: [],
+    instructions: [],
+    mcp: [],
+    hooks: [],
+    imports: [],
+    archivist: [],
+  };
+
+  const output = renderRuntimeTui(view, { columns: 120, rows: 36 });
+  const plain = output.replace(/\u001b\[[0-9;?]*[A-Za-z]/g, "");
+
+  assert.match(plain, /prompt/);
+  assert.match(plain, /\n  > ▌/);
+  assert.doesNotMatch(plain, /│ > ▌/);
+});
+
 test("parseCommand preserves empty run prompt for resolvePrompt", async () => {
   const { parseCommand } = await import("../src/cli.js");
 
