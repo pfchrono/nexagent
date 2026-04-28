@@ -32,3 +32,9 @@ Phase: 43.1
 Plan: Not started
 Status: Executing Phase 40.1
 Last activity: 2026-04-27
+
+## Accumulated Context
+
+### Roadmap Evolution
+
+- Phase 50 added: Live turn streaming render (paced reply)

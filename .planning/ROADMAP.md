@@ -246,3 +246,93 @@ Parities are explicit: don’t ship blindly, compare UX and turn-flow behaviors 
 
 Plans:
 - [ ] TBD (promote with `$gsd-review-backlog` when ready)
+
+### Phase 50: Live turn streaming render (paced reply)
+
+**Goal:** [To be planned]
+**Requirements**: TBD
+**Depends on:** Phase 49
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 50 to break down)
+
+### Phase 51: Turn header metadata badges (timestamp/mode/provider/tools/duration/tokens)
+
+**Goal:** [To be planned]
+**Requirements**: TBD
+**Depends on:** Phase 50
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 51 to break down)
+
+### Phase 52: Structured turn blocks (intent/actions/result/next-step)
+
+**Goal:** [To be planned]
+**Requirements**: TBD
+**Depends on:** Phase 51
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 52 to break down)
+
+### Phase 53: Collapsible execution trace with evidence chips
+
+**Goal:** [To be planned]
+**Requirements**: TBD
+**Depends on:** Phase 52
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 53 to break down)
+
+### Phase 54: Diff-style change summary card per turn
+
+**Goal:** [To be planned]
+**Requirements**: TBD
+**Depends on:** Phase 53
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 54 to break down)
+
+### Phase 55: Confidence and risk badge semantics per turn
+
+**Goal:** [To be planned]
+**Requirements**: TBD
+**Depends on:** Phase 54
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 55 to break down)
+
+### Phase 56: Explicit per-turn outcome footer (completed/blocked/failed/waiting)
+
+**Goal:** [To be planned]
+**Requirements**: TBD
+**Depends on:** Phase 55
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 56 to break down)
+
+### Phase 57: User intent echo line at turn start
+
+**Goal:** [To be planned]
+**Requirements**: TBD
+**Depends on:** Phase 56
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 57 to break down)
+
+### Phase 58: Pinned warning and error lane above transcript
+
+**Goal:** [To be planned]
+**Requirements**: TBD
+**Depends on:** Phase 57
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 58 to break down)
