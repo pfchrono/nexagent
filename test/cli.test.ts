@@ -438,6 +438,21 @@ test("status and statusline expose yolo mode", async () => {
   assert.equal(new Map(view.metadata).get("approval"), "approval=yolo");
 });
 
+test("approval on re-enables guarded approval inside yolo session", async () => {
+  const { runRuntimeCommand } = await import("../src/cli.js");
+  const session = createSession();
+  session.operationControls.yoloMode = true;
+  session.operationControls.requireApprovalForGuarded = false;
+
+  const result = runRuntimeCommand(session, "/approval on");
+
+  assert.equal(result?.ok, true);
+  assert.equal(session.operationControls.yoloMode, true);
+  assert.equal(session.operationControls.requireApprovalForGuarded, true);
+  assert.match(result?.output ?? "", /approvalRequired: true/);
+  assert.match(result?.output ?? "", /yoloMode: true/);
+});
+
 test("runRuntimeCommand continue command reflects blockers and run-state", async () => {
   const { runRuntimeCommand } = await import("../src/cli.js");
   const blockedSession = createSession();
