@@ -2,6 +2,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 
+import { resolveNexagentHome } from "../runtime/paths.js";
 import type { RuntimeSession } from "../runtime/session.js";
 
 export interface RuntimeSkillDefinition {
@@ -36,9 +37,12 @@ export function formatSkillList(session: RuntimeSession, skills: RuntimeSkillDef
 }
 
 export function discoverSkills(cwd: string): RuntimeSkillDefinition[] {
+  const nexagentHome = resolveNexagentHome();
   const roots = [
+    path.join(cwd, ".nexagent", "skills"),
     path.join(cwd, ".codex", "skills"),
     path.join(cwd, ".agents", "skills"),
+    path.join(nexagentHome, "skills"),
     path.join(homedir(), ".codex", "skills"),
     path.join(homedir(), ".agents", "skills"),
   ];

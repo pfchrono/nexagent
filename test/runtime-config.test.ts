@@ -47,6 +47,20 @@ const DEFAULT_TOOL_POLICY = {
   deletes: "blocked" as const,
 };
 
+async function withNexagentHome<T>(home: string, fn: () => Promise<T>): Promise<T> {
+  const previousHome = process.env.NEXAGENT_HOME;
+  process.env.NEXAGENT_HOME = home;
+  try {
+    return await fn();
+  } finally {
+    if (previousHome === undefined) {
+      delete process.env.NEXAGENT_HOME;
+    } else {
+      process.env.NEXAGENT_HOME = previousHome;
+    }
+  }
+}
+
 test("loadHarnessConfig discovers repo-local instruction sources", async () => {
   const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-config-"));
 
@@ -99,8 +113,60 @@ test("loadHarnessConfig discovers repo-local instruction sources", async () => {
   }
 });
 
+test("loadHarnessConfig reads global nexagent settings from NEXAGENT_HOME", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-global-config-"));
+  const nexagentHome = await mkdtemp(path.join(tmpdir(), "nexagent-home-"));
+
+  try {
+    await writeFile(
+      path.join(nexagentHome, "settings.json"),
+      JSON.stringify({
+        provider: "openai",
+        mcp: {
+          configPath: "mcp.json",
+          enabledServers: ["global"],
+        },
+        archivist: {
+          enabled: true,
+          storagePath: "archivist.json",
+        },
+      }),
+      "utf8",
+    );
+
+    const config = await withNexagentHome(nexagentHome, () => loadHarnessConfig(cwd));
+
+    assert.equal(config.provider, "openai");
+    assert.equal(config.mcpConfigPath, path.join(nexagentHome, "mcp.json"));
+    assert.deepEqual(config.enabledMcpServers, ["global"]);
+    assert.equal(config.archivist.storagePath, path.join(nexagentHome, "archivist.json"));
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+    await rm(nexagentHome, { recursive: true, force: true });
+  }
+});
+
+test("loadHarnessConfig lets repo nexagent settings override global settings", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-global-override-"));
+  const nexagentHome = await mkdtemp(path.join(tmpdir(), "nexagent-home-"));
+
+  try {
+    await mkdir(path.join(cwd, ".nexagent"));
+    await writeFile(path.join(nexagentHome, "settings.json"), JSON.stringify({ provider: "openai" }), "utf8");
+    await writeFile(path.join(cwd, ".nexagent", "settings.json"), JSON.stringify({ provider: "codex" }), "utf8");
+
+    const config = await withNexagentHome(nexagentHome, () => loadHarnessConfig(cwd));
+
+    assert.equal(config.provider, "codex");
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+    await rm(nexagentHome, { recursive: true, force: true });
+  }
+});
+
 test("loadHarnessConfig imports enabled Claude MCP servers", async () => {
   const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-claude-import-"));
+  const nexagentHome = await mkdtemp(path.join(tmpdir(), "nexagent-home-"));
 
   try {
     await mkdir(path.join(cwd, ".claude"));
@@ -127,7 +193,7 @@ test("loadHarnessConfig imports enabled Claude MCP servers", async () => {
       "utf8",
     );
 
-    const config = await loadHarnessConfig(cwd);
+    const config = await withNexagentHome(nexagentHome, () => loadHarnessConfig(cwd));
 
     assert.deepEqual(config.enabledMcpServers, ["context7", "filesystem"]);
     assert.deepEqual(config.imports.claude, {
@@ -143,11 +209,13 @@ test("loadHarnessConfig imports enabled Claude MCP servers", async () => {
     });
   } finally {
     await rm(cwd, { recursive: true, force: true });
+    await rm(nexagentHome, { recursive: true, force: true });
   }
 });
 
 test("loadHarnessConfig imports Claude archivist settings", async () => {
   const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-claude-archivist-"));
+  const nexagentHome = await mkdtemp(path.join(tmpdir(), "nexagent-home-"));
 
   try {
     await mkdir(path.join(cwd, ".claude"));
@@ -162,7 +230,7 @@ test("loadHarnessConfig imports Claude archivist settings", async () => {
       "utf8",
     );
 
-    const config = await loadHarnessConfig(cwd);
+    const config = await withNexagentHome(nexagentHome, () => loadHarnessConfig(cwd));
 
     assert.deepEqual(config.archivist, {
       enabled: true,
@@ -190,11 +258,13 @@ test("loadHarnessConfig imports Claude archivist settings", async () => {
     });
   } finally {
     await rm(cwd, { recursive: true, force: true });
+    await rm(nexagentHome, { recursive: true, force: true });
   }
 });
 
 test("loadHarnessConfig lets local nexagent settings override imported archivist config", async () => {
   const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-archivist-override-"));
+  const nexagentHome = await mkdtemp(path.join(tmpdir(), "nexagent-home-"));
 
   try {
     await mkdir(path.join(cwd, ".claude"));
@@ -220,7 +290,7 @@ test("loadHarnessConfig lets local nexagent settings override imported archivist
       "utf8",
     );
 
-    const config = await loadHarnessConfig(cwd);
+    const config = await withNexagentHome(nexagentHome, () => loadHarnessConfig(cwd));
 
     assert.deepEqual(config.archivist, {
       enabled: true,
@@ -248,6 +318,7 @@ test("loadHarnessConfig lets local nexagent settings override imported archivist
     });
   } finally {
     await rm(cwd, { recursive: true, force: true });
+    await rm(nexagentHome, { recursive: true, force: true });
   }
 });
 

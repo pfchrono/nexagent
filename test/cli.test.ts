@@ -1206,6 +1206,60 @@ test("autocompletePromptBuffer completes trailing skill shorthand inside prompt 
   }
 });
 
+test("autocompletePromptBuffer discovers global nexagent skills with repo override", async () => {
+  const { autocompletePromptBuffer, describePromptHint } = await import("../src/cli.js");
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-cli-global-skill-"));
+  const nexagentHome = await mkdtemp(path.join(tmpdir(), "nexagent-home-"));
+  const previousHome = process.env.NEXAGENT_HOME;
+
+  try {
+    process.env.NEXAGENT_HOME = nexagentHome;
+    await mkdir(path.join(nexagentHome, "skills", "global-memory"), { recursive: true });
+    await writeFile(path.join(nexagentHome, "skills", "global-memory", "SKILL.md"), [
+      "---",
+      "name: global-memory",
+      "description: global memory skill",
+      "---",
+      "",
+      "# global-memory",
+    ].join("\n"));
+    await mkdir(path.join(nexagentHome, "skills", "shared-skill"), { recursive: true });
+    await writeFile(path.join(nexagentHome, "skills", "shared-skill", "SKILL.md"), [
+      "---",
+      "name: shared-skill",
+      "description: global shared skill",
+      "---",
+      "",
+      "# shared-skill",
+    ].join("\n"));
+    await mkdir(path.join(cwd, ".nexagent", "skills", "shared-skill"), { recursive: true });
+    await writeFile(path.join(cwd, ".nexagent", "skills", "shared-skill", "SKILL.md"), [
+      "---",
+      "name: shared-skill",
+      "description: project shared skill",
+      "---",
+      "",
+      "# shared-skill",
+    ].join("\n"));
+
+    const session = createSession();
+    session.cwd = cwd;
+    session.repo.root = cwd;
+
+    assert.equal(autocompletePromptBuffer(session, "use $global-m").value, "use $global-memory ");
+    assert.match(describePromptHint(session, "use $global-m") ?? "", /global-memory \(user\)/);
+    assert.match(describePromptHint(session, "use $shared") ?? "", /shared-skill \(project\)/);
+  } finally {
+    if (previousHome === undefined) {
+      delete process.env.NEXAGENT_HOME;
+    } else {
+      process.env.NEXAGENT_HOME = previousHome;
+    }
+    await rm(cwd, { recursive: true, force: true });
+    await rm(nexagentHome, { recursive: true, force: true });
+  }
+});
+
 test("autocompletePromptBuffer completes repo paths", async () => {
   const { autocompletePromptBuffer } = await import("../src/cli.js");
   const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-cli-complete-"));

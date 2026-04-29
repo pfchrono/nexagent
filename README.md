@@ -32,7 +32,8 @@ Terminal-first AI coding harness for local operator-driven development.
 - `src/opentui/` — opt-in OpenTUI shell baseline and runtime view adapter
 - `test/` — CLI, provider, runtime config, instructions, and tool tests
 - `.planning/` — project roadmap, state, requirements, phase artifacts, audits
-- `.nexagent/`, `.claude/`, `.mcp.json` — local runtime and assistant configuration
+- `.nexagent/`, `.claude/`, `.mcp.json` — repo-local runtime and assistant configuration
+- `~/.nexagent/` — global user settings, skills, and reusable Nexagent assets
 
 ## Commands
 
@@ -99,6 +100,32 @@ bun run dev -- --opentui
 ```
 
 OpenTUI is not the default path yet. Current shell work is focused on boot/render/input safety before the composer, command surface, transcript scroll, and cockpit controls are moved over.
+
+## Configuration
+
+Nexagent now has a Codex-style global home. By default this is `~/.nexagent/`; set `NEXAGENT_HOME` to use a different location for tests or portable installs.
+
+Settings merge in this order:
+
+1. built-in defaults
+2. `~/.nexagent/settings.json`
+3. `~/.nexagent/settings.local.json`
+4. imported assistant settings such as repo `.claude/settings*.json`
+5. repo `.nexagent/settings.json`
+6. repo `.nexagent/settings.local.json`
+
+Repo settings win over global settings. Relative paths inside global settings resolve from `~/.nexagent/`; relative paths inside repo settings resolve from the repo root.
+
+Skills are discovered from repo roots first, then global user roots:
+
+- repo `.nexagent/skills`
+- repo `.codex/skills`
+- repo `.agents/skills`
+- `~/.nexagent/skills`
+- `~/.codex/skills`
+- `~/.agents/skills`
+
+If two roots define the same skill name, repo-local skill wins.
 
 ## Common Runtime Commands
 

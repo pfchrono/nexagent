@@ -3,6 +3,8 @@ import { readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 
+import { resolveNexagentHome, resolvePathFromBase } from "./paths.js";
+
 const execFileAsync = promisify(execFile);
 
 export interface HarnessConfig {
@@ -170,8 +172,11 @@ interface ResolvedConfigSource {
 const DEFAULT_PRODUCT_NAME = "nexagent";
 const DEFAULT_PROVIDER = "codex";
 const DEFAULT_MCP_CONFIG_FILE = ".mcp.json";
-const NEXAGENT_SETTINGS_FILE = path.join(".nexagent", "settings.json");
-const NEXAGENT_LOCAL_SETTINGS_FILE = path.join(".nexagent", "settings.local.json");
+const NEXAGENT_SETTINGS_DIR = ".nexagent";
+const NEXAGENT_SETTINGS_BASENAME = "settings.json";
+const NEXAGENT_LOCAL_SETTINGS_BASENAME = "settings.local.json";
+const NEXAGENT_SETTINGS_FILE = path.join(NEXAGENT_SETTINGS_DIR, NEXAGENT_SETTINGS_BASENAME);
+const NEXAGENT_LOCAL_SETTINGS_FILE = path.join(NEXAGENT_SETTINGS_DIR, NEXAGENT_LOCAL_SETTINGS_BASENAME);
 const CLAUDE_SETTINGS_FILE = path.join(".claude", "settings.json");
 const CLAUDE_LOCAL_SETTINGS_FILE = path.join(".claude", "settings.local.json");
 const DEFAULT_CLAUDE_IMPORT_PATHS = [CLAUDE_LOCAL_SETTINGS_FILE, CLAUDE_SETTINGS_FILE];
@@ -186,12 +191,15 @@ const REPO_INSTRUCTION_SOURCE_CANDIDATES = [
 ] as const;
 
 export async function loadHarnessConfig(cwd: string): Promise<HarnessConfig> {
-  const [settings, localSettings, instructionSources] = await Promise.all([
+  const nexagentHome = resolveNexagentHome();
+  const [globalSettings, globalLocalSettings, settings, localSettings, instructionSources] = await Promise.all([
+    readJsonIfExists<NexagentSettings>(path.join(nexagentHome, NEXAGENT_SETTINGS_BASENAME)),
+    readJsonIfExists<NexagentSettings>(path.join(nexagentHome, NEXAGENT_LOCAL_SETTINGS_BASENAME)),
     readJsonIfExists<NexagentSettings>(path.join(cwd, NEXAGENT_SETTINGS_FILE)),
     readJsonIfExists<NexagentSettings>(path.join(cwd, NEXAGENT_LOCAL_SETTINGS_FILE)),
     discoverInstructionSources(cwd),
   ]);
-  const importedClaude = await loadImportedClaudeSettings(cwd, settings, localSettings);
+  const importedClaude = await loadImportedClaudeSettings(cwd, nexagentHome, globalSettings, globalLocalSettings, settings, localSettings);
   const mergedConfig = mergeConfigSources(
     {
       provider: DEFAULT_PROVIDER,
@@ -199,9 +207,11 @@ export async function loadHarnessConfig(cwd: string): Promise<HarnessConfig> {
       enabledMcpServers: [],
       archivist: { enabled: true },
     },
+    mapNexagentSettings(globalSettings, nexagentHome),
+    mapNexagentSettings(globalLocalSettings, nexagentHome),
     importedClaude?.values ?? {},
-    mapNexagentSettings(settings),
-    mapNexagentSettings(localSettings),
+    mapNexagentSettings(settings, cwd),
+    mapNexagentSettings(localSettings, cwd),
   );
 
   const provider = mergedConfig.provider ?? DEFAULT_PROVIDER;
@@ -221,7 +231,7 @@ export async function loadHarnessConfig(cwd: string): Promise<HarnessConfig> {
       },
       transport: mergedConfig.transport ?? {},
     },
-    mcpConfigPath: path.join(cwd, mergedConfig.mcpConfigPath ?? DEFAULT_MCP_CONFIG_FILE),
+    mcpConfigPath: resolveConfigFilePath(cwd, mergedConfig.mcpConfigPath),
     enabledMcpServers: normalizeServerNames(mergedConfig.enabledMcpServers),
     imports: {
       claude: importedClaude?.metadata ?? null,
@@ -236,19 +246,27 @@ export async function loadHarnessConfig(cwd: string): Promise<HarnessConfig> {
 
 async function loadImportedClaudeSettings(
   cwd: string,
+  nexagentHome: string,
+  globalSettings: NexagentSettings | null,
+  globalLocalSettings: NexagentSettings | null,
   settings: NexagentSettings | null,
   localSettings: NexagentSettings | null,
 ): Promise<{ values: ResolvedConfigSource; metadata: ImportedClaudeSettings } | null> {
-  const claudeImport = localSettings?.imports?.claude ?? settings?.imports?.claude;
+  const claudeImport = localSettings?.imports?.claude
+    ?? settings?.imports?.claude
+    ?? globalLocalSettings?.imports?.claude
+    ?? globalSettings?.imports?.claude;
 
   if (claudeImport?.enabled === false) {
     return null;
   }
 
-  const candidatePaths = claudeImport?.paths?.length ? claudeImport.paths : DEFAULT_CLAUDE_IMPORT_PATHS;
+  const importBaseDir = (localSettings?.imports?.claude ?? settings?.imports?.claude) ? cwd : nexagentHome;
+  const candidatePaths = claudeImport?.paths?.length
+    ? claudeImport.paths.map((candidatePath) => resolvePathFromBase(importBaseDir, candidatePath))
+    : DEFAULT_CLAUDE_IMPORT_PATHS.map((candidatePath) => path.join(cwd, candidatePath));
 
-  for (const candidatePath of candidatePaths) {
-    const absolutePath = path.join(cwd, candidatePath);
+  for (const absolutePath of candidatePaths) {
     const parsed = await readJsonIfExists<ClaudeSettings>(absolutePath);
 
     if (!parsed) {
@@ -274,16 +292,23 @@ async function loadImportedClaudeSettings(
   return null;
 }
 
-function mapNexagentSettings(settings: NexagentSettings | null): ResolvedConfigSource {
+function mapNexagentSettings(settings: NexagentSettings | null, settingsDir: string): ResolvedConfigSource {
   if (!settings) {
     return {};
   }
 
   return {
     provider: settings.provider,
-    mcpConfigPath: settings.mcp?.configPath,
+    mcpConfigPath: settings.mcp?.configPath ? resolvePathFromBase(settingsDir, settings.mcp.configPath) : undefined,
     enabledMcpServers: settings.mcp?.enabledServers,
-    archivist: settings.archivist,
+    archivist: settings.archivist ? mapArchivistSettings(settings.archivist, settingsDir) : undefined,
+  };
+}
+
+function mapArchivistSettings(settings: ArchivistSettings, settingsDir: string): ArchivistSettings {
+  return {
+    ...settings,
+    storagePath: settings.storagePath ? resolvePathFromBase(settingsDir, settings.storagePath) : undefined,
   };
 }
 
@@ -358,6 +383,11 @@ function getImportedKeys(source: ResolvedConfigSource): string[] {
 
 function normalizeServerNames(serverNames?: string[]): string[] {
   return [...new Set((serverNames ?? []).filter((name) => name.length > 0))].sort();
+}
+
+function resolveConfigFilePath(cwd: string, configPath?: string): string {
+  const resolvedPath = configPath?.trim().length ? configPath : DEFAULT_MCP_CONFIG_FILE;
+  return path.isAbsolute(resolvedPath) ? resolvedPath : path.join(cwd, resolvedPath);
 }
 
 function mapProviderModels(env?: ProviderModelEnv): ProviderModelMatrix | undefined {
