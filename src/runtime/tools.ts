@@ -70,7 +70,7 @@ const BLOCKED_SHELL_PATTERNS = [
   /\bgit\s+reset\s+--hard\b/i,
   /\bgit\s+clean\b/i,
   /\bfind\b[\s\S]*\b-delete\b/i,
-  />\s*\//,
+  />\s*\/(?:etc|usr|bin|sbin|var|opt|lib|boot|dev|proc|sys|run)(?:\/|$)/,
   /\|\s*sh\b/i,
   /\|\s*bash\b/i,
 ] as const;
@@ -943,7 +943,6 @@ function executeShellCommandTool(session: RuntimeSession, command: string): Inte
       encoding: "utf8",
       env: {
         ...process.env,
-        HOME: session.cwd,
       },
       timeout: SHELL_TIMEOUT_MS,
     });

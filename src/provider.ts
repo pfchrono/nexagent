@@ -70,6 +70,7 @@ const TOOL_CALL_PATTERN = /<nexagent_tool_call>([\s\S]+?)<\/nexagent_tool_call>/
 const TOOL_CALL_MARKUP_PATTERN = /<\s*\/?\s*nexagent_tool_call\b/i;
 const MAX_INTERNAL_TOOL_STEPS = 6;
 const MAX_INTERNAL_TOOL_CYCLES = 2;
+const MAX_GUIDANCE_NUDGES_BEFORE_SYNTHESIS = 2;
 const CONTINUATION_NUDGE = [
   "The previous response deferred action or asked for confirmation instead of executing.",
   "The user has already authorized this task.",
@@ -168,6 +169,7 @@ export async function executeProviderRequest(
       : undefined;
     let prompt = assembled.prompt;
     const toolTranscript: string[] = [];
+    let guidanceNudgeCount = 0;
 
     toolCycles:
     for (let cycle = 0; cycle < MAX_INTERNAL_TOOL_CYCLES; cycle += 1) {
@@ -207,6 +209,21 @@ export async function executeProviderRequest(
       const toolCall = parseInternalToolCall(output);
       if (!toolCall) {
         if (containsToolCallMarkup(output) && step < MAX_INTERNAL_TOOL_STEPS - 1) {
+          guidanceNudgeCount += 1;
+          const earlyFinal = await maybeSynthesizeAfterRepeatedGuidance(
+            request,
+            invokeCodex,
+            model,
+            transport.id,
+            codexHttpInput,
+            assembled.prompt,
+            toolTranscript,
+            guidanceNudgeCount,
+            "malformed tool call",
+          );
+          if (earlyFinal) {
+            return earlyFinal;
+          }
           recordRuntimeEvent(request.session, {
             kind: "control",
             status: "queued",
@@ -217,6 +234,21 @@ export async function executeProviderRequest(
           continue;
         }
         if (claimsFileMutation(output) && !hasWriteEvidence(request.session, turnEventStart) && step < MAX_INTERNAL_TOOL_STEPS - 1) {
+          guidanceNudgeCount += 1;
+          const earlyFinal = await maybeSynthesizeAfterRepeatedGuidance(
+            request,
+            invokeCodex,
+            model,
+            transport.id,
+            codexHttpInput,
+            assembled.prompt,
+            toolTranscript,
+            guidanceNudgeCount,
+            "missing write evidence",
+          );
+          if (earlyFinal) {
+            return earlyFinal;
+          }
           recordRuntimeEvent(request.session, {
             kind: "control",
             status: "queued",
@@ -227,6 +259,21 @@ export async function executeProviderRequest(
           continue;
         }
         if (isNonActionableDeferral(output) && step < MAX_INTERNAL_TOOL_STEPS - 1) {
+          guidanceNudgeCount += 1;
+          const earlyFinal = await maybeSynthesizeAfterRepeatedGuidance(
+            request,
+            invokeCodex,
+            model,
+            transport.id,
+            codexHttpInput,
+            assembled.prompt,
+            toolTranscript,
+            guidanceNudgeCount,
+            "non-actionable deferral",
+          );
+          if (earlyFinal) {
+            return earlyFinal;
+          }
           recordRuntimeEvent(request.session, {
             kind: "control",
             status: "queued",
@@ -272,6 +319,49 @@ export async function executeProviderRequest(
         }
         recordRuntimeEvent(request.session, {
           kind: "control",
+          status: "queued",
+          summary: "tool budget final synthesis requested",
+          detail: toolCall.name,
+        });
+        const finalPrompt = createToolBudgetFinalPrompt(assembled.prompt, toolTranscript, toolCall.name);
+        const finalInvocation = await withAbortController(
+          request.session,
+          (signal) => invokeCodex(
+            request.session.providerTransport.mode === "codex-http"
+              ? { ...request, prompt: request.prompt, instructions: finalPrompt, nativeInput: codexHttpInput, abortSignal: signal }
+              : { ...request, prompt: finalPrompt, abortSignal: signal },
+            model,
+          ),
+        );
+        if (finalInvocation.exitCode !== 0) {
+          return createCodexFailure(provider, model, finalInvocation.stderr, finalInvocation.stdout, transport.id);
+        }
+        const finalOutput = finalInvocation.output.trimEnd();
+        if (finalOutput.length > 0 && !parseInternalToolCall(finalOutput) && !containsToolCallMarkup(finalOutput)) {
+          recordRuntimeEvent(request.session, {
+            kind: "assistant",
+            status: "completed",
+            summary: "assistant response completed",
+            detail: finalOutput.length > 160 ? `${finalOutput.slice(0, 157)}...` : finalOutput,
+          });
+          recordRuntimeEvent(request.session, {
+            kind: "provider",
+            status: "completed",
+            summary: `${provider} turn completed`,
+            detail: `transport=${request.session.providerTransport.mode}; output_chars=${String(finalOutput.length)}`,
+          });
+          return {
+            ok: true,
+            provider,
+            model,
+            transport: transport.transport,
+            adapter: transport.id,
+            fallbackApplied: false,
+            output: finalOutput,
+          };
+        }
+        recordRuntimeEvent(request.session, {
+          kind: "control",
           status: "completed",
           summary: "tool budget fallback returned partial result",
           detail: toolCall.name,
@@ -287,6 +377,21 @@ export async function executeProviderRequest(
       }
 
       if (needsNexsightToolOnly(request.prompt, toolCall) && !isNexsightToolCall(toolCall) && step < MAX_INTERNAL_TOOL_STEPS - 1) {
+        guidanceNudgeCount += 1;
+        const earlyFinal = await maybeSynthesizeAfterRepeatedGuidance(
+          request,
+          invokeCodex,
+          model,
+          transport.id,
+          codexHttpInput,
+          assembled.prompt,
+          toolTranscript,
+          guidanceNudgeCount,
+          "nexsight routing",
+        );
+        if (earlyFinal) {
+          return earlyFinal;
+        }
         recordRuntimeEvent(request.session, {
           kind: "control",
           status: "queued",
@@ -991,6 +1096,115 @@ function createToolBudgetContinuationPrompt(basePrompt: string, toolTranscript: 
     `The previous provider step attempted another ${pendingToolName} tool call at the tool budget boundary.`,
     "The harness legally reset the per-cycle tool counter for one bounded continuation cycle.",
     "Continue from the existing evidence. Prefer answering now; use tools only for the smallest missing fact.",
+  ].join("\n");
+}
+
+async function maybeSynthesizeAfterRepeatedGuidance(
+  request: ProviderRequest,
+  invokeCodex: CodexInvoker,
+  model: string | null,
+  adapter: ProviderFailure["adapter"],
+  codexHttpInput: ReturnType<typeof buildNativeInputFromPrompt> | undefined,
+  basePrompt: string,
+  toolTranscript: string[],
+  guidanceNudgeCount: number,
+  reason: string,
+): Promise<ProviderResult | null> {
+  if (toolTranscript.length === 0 || guidanceNudgeCount < MAX_GUIDANCE_NUDGES_BEFORE_SYNTHESIS) {
+    return null;
+  }
+
+  recordRuntimeEvent(request.session, {
+    kind: "control",
+    status: "queued",
+    summary: "guidance loop final synthesis requested",
+    detail: reason,
+  });
+  const finalPrompt = createGuidanceLoopFinalPrompt(basePrompt, toolTranscript, reason);
+  const finalInvocation = await withAbortController(
+    request.session,
+    (signal) => invokeCodex(
+      request.session.providerTransport.mode === "codex-http"
+        ? { ...request, prompt: request.prompt, instructions: finalPrompt, nativeInput: codexHttpInput, abortSignal: signal }
+        : { ...request, prompt: finalPrompt, abortSignal: signal },
+      model,
+    ),
+  );
+  if (finalInvocation.exitCode !== 0) {
+    return createCodexFailure(request.session.provider, model, finalInvocation.stderr, finalInvocation.stdout, adapter);
+  }
+
+  const finalOutput = finalInvocation.output.trimEnd();
+  if (finalOutput.length === 0) {
+    return createEmptyOutputFailure(request.session.provider, model, adapter);
+  }
+  if (parseInternalToolCall(finalOutput) || containsToolCallMarkup(finalOutput)) {
+    recordRuntimeEvent(request.session, {
+      kind: "control",
+      status: "completed",
+      summary: "guidance loop fallback returned partial result",
+      detail: reason,
+    });
+    return createToolBudgetPartialResult(
+      request.session.provider,
+      model,
+      request.session.provider === "openai" ? "openai" : "codex",
+      adapter,
+      toolTranscript,
+      `Blocked another tool call after repeated harness guidance (${reason}).`,
+    );
+  }
+
+  recordRuntimeEvent(request.session, {
+    kind: "assistant",
+    status: "completed",
+    summary: "assistant response completed",
+    detail: finalOutput.length > 160 ? `${finalOutput.slice(0, 157)}...` : finalOutput,
+  });
+  recordRuntimeEvent(request.session, {
+    kind: "provider",
+    status: "completed",
+    summary: `${request.session.provider} turn completed`,
+    detail: `transport=${request.session.providerTransport.mode}; output_chars=${String(finalOutput.length)}`,
+  });
+  return {
+    ok: true,
+    provider: request.session.provider,
+    model,
+    transport: request.session.provider === "openai" ? "openai" : "codex",
+    adapter,
+    fallbackApplied: false,
+    output: finalOutput,
+  };
+}
+
+function createGuidanceLoopFinalPrompt(basePrompt: string, toolTranscript: string[], reason: string): string {
+  const compactTranscript = toolTranscript.slice(-6).join("\n\n");
+  return [
+    basePrompt,
+    "",
+    "Internal tool transcript:",
+    compactTranscript,
+    "",
+    `The harness already corrected provider behavior for ${reason}, but the provider attempted another misrouted/deferred step.`,
+    "Do not call more tools.",
+    "Return a concise final answer using only completed tool evidence.",
+    "If evidence is incomplete, say what completed, what remains blocked, and the next concrete step.",
+  ].join("\n");
+}
+
+function createToolBudgetFinalPrompt(basePrompt: string, toolTranscript: string[], pendingToolName: string): string {
+  const compactTranscript = toolTranscript.slice(-6).join("\n\n");
+  return [
+    basePrompt,
+    "",
+    "Internal tool transcript:",
+    compactTranscript,
+    "",
+    `The previous provider step attempted another ${pendingToolName} tool call after the bounded continuation cycle.`,
+    "Do not call more tools.",
+    "Return a concise final answer for the user using only the completed tool evidence.",
+    "If evidence is incomplete, say exactly what completed, what remains blocked, and the next concrete step.",
   ].join("\n");
 }
 

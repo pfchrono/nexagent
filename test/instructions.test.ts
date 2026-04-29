@@ -14,6 +14,9 @@ function createSession(cwd: string): RuntimeSession {
     startedAt: "2025-01-01T00:00:00.000Z",
     product: "nexagent",
     provider: "codex",
+    prompt: {
+      assembly: "legacy",
+    },
     providerRouting: {
       fallback: {
         policy: "require-open-spec",
@@ -200,9 +203,12 @@ test("assemblePrompt keeps precedence layers distinct before serialization", asy
     ]);
     assert.deepEqual(assembled.layers.executionGuidance, [
       "Use repo-local instructions and configuration as primary operating contract after direct user intent.",
+      "Operating loop: understand user goal, inspect current state, choose best tool, execute, observe result, recover from failures, verify, then answer with evidence.",
+      "For coding tasks, default to action. Discuss only when user explicitly asks to brainstorm, plan, compare options, or pause implementation.",
       "Read relevant code before changing behavior, then keep edits scoped to requested outcome.",
       "Use available runtime tools and commands to act on code or repo state instead of only describing intent.",
       "Do not claim code, files, tests, or verification happened unless you actually performed them in this session.",
+      "Every final claim about files, tests, tools, GSD workspaces, MCP, or runtime state must be backed by current turn evidence or clearly marked as inference.",
       "Keep going until the user's query is completely resolved; only stop for a real blocker, approval gate, or completed verified result.",
       "If a tool call fails, diagnose the failure and try a smaller or safer equivalent before stopping.",
       "If a needed tool is unavailable, look for a repo-local or user-local install path and install/use it when safe; if needed, use web_search/web_fetch or MCP docs tools to find official install guidance; if root/admin/system installation is required, give the exact install instruction and continue with the best available fallback.",
@@ -239,6 +245,10 @@ test("assemblePrompt keeps precedence layers distinct before serialization", asy
       "Path rule: absolute paths and ~/ paths are supported; if a requested path is under a readable root, inspect it with tools instead of refusing because it is outside cwd.",
       "Enabled MCP servers: context7",
       "MCP guidance: if an enabled MCP server/tool is relevant, call it through the available tool interface instead of saying it is unavailable or asking the user to run it.",
+      "Tool routing matrix: broad repo analysis -> nexsight_execute/nexsight_batch/nexsight_search; exact small file -> read_file; file edit -> apply_patch/write_file/batch_edit; git state -> git_status/git_diff; verification/build/test/local binary -> shell_command; current docs/URLs -> web_search/web_fetch or MCP docs tools; persistent facts -> archivist_save/archivist_checkpoint.",
+      "Tool loop discipline: after each tool result, decide whether evidence is enough. If enough, answer. If not enough, call the smallest next tool. Do not narrate future tool use instead of calling the tool.",
+      "Tool truth rule: report what the tool returned, not what you expected. If output is an envelope, parse the useful payload. If output is missing, say missing and run a better targeted tool.",
+      "GSD rule: GSD agents are file-backed definitions, not shell commands. Validate GSD with gsd-new-workspace --raw or gsd-sdk init new-workspace --raw and inspect agents_installed/missing_agents; do not use command -v gsd-planner style checks.",
       "Tool decision rule: inspect with read_file, list_dir, search_content, search_files, nexsight_batch, or nexsight_search before editing; use nexsight_execute for counts/parsing/filtering so raw data stays out of chat; write with write_file/apply_patch for small edits or batch_edit for multi-file/multi-anchor edits that must validate insertion points before writing; verify with git_diff, git_status, shell_command, nexsight_execute, or focused tests.",
       "Nexsight rule: for broad repo/codebase/directory inspection, counting, filtering, summarizing, semantic search, or any output that could be large, prefer Nexsight first: use nexsight_execute to compute concise results, nexsight_batch/nexsight_index to store context, and nexsight_search to retrieve relevant excerpts. Use direct read/list/search only for known small files/paths, exact content requests, or narrow follow-ups after Nexsight routes the work.",
       "Nexsight execute rule: nexsight_execute needs executable code or command, plus a short reason when useful. Do not pass only a natural-language task. It supports javascript, python, and shell; Python-looking code is inferred as python when language is omitted.",
@@ -365,6 +375,31 @@ test("assemblePrompt includes archivist retrieval context when present", async (
     assert.match(assembled.prompt, /Archivist context:/);
     assert.match(assembled.prompt, /Archivist retrieval: project-memory; matches=2/);
     assert.match(assembled.prompt, /auth transport uses codex-http/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("assemblePrompt uses prompt v2 when configured", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-instructions-v2-"));
+
+  try {
+    const session = createSession(cwd);
+    session.prompt = {
+      assembly: "v2",
+    };
+
+    const assembled = await assemblePrompt({
+      session,
+      prompt: "Fix tool loop",
+    });
+
+    assert.ok(assembled.v2);
+    assert.equal(assembled.layers, null);
+    assert.match(assembled.prompt, /## Execution Contract/);
+    assert.match(assembled.prompt, /__NEXAGENT_PROMPT_DYNAMIC_BOUNDARY__/);
+    assert.match(assembled.prompt, /## Current Invocation/);
+    assert.doesNotMatch(assembled.prompt, /Execution guidance:/);
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }

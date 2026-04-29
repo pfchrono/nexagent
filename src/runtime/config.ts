@@ -12,6 +12,7 @@ export interface HarnessConfig {
   productName: string;
   provider: string;
   providerRouting: ProviderRoutingConfig;
+  prompt: PromptConfig;
   mcpConfigPath: string;
   enabledMcpServers: string[];
   imports: ConfigImports;
@@ -20,6 +21,10 @@ export interface HarnessConfig {
   toolPolicy: ToolPolicy;
   hooks?: HooksConfig;
   archivist: ArchivistConfig;
+}
+
+export interface PromptConfig {
+  assembly: "legacy" | "v2";
 }
 
 export interface RepoMetadata {
@@ -146,6 +151,9 @@ interface ProviderModelEnv {
 
 interface NexagentSettings {
   provider?: string;
+  prompt?: {
+    assembly?: "legacy" | "v2";
+  };
   mcp?: {
     configPath?: string;
     enabledServers?: string[];
@@ -163,6 +171,7 @@ interface ResolvedConfigSource {
   provider?: string;
   providerModels?: ProviderModelMatrix;
   transport?: ProviderTransportConfig;
+  prompt?: PromptConfig;
   mcpConfigPath?: string;
   enabledMcpServers?: string[];
   hooks?: HooksConfig;
@@ -203,6 +212,7 @@ export async function loadHarnessConfig(cwd: string): Promise<HarnessConfig> {
   const mergedConfig = mergeConfigSources(
     {
       provider: DEFAULT_PROVIDER,
+      prompt: { assembly: "v2" },
       mcpConfigPath: DEFAULT_MCP_CONFIG_FILE,
       enabledMcpServers: [],
       archivist: { enabled: true },
@@ -220,6 +230,7 @@ export async function loadHarnessConfig(cwd: string): Promise<HarnessConfig> {
     cwd,
     productName: DEFAULT_PRODUCT_NAME,
     provider,
+    prompt: mergedConfig.prompt ?? { assembly: "v2" },
     providerRouting: {
       fallback: {
         policy: "require-open-spec",
@@ -299,6 +310,7 @@ function mapNexagentSettings(settings: NexagentSettings | null, settingsDir: str
 
   return {
     provider: settings.provider,
+    prompt: mapPromptSettings(settings.prompt),
     mcpConfigPath: settings.mcp?.configPath ? resolvePathFromBase(settingsDir, settings.mcp.configPath) : undefined,
     enabledMcpServers: settings.mcp?.enabledServers,
     archivist: settings.archivist ? mapArchivistSettings(settings.archivist, settingsDir) : undefined,
@@ -344,11 +356,20 @@ function mergeConfigSources(...sources: ResolvedConfigSource[]): ResolvedConfigS
     provider: source.provider ?? resolved.provider,
     providerModels: mergeProviderModels(resolved.providerModels, source.providerModels),
     transport: mergeProviderTransport(resolved.transport, source.transport),
+    prompt: source.prompt ?? resolved.prompt,
     mcpConfigPath: source.mcpConfigPath ?? resolved.mcpConfigPath,
     enabledMcpServers: source.enabledMcpServers ?? resolved.enabledMcpServers,
     hooks: source.hooks ?? resolved.hooks,
     archivist: mergeArchivistSettings(resolved.archivist, source.archivist),
   }), {});
+}
+
+function mapPromptSettings(settings?: NexagentSettings["prompt"]): PromptConfig | undefined {
+  if (settings?.assembly === "legacy" || settings?.assembly === "v2") {
+    return { assembly: settings.assembly };
+  }
+
+  return undefined;
 }
 
 function getImportedKeys(source: ResolvedConfigSource): string[] {
@@ -364,6 +385,10 @@ function getImportedKeys(source: ResolvedConfigSource): string[] {
 
   if (source.transport && Object.keys(source.transport).length > 0) {
     importedKeys.push("transport");
+  }
+
+  if (source.prompt) {
+    importedKeys.push("prompt");
   }
 
   if (source.enabledMcpServers?.length) {

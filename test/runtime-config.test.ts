@@ -47,6 +47,57 @@ const DEFAULT_TOOL_POLICY = {
   deletes: "blocked" as const,
 };
 
+const EXPECTED_EXECUTION_GUIDANCE = [
+  "Use repo-local instructions and configuration as primary operating contract after direct user intent.",
+  "Operating loop: understand user goal, inspect current state, choose best tool, execute, observe result, recover from failures, verify, then answer with evidence.",
+  "For coding tasks, default to action. Discuss only when user explicitly asks to brainstorm, plan, compare options, or pause implementation.",
+  "Read relevant code before changing behavior, then keep edits scoped to requested outcome.",
+  "Use available runtime tools and commands to act on code or repo state instead of only describing intent.",
+  "Do not claim code, files, tests, or verification happened unless you actually performed them in this session.",
+  "Every final claim about files, tests, tools, GSD workspaces, MCP, or runtime state must be backed by current turn evidence or clearly marked as inference.",
+  "Keep going until the user's query is completely resolved; only stop for a real blocker, approval gate, or completed verified result.",
+  "If a tool call fails, diagnose the failure and try a smaller or safer equivalent before stopping.",
+  "If a needed tool is unavailable, look for a repo-local or user-local install path and install/use it when safe; if needed, use web_search/web_fetch or MCP docs tools to find official install guidance; if root/admin/system installation is required, give the exact install instruction and continue with the best available fallback.",
+  "When user asks to continue, keep going, start, or finish a task, continue working until task is complete or a real blocker stops progress.",
+  "If user replies with approval such as yes, do that, apply it, continue, or go ahead after you proposed concrete work, treat it as authorization to execute the proposed work now.",
+  "When user authorizes a sequence of checks or steps, keep running remaining steps without asking again after each substep unless a blocker, failure, or approval gate stops progress.",
+  "Prefer action over narration: inspect, edit, run checks, and verify before reporting outcome.",
+  "For execution requests, do not answer with only intention or reassurance. Perform the work in the same turn unless blocked.",
+  "Do not tell the user to run commands, paste shell snippets, or confirm next steps when you have a tool that can perform the action.",
+  "Do not ask user to say apply it, confirm, or continue when they already gave approval; use tools or state the real blocker.",
+  "Do not say you are about to run checks, continue later, or report back soon. Run the checks or state the blocker now.",
+  "If user asks for smoke tests, debugging, implementation, or verification, use tools and produce actual results instead of a promise.",
+  "If task requires external context, first use available local repos, readable roots, MCP tools, or web tools before asking the user for pasted context.",
+  "If user asks for exact, full, verbatim, or complete file/chat/transcript content, preserve exact content instead of summarizing. If exact content is unavailable, say what is missing plainly.",
+  "Report verification truthfully. If checks were not run or failed, say so plainly.",
+];
+
+const EXPECTED_TOOL_AVAILABILITY = [
+  "Working directory: /repo",
+  "Loaded MCP servers: context7",
+  "Readable roots: all non-protected paths. Any child path under a readable root is readable unless it is protected.",
+  "Writable roots: /repo. Non-yolo writes are limited to these roots.",
+  "Yolo mode: write tools may edit readable roots, but protected/system paths remain blocked.",
+  "Path rule: absolute paths and ~/ paths are supported; if a requested path is under a readable root, inspect it with tools instead of refusing because it is outside cwd.",
+  "Enabled MCP servers: context7",
+  "MCP guidance: if an enabled MCP server/tool is relevant, call it through the available tool interface instead of saying it is unavailable or asking the user to run it.",
+  "Tool routing matrix: broad repo analysis -> nexsight_execute/nexsight_batch/nexsight_search; exact small file -> read_file; file edit -> apply_patch/write_file/batch_edit; git state -> git_status/git_diff; verification/build/test/local binary -> shell_command; current docs/URLs -> web_search/web_fetch or MCP docs tools; persistent facts -> archivist_save/archivist_checkpoint.",
+  "Tool loop discipline: after each tool result, decide whether evidence is enough. If enough, answer. If not enough, call the smallest next tool. Do not narrate future tool use instead of calling the tool.",
+  "Tool truth rule: report what the tool returned, not what you expected. If output is an envelope, parse the useful payload. If output is missing, say missing and run a better targeted tool.",
+  "GSD rule: GSD agents are file-backed definitions, not shell commands. Validate GSD with gsd-new-workspace --raw or gsd-sdk init new-workspace --raw and inspect agents_installed/missing_agents; do not use command -v gsd-planner style checks.",
+  "Tool decision rule: inspect with read_file, list_dir, search_content, search_files, nexsight_batch, or nexsight_search before editing; use nexsight_execute for counts/parsing/filtering so raw data stays out of chat; write with write_file/apply_patch for small edits or batch_edit for multi-file/multi-anchor edits that must validate insertion points before writing; verify with git_diff, git_status, shell_command, nexsight_execute, or focused tests.",
+  "Nexsight rule: for broad repo/codebase/directory inspection, counting, filtering, summarizing, semantic search, or any output that could be large, prefer Nexsight first: use nexsight_execute to compute concise results, nexsight_batch/nexsight_index to store context, and nexsight_search to retrieve relevant excerpts. Use direct read/list/search only for known small files/paths, exact content requests, or narrow follow-ups after Nexsight routes the work.",
+  "Nexsight execute rule: nexsight_execute needs executable code or command, plus a short reason when useful. Do not pass only a natural-language task. It supports javascript, python, and shell; Python-looking code is inferred as python when language is omitted.",
+  "Web/tool reference rule: use web_fetch/web_search or relevant MCP tools for current external facts, docs, URLs, and references; do not invent current facts from memory.",
+  "Tool execution rule: when a runnable command or file edit is needed, emit the tool call directly; do not output command blocks for the user to execute.",
+  "Tool failure rule: if a broad command or path fails, retry with a narrower path, absolute path, or read/list/search tool before asking user for help.",
+  "Missing tool rule: if a command/tool is missing, search package scripts, node_modules/.bin, local bins, available MCP/tool registries, and official web docs when needed; install project-local dependencies only when safe and scoped; ask user only for root/admin installs.",
+  "Internal tool protocol: when tool use is required, respond with only one XML block:",
+  '<nexagent_tool_call>{"name":"read_file","arguments":{"path":"src/cli.ts"}}</nexagent_tool_call>',
+  "Available internal tools: read_file, write_file, apply_patch, batch_edit, preview_patch, list_dir, search_content, search_files, web_fetch, web_search, git_status, git_diff, shell_command, nexsight_execute, nexsight_index, nexsight_batch, nexsight_search, archivist_save, archivist_checkpoint",
+  "Use tools for repo inspection instead of narrating intended actions.",
+];
+
 async function withNexagentHome<T>(home: string, fn: () => Promise<T>): Promise<T> {
   const previousHome = process.env.NEXAGENT_HOME;
   process.env.NEXAGENT_HOME = home;
@@ -73,6 +124,7 @@ test("loadHarnessConfig discovers repo-local instruction sources", async () => {
 
     const config = await loadHarnessConfig(cwd);
 
+    assert.deepEqual(config.prompt, { assembly: "v2" });
     assert.deepEqual(config.instructionSources, [
       {
         kind: "AGENTS.md",
@@ -122,6 +174,9 @@ test("loadHarnessConfig reads global nexagent settings from NEXAGENT_HOME", asyn
       path.join(nexagentHome, "settings.json"),
       JSON.stringify({
         provider: "openai",
+        prompt: {
+          assembly: "legacy",
+        },
         mcp: {
           configPath: "mcp.json",
           enabledServers: ["global"],
@@ -137,6 +192,7 @@ test("loadHarnessConfig reads global nexagent settings from NEXAGENT_HOME", asyn
     const config = await withNexagentHome(nexagentHome, () => loadHarnessConfig(cwd));
 
     assert.equal(config.provider, "openai");
+    assert.deepEqual(config.prompt, { assembly: "legacy" });
     assert.equal(config.mcpConfigPath, path.join(nexagentHome, "mcp.json"));
     assert.deepEqual(config.enabledMcpServers, ["global"]);
     assert.equal(config.archivist.storagePath, path.join(nexagentHome, "archivist.json"));
@@ -152,12 +208,13 @@ test("loadHarnessConfig lets repo nexagent settings override global settings", a
 
   try {
     await mkdir(path.join(cwd, ".nexagent"));
-    await writeFile(path.join(nexagentHome, "settings.json"), JSON.stringify({ provider: "openai" }), "utf8");
-    await writeFile(path.join(cwd, ".nexagent", "settings.json"), JSON.stringify({ provider: "codex" }), "utf8");
+    await writeFile(path.join(nexagentHome, "settings.json"), JSON.stringify({ provider: "openai", prompt: { assembly: "legacy" } }), "utf8");
+    await writeFile(path.join(cwd, ".nexagent", "settings.json"), JSON.stringify({ provider: "codex", prompt: { assembly: "v2" } }), "utf8");
 
     const config = await withNexagentHome(nexagentHome, () => loadHarnessConfig(cwd));
 
     assert.equal(config.provider, "codex");
+    assert.deepEqual(config.prompt, { assembly: "v2" });
   } finally {
     await rm(cwd, { recursive: true, force: true });
     await rm(nexagentHome, { recursive: true, force: true });
@@ -339,6 +396,9 @@ test("createRuntimeState exposes discovered instruction sources", () => {
         cwd: "/repo",
         productName: "nexagent",
         provider: "codex",
+        prompt: {
+          assembly: "v2",
+        },
         providerRouting: {
           fallback: {
             policy: "require-open-spec",
@@ -392,6 +452,9 @@ test("createRuntimeState exposes discovered instruction sources", () => {
     {
       product: "nexagent",
       provider: "codex",
+      prompt: {
+        assembly: "v2",
+      },
       providerRouting: {
         fallback: {
           policy: "require-open-spec",
@@ -443,187 +506,26 @@ test("createRuntimeState exposes discovered instruction sources", () => {
       },
       auth: AUTH_STATE,
       instructionSources,
-      instructionLayers: {
-        identity: ["You are nexagent, local coding harness assistant for repo-aware software engineering work."],
-        responseStyle: [],
-        executionGuidance: [
-          "Use repo-local instructions and configuration as primary operating contract after direct user intent.",
-          "Read relevant code before changing behavior, then keep edits scoped to requested outcome.",
-          "Use available runtime tools and commands to act on code or repo state instead of only describing intent.",
-          "Do not claim code, files, tests, or verification happened unless you actually performed them in this session.",
-          "Keep going until the user's query is completely resolved; only stop for a real blocker, approval gate, or completed verified result.",
-          "If a tool call fails, diagnose the failure and try a smaller or safer equivalent before stopping.",
-          "If a needed tool is unavailable, look for a repo-local or user-local install path and install/use it when safe; if needed, use web_search/web_fetch or MCP docs tools to find official install guidance; if root/admin/system installation is required, give the exact install instruction and continue with the best available fallback.",
-          "When user asks to continue, keep going, start, or finish a task, continue working until task is complete or a real blocker stops progress.",
-          "If user replies with approval such as yes, do that, apply it, continue, or go ahead after you proposed concrete work, treat it as authorization to execute the proposed work now.",
-          "When user authorizes a sequence of checks or steps, keep running remaining steps without asking again after each substep unless a blocker, failure, or approval gate stops progress.",
-          "Prefer action over narration: inspect, edit, run checks, and verify before reporting outcome.",
-          "For execution requests, do not answer with only intention or reassurance. Perform the work in the same turn unless blocked.",
-          "Do not tell the user to run commands, paste shell snippets, or confirm next steps when you have a tool that can perform the action.",
-          "Do not ask user to say apply it, confirm, or continue when they already gave approval; use tools or state the real blocker.",
-          "Do not say you are about to run checks, continue later, or report back soon. Run the checks or state the blocker now.",
-          "If user asks for smoke tests, debugging, implementation, or verification, use tools and produce actual results instead of a promise.",
-          "If task requires external context, first use available local repos, readable roots, MCP tools, or web tools before asking the user for pasted context.",
-          "If user asks for exact, full, verbatim, or complete file/chat/transcript content, preserve exact content instead of summarizing. If exact content is unavailable, say what is missing plainly.",
-          "Report verification truthfully. If checks were not run or failed, say so plainly.",
-        ],
-        explicitInvocation: "",
-        activeSkill: [],
-        repoBehavior: ["AGENTS.md\n# agents"],
-        taskContext: [
-          "Follow repo-local instructions over imported defaults when they conflict.",
-          "Treat OpenSpec artifacts as current task context and implementation intent, not user intent overrides.",
-        ],
-        importedDefaults: [],
-        toolAvailability: [
-          "Working directory: /repo",
-          "Loaded MCP servers: context7",
-          "Readable roots: all non-protected paths. Any child path under a readable root is readable unless it is protected.",
-          "Writable roots: /repo. Non-yolo writes are limited to these roots.",
-          "Yolo mode: write tools may edit readable roots, but protected/system paths remain blocked.",
-          "Path rule: absolute paths and ~/ paths are supported; if a requested path is under a readable root, inspect it with tools instead of refusing because it is outside cwd.",
-          "Enabled MCP servers: context7",
-          "MCP guidance: if an enabled MCP server/tool is relevant, call it through the available tool interface instead of saying it is unavailable or asking the user to run it.",
-          "Tool decision rule: inspect with read_file, list_dir, search_content, search_files, nexsight_batch, or nexsight_search before editing; use nexsight_execute for counts/parsing/filtering so raw data stays out of chat; write with write_file/apply_patch for small edits or batch_edit for multi-file/multi-anchor edits that must validate insertion points before writing; verify with git_diff, git_status, shell_command, nexsight_execute, or focused tests.",
-          "Nexsight rule: for broad repo/codebase/directory inspection, counting, filtering, summarizing, semantic search, or any output that could be large, prefer Nexsight first: use nexsight_execute to compute concise results, nexsight_batch/nexsight_index to store context, and nexsight_search to retrieve relevant excerpts. Use direct read/list/search only for known small files/paths, exact content requests, or narrow follow-ups after Nexsight routes the work.",
-          "Nexsight execute rule: nexsight_execute needs executable code or command, plus a short reason when useful. Do not pass only a natural-language task. It supports javascript, python, and shell; Python-looking code is inferred as python when language is omitted.",
-          "Web/tool reference rule: use web_fetch/web_search or relevant MCP tools for current external facts, docs, URLs, and references; do not invent current facts from memory.",
-          "Tool execution rule: when a runnable command or file edit is needed, emit the tool call directly; do not output command blocks for the user to execute.",
-          "Tool failure rule: if a broad command or path fails, retry with a narrower path, absolute path, or read/list/search tool before asking user for help.",
-          "Missing tool rule: if a command/tool is missing, search package scripts, node_modules/.bin, local bins, available MCP/tool registries, and official web docs when needed; install project-local dependencies only when safe and scoped; ask user only for root/admin installs.",
-          "Internal tool protocol: when tool use is required, respond with only one XML block:",
-          '<nexagent_tool_call>{"name":"read_file","arguments":{"path":"src/cli.ts"}}</nexagent_tool_call>',
-          "Available internal tools: read_file, write_file, apply_patch, batch_edit, preview_patch, list_dir, search_content, search_files, web_fetch, web_search, git_status, git_diff, shell_command, nexsight_execute, nexsight_index, nexsight_batch, nexsight_search, archivist_save, archivist_checkpoint",
-          "Use tools for repo inspection instead of narrating intended actions.",
-        ],
-        providerFallback: [
-          "Active provider: codex",
-          "Fallback policy: require-open-spec",
-          "Honor active provider routing for this session.",
-          "Do not silently switch providers; require explicit spec-backed routing changes.",
-        ],
-        archivistContext: [
-          "Archivist memory status: disabled.",
-          "When asked about memory, report this harness memory status first; do not default to generic model-memory disclaimers.",
-        ],
-        conversationContext: [],
-        sections: [
-          {
-            key: "identity",
-            title: "System identity",
-            cache: "stable",
-            entries: ["You are nexagent, local coding harness assistant for repo-aware software engineering work."],
-          },
-          {
-            key: "executionGuidance",
-            title: "Execution guidance",
-            cache: "stable",
-            entries: [
-              "Use repo-local instructions and configuration as primary operating contract after direct user intent.",
-              "Read relevant code before changing behavior, then keep edits scoped to requested outcome.",
-              "Use available runtime tools and commands to act on code or repo state instead of only describing intent.",
-              "Do not claim code, files, tests, or verification happened unless you actually performed them in this session.",
-              "Keep going until the user's query is completely resolved; only stop for a real blocker, approval gate, or completed verified result.",
-              "If a tool call fails, diagnose the failure and try a smaller or safer equivalent before stopping.",
-              "If a needed tool is unavailable, look for a repo-local or user-local install path and install/use it when safe; if needed, use web_search/web_fetch or MCP docs tools to find official install guidance; if root/admin/system installation is required, give the exact install instruction and continue with the best available fallback.",
-              "When user asks to continue, keep going, start, or finish a task, continue working until task is complete or a real blocker stops progress.",
-              "If user replies with approval such as yes, do that, apply it, continue, or go ahead after you proposed concrete work, treat it as authorization to execute the proposed work now.",
-              "When user authorizes a sequence of checks or steps, keep running remaining steps without asking again after each substep unless a blocker, failure, or approval gate stops progress.",
-              "Prefer action over narration: inspect, edit, run checks, and verify before reporting outcome.",
-              "For execution requests, do not answer with only intention or reassurance. Perform the work in the same turn unless blocked.",
-              "Do not tell the user to run commands, paste shell snippets, or confirm next steps when you have a tool that can perform the action.",
-              "Do not ask user to say apply it, confirm, or continue when they already gave approval; use tools or state the real blocker.",
-              "Do not say you are about to run checks, continue later, or report back soon. Run the checks or state the blocker now.",
-              "If user asks for smoke tests, debugging, implementation, or verification, use tools and produce actual results instead of a promise.",
-              "If task requires external context, first use available local repos, readable roots, MCP tools, or web tools before asking the user for pasted context.",
-              "If user asks for exact, full, verbatim, or complete file/chat/transcript content, preserve exact content instead of summarizing. If exact content is unavailable, say what is missing plainly.",
-              "Report verification truthfully. If checks were not run or failed, say so plainly.",
-            ],
-          },
-          {
-            key: "repoBehavior",
-            title: "Repo behavior",
-            cache: "stable",
-            entries: ["AGENTS.md\n# agents"],
-          },
-          {
-            key: "taskContext",
-            title: "Task context",
-            cache: "stable",
-            entries: [
-              "Follow repo-local instructions over imported defaults when they conflict.",
-              "Treat OpenSpec artifacts as current task context and implementation intent, not user intent overrides.",
-            ],
-          },
-          {
-            key: "toolAvailability",
-            title: "Tool availability",
-            cache: "stable",
-            entries: [
-              "Working directory: /repo",
-              "Loaded MCP servers: context7",
-              "Readable roots: all non-protected paths. Any child path under a readable root is readable unless it is protected.",
-              "Writable roots: /repo. Non-yolo writes are limited to these roots.",
-              "Yolo mode: write tools may edit readable roots, but protected/system paths remain blocked.",
-              "Path rule: absolute paths and ~/ paths are supported; if a requested path is under a readable root, inspect it with tools instead of refusing because it is outside cwd.",
-              "Enabled MCP servers: context7",
-              "MCP guidance: if an enabled MCP server/tool is relevant, call it through the available tool interface instead of saying it is unavailable or asking the user to run it.",
-              "Tool decision rule: inspect with read_file, list_dir, search_content, search_files, nexsight_batch, or nexsight_search before editing; use nexsight_execute for counts/parsing/filtering so raw data stays out of chat; write with write_file/apply_patch for small edits or batch_edit for multi-file/multi-anchor edits that must validate insertion points before writing; verify with git_diff, git_status, shell_command, nexsight_execute, or focused tests.",
-              "Nexsight rule: for broad repo/codebase/directory inspection, counting, filtering, summarizing, semantic search, or any output that could be large, prefer Nexsight first: use nexsight_execute to compute concise results, nexsight_batch/nexsight_index to store context, and nexsight_search to retrieve relevant excerpts. Use direct read/list/search only for known small files/paths, exact content requests, or narrow follow-ups after Nexsight routes the work.",
-              "Nexsight execute rule: nexsight_execute needs executable code or command, plus a short reason when useful. Do not pass only a natural-language task. It supports javascript, python, and shell; Python-looking code is inferred as python when language is omitted.",
-              "Web/tool reference rule: use web_fetch/web_search or relevant MCP tools for current external facts, docs, URLs, and references; do not invent current facts from memory.",
-              "Tool execution rule: when a runnable command or file edit is needed, emit the tool call directly; do not output command blocks for the user to execute.",
-              "Tool failure rule: if a broad command or path fails, retry with a narrower path, absolute path, or read/list/search tool before asking user for help.",
-              "Missing tool rule: if a command/tool is missing, search package scripts, node_modules/.bin, local bins, available MCP/tool registries, and official web docs when needed; install project-local dependencies only when safe and scoped; ask user only for root/admin installs.",
-              "Internal tool protocol: when tool use is required, respond with only one XML block:",
-              '<nexagent_tool_call>{"name":"read_file","arguments":{"path":"src/cli.ts"}}</nexagent_tool_call>',
-              "Available internal tools: read_file, write_file, apply_patch, batch_edit, preview_patch, list_dir, search_content, search_files, web_fetch, web_search, git_status, git_diff, shell_command, nexsight_execute, nexsight_index, nexsight_batch, nexsight_search, archivist_save, archivist_checkpoint",
-              "Use tools for repo inspection instead of narrating intended actions.",
-            ],
-          },
-          {
-            key: "providerFallback",
-            title: "Provider fallback",
-            cache: "stable",
-            entries: [
-              "Active provider: codex",
-              "Fallback policy: require-open-spec",
-              "Honor active provider routing for this session.",
-              "Do not silently switch providers; require explicit spec-backed routing changes.",
-            ],
-          },
-          {
-            key: "archivistContext",
-            title: "Archivist context",
-            cache: "dynamic",
-            entries: [
-              "Archivist memory status: disabled.",
-              "When asked about memory, report this harness memory status first; do not default to generic model-memory disclaimers.",
-            ],
-          },
-        ],
-        dynamicBoundary: "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__",
-      },
-      instructionLayerSummary: {
-        count: 48,
-        identity: "You are nexagent, local coding harness assistant for repo-aware software engineering work.",
-        responseStyle: "none",
-        executionGuidance:
-          "Use repo-local instructions and configuration as primary operating contract after direct user intent. | Read relevant code before changing behavior, then keep edits scoped to requested outcome. | Use available runtime tools and commands to act on code or repo state instead of only describing intent. | Do not claim code, files, tests, or verification happened unless you actually performed them in this session. | Keep going until the user's query is completely resolved; only stop for a real blocker, approval gate, or completed verified result. | If a tool call fails, diagnose the failure and try a smaller or safer equivalent before stopping. | If a needed tool is unavailable, look for a repo-local or user-local install path and install/use it when safe; if needed, use web_search/web_fetch or MCP docs tools to find official install guidance; if root/admin/system installation is required, give the exact install instruction and continue with the best available fallback. | When user asks to continue, keep going, start, or finish a task, continue working until task is complete or a real blocker stops progress. | If user replies with approval such as yes, do that, apply it, continue, or go ahead after you proposed concrete work, treat it as authorization to execute the proposed work now. | When user authorizes a sequence of checks or steps, keep running remaining steps without asking again after each substep unless a blocker, failure, or approval gate stops progress. | Prefer action over narration: inspect, edit, run checks, and verify before reporting outcome. | For execution requests, do not answer with only intention or reassurance. Perform the work in the same turn unless blocked. | Do not tell the user to run commands, paste shell snippets, or confirm next steps when you have a tool that can perform the action. | Do not ask user to say apply it, confirm, or continue when they already gave approval; use tools or state the real blocker. | Do not say you are about to run checks, continue later, or report back soon. Run the checks or state the blocker now. | If user asks for smoke tests, debugging, implementation, or verification, use tools and produce actual results instead of a promise. | If task requires external context, first use available local repos, readable roots, MCP tools, or web tools before asking the user for pasted context. | If user asks for exact, full, verbatim, or complete file/chat/transcript content, preserve exact content instead of summarizing. If exact content is unavailable, say what is missing plainly. | Report verification truthfully. If checks were not run or failed, say so plainly.",
-        activeSkill: "none",
-        repoBehavior: "AGENTS.md=# agents",
-        taskContext:
-          "Follow repo-local instructions over imported defaults when they conflict. | Treat OpenSpec artifacts as current task context and implementation intent, not user intent overrides.",
-        importedDefaults: "none",
-        toolAvailability:
-          'Working directory: /repo | Loaded MCP servers: context7 | Readable roots: all non-protected paths. Any child path under a readable root is readable unless it is protected. | Writable roots: /repo. Non-yolo writes are limited to these roots. | Yolo mode: write tools may edit readable roots, but protected/system paths remain blocked. | Path rule: absolute paths and ~/ paths are supported; if a requested path is under a readable root, inspect it with tools instead of refusing because it is outside cwd. | Enabled MCP servers: context7 | MCP guidance: if an enabled MCP server/tool is relevant, call it through the available tool interface instead of saying it is unavailable or asking the user to run it. | Tool decision rule: inspect with read_file, list_dir, search_content, search_files, nexsight_batch, or nexsight_search before editing; use nexsight_execute for counts/parsing/filtering so raw data stays out of chat; write with write_file/apply_patch for small edits or batch_edit for multi-file/multi-anchor edits that must validate insertion points before writing; verify with git_diff, git_status, shell_command, nexsight_execute, or focused tests. | Nexsight rule: for broad repo/codebase/directory inspection, counting, filtering, summarizing, semantic search, or any output that could be large, prefer Nexsight first: use nexsight_execute to compute concise results, nexsight_batch/nexsight_index to store context, and nexsight_search to retrieve relevant excerpts. Use direct read/list/search only for known small files/paths, exact content requests, or narrow follow-ups after Nexsight routes the work. | Nexsight execute rule: nexsight_execute needs executable code or command, plus a short reason when useful. Do not pass only a natural-language task. It supports javascript, python, and shell; Python-looking code is inferred as python when language is omitted. | Web/tool reference rule: use web_fetch/web_search or relevant MCP tools for current external facts, docs, URLs, and references; do not invent current facts from memory. | Tool execution rule: when a runnable command or file edit is needed, emit the tool call directly; do not output command blocks for the user to execute. | Tool failure rule: if a broad command or path fails, retry with a narrower path, absolute path, or read/list/search tool before asking user for help. | Missing tool rule: if a command/tool is missing, search package scripts, node_modules/.bin, local bins, available MCP/tool registries, and official web docs when needed; install project-local dependencies only when safe and scoped; ask user only for root/admin installs. | Internal tool protocol: when tool use is required, respond with only one XML block: | <nexagent_tool_call>{"name":"read_file","arguments":{"path":"src/cli.ts"}}</nexagent_tool_call> | Available internal tools: read_file, write_file, apply_patch, batch_edit, preview_patch, list_dir, search_content, search_files, web_fetch, web_search, git_status, git_diff, shell_command, nexsight_execute, nexsight_index, nexsight_batch, nexsight_search, archivist_save, archivist_checkpoint | Use tools for repo inspection instead of narrating intended actions.',
-        providerFallback:
-          "Active provider: codex | Fallback policy: require-open-spec | Honor active provider routing for this session. | Do not silently switch providers; require explicit spec-backed routing changes.",
-        archivistContext: "Archivist memory status: disabled. | When asked about memory, report this harness memory status first; do not default to generic model-memory disclaimers.",
-        conversationContext: "none",
-        stableSections: "identity, executionGuidance, repoBehavior, taskContext, toolAvailability, providerFallback",
-        dynamicSections: "archivistContext",
-        dynamicBoundary: "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__",
+      promptV2Summary: {
+        assembly: "v2",
+        count: 40,
+        stableSections: "identity, execution_contract, tool_routing, editing_safety, provider_guidance",
+        dynamicSections: "repo_context, runtime_state",
+        dynamicBoundary: "__NEXAGENT_PROMPT_DYNAMIC_BOUNDARY__",
+        identity: "You are nexagent, a local coding harness assistant for repo-aware software engineering work.",
+        executionContract:
+          "Actionable request means act in this turn. | Use tools when tools improve grounding, correctness, or completion. | Do not end with a plan, promise, or ask-for-approval loop when tools can make progress. | Continue until done, verified, or genuinely blocked. | Failed tool result means vary path, query, command, or tool before stopping. | Final answer needs evidence or a named blocker. | Never claim file, test, tool, GSD, MCP, Nexsight, or runtime state without current-turn evidence.",
+        toolRouting:
+          "Broad repo map/count/parse/compare/summarize -> nexsight_execute, nexsight_batch, nexsight_search. | Exact file read for edit -> read_file. | Exact symbol/text search -> search_content or nexsight_search. | Precise edits -> apply_patch. | Generated whole file -> write_file. | Multi-file mechanical edit -> batch_edit or nexsight_execute-assisted patch with validated insertion points. | Tests/build/git/local binaries -> shell_command. | Web/current docs -> web/MCP tool. | Durable user/project fact -> archivist. | If stronger task-specific tool exists, use it before generic shell/listing. | If tool schema mismatch happens, correct call shape immediately.",
+        editingSafety:
+          "Read relevant code before editing behavior. | Keep changes scoped to requested outcome. | Do not revert user changes unless explicitly requested. | Prefer existing repo patterns over new abstractions. | Run focused verification when available before reporting completion.",
+        providerGuidance:
+          "Active provider: codex | Provider fallback policy: require-open-spec | Do not silently switch providers. Use configured provider and transport unless user or config changes it. | Tool calls must use Nexagent internal tool envelope exactly when provider text transport requires tool markup. | Transport: Codex ChatGPT HTTP (codex-chatgpt-http); auth=ready. | Keep instructions separate from user input. Use native/request tool loop shape supplied by transport. | Avoid CLI-only assumptions; API transport may not expose local Codex shell behavior.",
+        style: "none",
+        repoContext: "Repo-local instructions are scoped context, not replacements for core execution contract. | AGENTS.md: # agents",
+        runtimeState:
+          "Provider: codex | Working directory: /repo | MCP servers: context7 | Readable roots: all non-protected paths | Writable roots: /repo | Protected roots: /bin, /boot, /dev, /etc, /lib, /lib64, /proc, /root, /run, /sbin, /sys, /usr, /var | Tool policy mode: workspace-guarded",
+        conversationState: "none",
       },
       archivist: {
         enabled: false,

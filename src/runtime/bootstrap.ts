@@ -1,7 +1,7 @@
 import { CODEX_CHATGPT_HTTP_ADAPTER, hasCodexAuthJsonCredentialsSync } from "../provider/codex-chatgpt-http.js";
 import { CODEX_HTTP_ADAPTER } from "../provider/codex-http.js";
 import { CODEX_EXEC_ADAPTER } from "../provider/codex-exec.js";
-import { buildPromptLayers, summarizePromptLayers, type PromptLayerSummary, type PromptLayers } from "./instructions.js";
+import { buildPromptV2, summarizePromptV2, type PromptV2Summary } from "./prompt-v2.js";
 import { probeCodexAuthState, type RuntimeAuthState } from "./auth.js";
 import { loadHarnessConfig, type HarnessConfig, type HooksConfig } from "./config.js";
 import { loadMcpRegistrySummary, type McpRegistrySummary } from "./mcp.js";
@@ -17,6 +17,7 @@ export interface RuntimeBootstrap {
 export interface RuntimeState {
   product: string;
   provider: string;
+  prompt: HarnessConfig["prompt"];
   providerRouting: HarnessConfig["providerRouting"];
   providerTransport: ProviderTransportState;
   commandModes: RuntimeCommandModeState;
@@ -28,8 +29,7 @@ export interface RuntimeState {
   enabledMcpServers: string[];
   imports: HarnessConfig["imports"];
   instructionSources: HarnessConfig["instructionSources"];
-  instructionLayers: PromptLayers;
-  instructionLayerSummary: PromptLayerSummary;
+  promptV2Summary: PromptV2Summary;
   hooks: HooksConfig;
   archivist: HarnessConfig["archivist"];
   auth: RuntimeAuthState;
@@ -83,10 +83,13 @@ export function createRuntimeState(runtime: RuntimeBootstrap): RuntimeState {
     },
   };
   const provider = resolveActiveProvider(runtime);
-  const instructionLayers = buildPromptLayers(
-    {
+  const providerTransport = createProviderTransportState(runtime, provider);
+  const promptV2 = buildPromptV2({
+    session: {
       provider,
+      prompt: runtime.config.prompt,
       providerRouting,
+      providerTransport,
       cwd: runtime.config.cwd,
       toolPolicy: runtime.config.toolPolicy,
       mcpServers: runtime.mcp.serverNames,
@@ -95,14 +98,15 @@ export function createRuntimeState(runtime: RuntimeBootstrap): RuntimeState {
       instructionSources: runtime.config.instructionSources,
       archivist: runtime.config.archivist,
     },
-    "",
-  );
+    prompt: "",
+  });
 
   return {
     product: runtime.config.productName,
     provider,
+    prompt: runtime.config.prompt,
     providerRouting,
-    providerTransport: createProviderTransportState(runtime, provider),
+    providerTransport,
     commandModes: {
       cavemanMode: runtime.persisted?.commandModes?.cavemanMode ?? false,
       deadpoolMode: runtime.persisted?.commandModes?.deadpoolMode ?? false,
@@ -119,8 +123,7 @@ export function createRuntimeState(runtime: RuntimeBootstrap): RuntimeState {
     enabledMcpServers: runtime.config.enabledMcpServers,
     imports: runtime.config.imports,
     instructionSources: runtime.config.instructionSources,
-    instructionLayers,
-    instructionLayerSummary: summarizePromptLayers(instructionLayers),
+    promptV2Summary: summarizePromptV2(promptV2.sections),
     hooks: {
       sourcePath: runtime.config.imports.claude?.path ?? runtime.config.hooks?.sourcePath ?? null,
       status: runtime.config.hooks?.status ?? "none",

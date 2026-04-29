@@ -173,11 +173,11 @@ test("executeProviderRequest returns codex output", async () => {
     },
   );
 
-  assert.match(capturedPrompt, /System identity:/);
-  assert.match(capturedPrompt, /__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__/);
-  assert.match(capturedPrompt, /Explicit invocation:\n- say hi/);
-  assert.match(capturedPrompt, /Tool availability:/);
-  assert.match(capturedPrompt, /Provider fallback:/);
+  assert.match(capturedPrompt, /## Identity/);
+  assert.match(capturedPrompt, /__NEXAGENT_PROMPT_DYNAMIC_BOUNDARY__/);
+  assert.match(capturedPrompt, /## Current Invocation/);
+  assert.match(capturedPrompt, /## Current Invocation\n- say hi/);
+  assert.match(capturedPrompt, /## Tool Routing/);
 
   assert.deepEqual(result, {
     ok: true,
@@ -393,9 +393,10 @@ test("executeProviderRequest returns partial result when tool budget is exhauste
   );
 
   assert.equal(result.ok, true);
-  assert.equal(prompts.length, 12);
+  assert.equal(prompts.length, 13);
   assert.match(prompts[5] ?? "", /Tool budget is almost exhausted/);
   assert.match(prompts[6] ?? "", /Tool budget continuation cycle 2 started/);
+  assert.match(prompts[12] ?? "", /Do not call more tools/);
   assert.match(result.output, /Tool budget exhausted before final assistant answer/);
   assert.match(result.output, /Partial evidence from completed tools/);
   assert.match(result.output, /Tool call: \{"name":"git_status","arguments":\{\}\}/);
@@ -405,6 +406,59 @@ test("executeProviderRequest returns partial result when tool budget is exhauste
   );
   assert.equal(
     session.events.some((event) => event.kind === "control" && event.summary === "tool budget fallback returned partial result"),
+    true,
+  );
+});
+
+test("executeProviderRequest forces final synthesis at tool budget boundary", async () => {
+  const session = createSession();
+  const prompts: string[] = [];
+
+  const result = await executeProviderRequest(
+    {
+      session,
+      prompt: "inspect until enough evidence then summarize",
+    },
+    {
+      exec: async (request) => {
+        prompts.push(request.prompt);
+        if (prompts.length <= 12) {
+          return {
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            output: '<nexagent_tool_call>{"name":"git_status","arguments":{}}</nexagent_tool_call>',
+          };
+        }
+        return {
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+          output: "Final summary from completed tool evidence.",
+        };
+      },
+      http: async () => {
+        throw new Error("http should not be used");
+      },
+      codexHttp: async () => {
+        throw new Error("codex-http should not be used");
+      },
+    },
+  );
+
+  assert.deepEqual(result, {
+    ok: true,
+    provider: "codex",
+    model: "gpt-5.4",
+    transport: "codex",
+    adapter: "codex-cli-exec",
+    fallbackApplied: false,
+    output: "Final summary from completed tool evidence.",
+  });
+  assert.equal(prompts.length, 13);
+  assert.match(prompts[12] ?? "", /Do not call more tools/);
+  assert.equal(
+    session.events.some((event) => event.kind === "control" && event.summary === "tool budget final synthesis requested"),
     true,
   );
 });
@@ -621,6 +675,80 @@ test("executeProviderRequest redirects explicit Nexsight requests away from gene
     assert.equal(
       session.events.some((event) => event.kind === "tool" && event.summary === "tool nexsight_execute completed"),
       true,
+    );
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("executeProviderRequest synthesizes after repeated guidance with evidence", async () => {
+  const session = createSession();
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-provider-guidance-synthesis-"));
+  session.cwd = cwd;
+  session.repo.root = cwd;
+  session.toolPolicy.allowedRoots = [cwd];
+  const prompts: string[] = [];
+
+  try {
+    const result = await executeProviderRequest(
+      {
+        session,
+        prompt: "use nexsight to inspect the repo",
+      },
+      {
+        exec: async (request) => {
+          prompts.push(request.prompt);
+          if (prompts.length === 1) {
+            return {
+              exitCode: 0,
+              stdout: "",
+              stderr: "",
+              output: '<nexagent_tool_call>{"name":"list_dir","arguments":{"path":"."}}</nexagent_tool_call>',
+            };
+          }
+          if (prompts.length === 2) {
+            return {
+              exitCode: 0,
+              stdout: "",
+              stderr: "",
+              output: '<nexagent_tool_call>{"name":"nexsight_execute","arguments":{"code":"console.log(\\"used-nexsight\\")"}}</nexagent_tool_call>',
+            };
+          }
+          if (prompts.length === 3) {
+            return {
+              exitCode: 0,
+              stdout: "",
+              stderr: "",
+              output: '<nexagent_tool_call>{"name":"shell_command","arguments":{"command":"pwd"}}</nexagent_tool_call>',
+            };
+          }
+          return {
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            output: "Final from completed Nexsight evidence.",
+          };
+        },
+        http: async () => {
+          throw new Error("http should not be used");
+        },
+        codexHttp: async () => {
+          throw new Error("codex-http should not be used");
+        },
+      },
+    );
+
+    assert.equal(result.ok, true);
+    assert.equal(result.output, "Final from completed Nexsight evidence.");
+    assert.equal(prompts.length, 4);
+    assert.match(prompts[3] ?? "", /Do not call more tools/);
+    assert.equal(
+      session.events.some((event) => event.kind === "control" && event.summary === "guidance loop final synthesis requested"),
+      true,
+    );
+    assert.equal(
+      session.events.some((event) => event.kind === "tool" && event.summary === "tool shell_command completed"),
+      false,
     );
   } finally {
     await rm(cwd, { recursive: true, force: true });
@@ -1085,8 +1213,10 @@ test("executeProviderRequest injects archivist retrieval into prompt and state",
       },
     );
 
-    assert.match(capturedPrompt, /Archivist context:/);
-    assert.match(capturedPrompt, /project-memory; matches=1/);
+    assert.match(capturedPrompt, /## Conversation State/);
+    assert.match(capturedPrompt, /Archivist: enabled; retrieval matches=1/);
+    assert.match(capturedPrompt, /Archivist retrieval: project-memory/);
+    assert.match(capturedPrompt, /chatgpt backend/);
     assert.equal(session.archivist.retrieval.used, true);
     assert.equal(session.archivist.retrieval.sourceCategory, "project-memory");
     assert.equal(session.archivist.retrieval.matchCount, 1);

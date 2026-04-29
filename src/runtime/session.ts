@@ -1,5 +1,5 @@
 import { createRuntimeState, type RuntimeBootstrap, type RuntimeState } from "./bootstrap.js";
-import { buildPromptLayers, summarizePromptLayers } from "./instructions.js";
+import { buildPromptV2, summarizePromptV2 } from "./prompt-v2.js";
 import type { PersistedTransportMode } from "./persistence.js";
 import { hasCodexAuthJsonCredentialsSync } from "../provider/codex-chatgpt-http.js";
 import { getCodexModelDefinition } from "../models.js";
@@ -517,8 +517,7 @@ function appendSteerHistory(
 }
 
 export function refreshInstructionState(session: RuntimeSession): void {
-  session.instructionLayers = buildPromptLayers(session, "");
-  session.instructionLayerSummary = summarizePromptLayers(session.instructionLayers);
+  session.promptV2Summary = summarizePromptV2(buildPromptV2({ session, prompt: "" }).sections);
   session.providerTransport.authGate = session.providerTransport.mode === "http-responses"
     ? (process.env.OPENAI_API_KEY?.trim() ? "ready" : "missing")
     : session.providerTransport.mode === "codex-http"

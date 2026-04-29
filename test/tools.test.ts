@@ -627,6 +627,35 @@ test("executeInternalTool runs guarded shell command inside repo cwd", async () 
   }
 });
 
+test("executeInternalTool permits absolute redirects outside protected system roots", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-tools-shell-redirect-"));
+
+  try {
+    const session = createSession(cwd);
+    const target = path.join(cwd, "gsd-workspace-path.txt");
+    const result = executeInternalTool(session, {
+      name: "shell_command",
+      arguments: {
+        command: `printf '%s\\n' ok > ${JSON.stringify(target)}`,
+      },
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(await readFile(target, "utf8"), "ok\n");
+
+    const blocked = executeInternalTool(session, {
+      name: "shell_command",
+      arguments: {
+        command: "printf bad > /etc/nexagent-blocked",
+      },
+    });
+    assert.equal(blocked.ok, false);
+    assert.match(blocked.output, /shell policy blocked command; destructive pattern matched/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test("executeInternalTool shows bounded git diff for changed repo file", async () => {
   const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-tools-diff-"));
 

@@ -711,8 +711,8 @@ test("runRuntimeCommand toggles caveman mode", async () => {
     activity: "caveman mode on",
   });
   assert.equal(session.commandModes.cavemanMode, true);
-  assert.match(session.instructionLayerSummary?.responseStyle ?? "", /Communication Style: Caveman Mode/);
-  assert.match(session.instructionLayerSummary?.responseStyle ?? "", /Cut ~75% of tokens/);
+  assert.match(session.promptV2Summary.style, /Compress user-visible prose/);
+  assert.match(session.promptV2Summary.style, /Drop articles, filler, and pleasantries/);
 });
 
 test("runRuntimeCommand toggles deadpool mode", async () => {
@@ -728,8 +728,8 @@ test("runRuntimeCommand toggles deadpool mode", async () => {
     activity: "deadpool mode on",
   });
   assert.equal(session.commandModes.deadpoolMode, true);
-  assert.match(session.instructionLayerSummary?.responseStyle ?? "", /Communication Style: Deadpool Mode/);
-  assert.match(session.instructionLayerSummary?.responseStyle ?? "", /recognizably Deadpool-flavored/);
+  assert.match(session.promptV2Summary.style, /brief snarky antihero flavor/);
+  assert.match(session.promptV2Summary.style, /Technical accuracy, safety, and execution rules override style/);
 });
 
 test("runRuntimeCommand toggles statusline", async () => {
@@ -1392,23 +1392,22 @@ test("runPromptCommand blocks unrelated plain prompt while approval is pending",
   assert.match(stderrChunks.join(""), /use \/approval approve or \/approval reject/);
 });
 
-test("createRuntimeInspectPayload includes instruction layer summaries", async () => {
+test("createRuntimeInspectPayload includes prompt v2 summaries", async () => {
   const { createRuntimeInspectPayload } = await import("../src/cli.js");
   const payload = createRuntimeInspectPayload(createSession());
 
-  assert.equal(payload.instructionLayers.count, 47);
-  assert.match(payload.instructionLayers.identity, /nexagent, local coding harness assistant/);
-  assert.equal(payload.instructionLayers.responseStyle, "none");
-  assert.match(payload.instructionLayers.executionGuidance, /Read relevant code before changing behavior/);
-  assert.match(payload.instructionLayers.repoBehavior, /AGENTS\.md: # Repo Guardrails/);
-  assert.match(payload.instructionLayers.taskContext, /OpenSpec artifacts as current task context/);
-  assert.match(payload.instructionLayers.taskContext, /openspec includes changes, SPEC\.md/);
-  assert.match(payload.instructionLayers.toolAvailability, /Working directory: \/repo/);
-  assert.match(payload.instructionLayers.toolAvailability, /Available internal tools: read_file, write_file, apply_patch, batch_edit, preview_patch, list_dir, search_content, search_files, web_fetch, web_search, git_status, git_diff, shell_command, nexsight_execute, nexsight_index, nexsight_batch, nexsight_search, archivist_save, archivist_checkpoint/);
-  assert.match(payload.instructionLayers.providerFallback, /Active provider: codex/);
-  assert.equal(payload.instructionLayers.stableSections, "identity, executionGuidance, repoBehavior, taskContext, toolAvailability, providerFallback");
-  assert.equal(payload.instructionLayers.dynamicSections, "archivistContext");
-  assert.equal(payload.instructionLayers.dynamicBoundary, "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__");
+  assert.equal(payload.promptV2.assembly, "v2");
+  assert.match(payload.promptV2.identity, /nexagent, a local coding harness assistant/);
+  assert.equal(payload.promptV2.style, "none");
+  assert.match(payload.promptV2.executionContract, /Continue until done, verified, or genuinely blocked/);
+  assert.match(payload.promptV2.toolRouting, /Broad repo map\/count\/parse\/compare\/summarize -> nexsight_execute/);
+  assert.match(payload.promptV2.providerGuidance, /Transport: Codex CLI/);
+  assert.match(payload.promptV2.repoContext, /AGENTS\.md: # Repo Guardrails/);
+  assert.match(payload.promptV2.repoContext, /openspec includes changes, SPEC\.md/);
+  assert.match(payload.promptV2.runtimeState, /Working directory: \/repo/);
+  assert.equal(payload.promptV2.stableSections, "identity, execution_contract, tool_routing, editing_safety, provider_guidance");
+  assert.equal(payload.promptV2.dynamicSections, "repo_context, runtime_state");
+  assert.equal(payload.promptV2.dynamicBoundary, "__NEXAGENT_PROMPT_DYNAMIC_BOUNDARY__");
   assert.equal(payload.providerTransport.executor, "codex");
   assert.equal(payload.providerTransport.adapter, "codex-cli-exec");
   assert.equal(payload.providerTransport.mode, "cli-exec");
@@ -1428,13 +1427,16 @@ test("createRuntimeTuiView includes grouped instruction sources", async () => {
 
   assert.match(instructionRows.get("repoSources") ?? "", /AGENTS\.md=AGENTS\.md: # Repo Guardrails/);
   assert.match(instructionRows.get("taskSources") ?? "", /openspec=openspec includes changes, SPEC\.md/);
-  assert.match(instructionRows.get("identity") ?? "", /nexagent, local coding harness assistant/);
-  assert.match(instructionRows.get("executionGuidance") ?? "", /Use repo-local instructions and configuration as primary operating contract/);
-  assert.match(instructionRows.get("repoBehavior") ?? "", /AGENTS\.md: # Repo Guardrails/);
-  assert.match(instructionRows.get("taskContext") ?? "", /OpenSpec artifacts as current task context/);
-  assert.equal(instructionRows.get("responseStyle"), "none");
-  assert.equal(instructionRows.get("stableSections"), "identity, executionGuidance, repoBehavior, taskContext, toolAvailability, providerFallback");
-  assert.equal(instructionRows.get("dynamicSections"), "archivistContext");
+  assert.equal(instructionRows.get("assembly"), "v2");
+  assert.match(instructionRows.get("identity") ?? "", /nexagent, a local coding harness assistant/);
+  assert.match(instructionRows.get("executionContract") ?? "", /Actionable request means act in this turn/);
+  assert.match(instructionRows.get("toolRouting") ?? "", /Broad repo map\/count\/parse\/compare\/summarize/);
+  assert.match(instructionRows.get("providerGuidance") ?? "", /Transport: Codex CLI/);
+  assert.match(instructionRows.get("repoContext") ?? "", /AGENTS\.md: # Repo Guardrails/);
+  assert.match(instructionRows.get("runtimeState") ?? "", /Working directory: \/repo/);
+  assert.equal(instructionRows.get("style"), "none");
+  assert.equal(instructionRows.get("stableSections"), "identity, execution_contract, tool_routing, editing_safety, provider_guidance");
+  assert.equal(instructionRows.get("dynamicSections"), "repo_context, runtime_state");
   assert.equal(metadataRows.get("lastActivity"), "none");
   assert.equal(metadataRows.get("git"), "up to date with origin/main; clean");
   assert.equal(metadataRows.get("contextLeft"), "272000");

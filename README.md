@@ -12,6 +12,7 @@ Terminal-first AI coding harness for local operator-driven development.
   - `http-responses`
   - `codex-http`
 - Assembles repo-local instructions, MCP context, runtime state, and memory context into provider prompts.
+- Uses the Prompt V2 assembly path by default, with stable/dynamic prompt sections, provider-specific overlays, and bounded runtime context.
 - Exposes guarded internal tools for repo reads, writes, diffs, searches, shell commands, and Archivist memory.
 - Exposes Nexsight tools for bounded code/data execution, local indexing, and context search with SQLite FTS when available.
 - Provides guarded web fetch/search and batch edit helpers for research and multi-file patch workflows.
@@ -126,6 +127,18 @@ Skills are discovered from repo roots first, then global user roots:
 - `~/.agents/skills`
 
 If two roots define the same skill name, repo-local skill wins.
+
+Prompt assembly defaults to V2:
+
+```json
+{
+  "prompt": {
+    "assembly": "v2"
+  }
+}
+```
+
+Set `"assembly": "legacy"` in `~/.nexagent/settings.local.json` or repo `.nexagent/settings.local.json` only when debugging old prompt behavior. V2 separates stable execution rules, provider transport guidance, and dynamic repo/runtime context with a cache boundary, so provider prompts stay denser and less prone to tool-loop drift.
 
 ## Common Runtime Commands
 

@@ -10,7 +10,7 @@ import { executeProviderRequest, type ImageAttachment } from "./provider.js";
 import { launchCodexLogin, probeCodexAuthStateSync } from "./runtime/auth.js";
 import { checkpointArchivistSession, saveArchivistMemory } from "./runtime/archivist.js";
 import { bootstrapRuntime } from "./runtime/bootstrap.js";
-import { buildPromptLayers, summarizePromptLayers } from "./runtime/instructions.js";
+import { buildPromptV2, summarizePromptV2 } from "./runtime/prompt-v2.js";
 import { checkpointNexsightSession, getNexsightStats, purgeNexsight, searchNexsight } from "./runtime/nexsight.js";
 import { loadPersistedPromptHistory, savePersistedPromptHistory, savePersistedRuntimeState } from "./runtime/persistence.js";
 import { executeInternalTool, getInternalToolDefinitions } from "./runtime/tools.js";
@@ -507,16 +507,18 @@ export function formatPromptEventDetail(prompt: string): string {
 
 export function createRuntimeInspectPayload(
   session: RuntimeSession,
-): Omit<RuntimeSession, "instructionLayers"> & { instructionLayers: RuntimeSession["instructionLayerSummary"] } {
-  const instructionLayers =
-    session.instructionLayerSummary ?? summarizePromptLayers(session.instructionLayers ?? buildPromptLayers(session, ""));
+): RuntimeSession & {
+  promptV2: RuntimeSession["promptV2Summary"];
+} {
+  const promptV2 =
+    session.promptV2Summary ?? summarizePromptV2(buildPromptV2({ session, prompt: "" }).sections);
 
-  return { ...session, instructionLayers };
+  return { ...session, promptV2 };
 }
 
 export function createRuntimeTuiView(session: RuntimeSession): RuntimeTuiView {
-  const instructionLayers =
-    session.instructionLayerSummary ?? summarizePromptLayers(session.instructionLayers ?? buildPromptLayers(session, ""));
+  const promptV2 =
+    session.promptV2Summary ?? summarizePromptV2(buildPromptV2({ session, prompt: "" }).sections);
 
   return {
     title: session.product,
@@ -563,20 +565,22 @@ export function createRuntimeTuiView(session: RuntimeSession): RuntimeTuiView {
       ["checkedAt", session.auth.checkedAt ?? "none"],
     ],
     instructions: [
-      ["count", String(instructionLayers.count)],
-      ["responseStyle", instructionLayers.responseStyle],
+      ["assembly", session.prompt?.assembly ?? "v2"],
+      ["count", String(promptV2.count)],
+      ["style", promptV2.style],
       ["repoSources", formatInstructionSources(session, "repoBehavior")],
       ["taskSources", formatInstructionSources(session, "taskContext")],
-      ["identity", instructionLayers.identity],
-      ["executionGuidance", instructionLayers.executionGuidance],
-      ["repoBehavior", instructionLayers.repoBehavior],
-      ["taskContext", instructionLayers.taskContext],
-      ["importedDefaults", instructionLayers.importedDefaults],
-      ["toolAvailability", instructionLayers.toolAvailability],
-      ["providerFallback", instructionLayers.providerFallback],
-      ["stableSections", instructionLayers.stableSections || "none"],
-      ["dynamicSections", instructionLayers.dynamicSections || "none"],
-      ["dynamicBoundary", instructionLayers.dynamicBoundary],
+      ["identity", promptV2.identity],
+      ["executionContract", promptV2.executionContract],
+      ["toolRouting", promptV2.toolRouting],
+      ["editingSafety", promptV2.editingSafety],
+      ["providerGuidance", promptV2.providerGuidance],
+      ["repoContext", promptV2.repoContext],
+      ["runtimeState", promptV2.runtimeState],
+      ["conversationState", promptV2.conversationState],
+      ["stableSections", promptV2.stableSections || "none"],
+      ["dynamicSections", promptV2.dynamicSections || "none"],
+      ["dynamicBoundary", promptV2.dynamicBoundary],
     ],
     mcp: [
       ["enabled", formatList(session.enabledMcpServers)],
