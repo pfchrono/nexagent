@@ -39,6 +39,7 @@ test("OpenTUI app shell renders live view fields and Phase 66 command surfaces",
   assert.match(source, /copyTextToClipboardOsc52/);
   assert.match(source, /key\.ctrl && key\.name === "c"/);
   assert.match(source, /key\.ctrl && key\.name === "q"/);
+  assert.match(source, /key\.meta \|\| key\.option/);
   assert.match(source, /onMouseScroll/);
   assert.match(source, /selectable/);
   assert.match(source, /selectionBg/);

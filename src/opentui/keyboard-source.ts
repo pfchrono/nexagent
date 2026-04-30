@@ -100,6 +100,9 @@ function parseEscapeSequence(input: string, startIndex: number): { event: OpenTu
     const endCandidates = [belIndex, stIndex >= 0 ? stIndex + 1 : -1].filter((value) => value >= 0);
     return { event: null, nextIndex: endCandidates.length > 0 ? Math.min(...endCandidates) : input.length - 1 };
   }
+  if (next === "\r" || next === "\n") {
+    return { event: specialKey("return", input.slice(startIndex, startIndex + 2), { meta: true, option: true }), nextIndex: startIndex + 1 };
+  }
   if (next.length === 1 && /[ -~]/.test(next)) {
     const event = keyEventForCharacter(next, true);
     return { event, nextIndex: startIndex + 1 };

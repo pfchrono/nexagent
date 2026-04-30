@@ -38,6 +38,12 @@ test("OpenTUI raw keyboard parser keeps Enter and Tab as special keys", () => {
   ]);
 });
 
+test("OpenTUI raw keyboard parser handles Alt Enter as meta return", () => {
+  assert.deepEqual(parseRawKeyboardInput("\x1b\r").map((event) => [event.name, event.meta, event.option]), [
+    ["return", true, true],
+  ]);
+});
+
 test("OpenTUI raw keyboard parser handles navigation keys", () => {
   assert.deepEqual(parseRawKeyboardInput("\x1b[D\x1b[C\x1b[H\x1b[F\x1b[5~\x1b[6~").map((event) => event.name), [
     "left",

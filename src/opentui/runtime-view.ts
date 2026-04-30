@@ -110,7 +110,7 @@ function createTranscriptLines(session: RuntimeSession): string[] {
     .map((event) => `${event.kind}: ${firstLine(event.detail || event.summary)}`)
     .filter((line) => line.trim().length > 0);
 
-  return eventLines.length > 0 ? eventLines : ["No transcript yet"];
+  return eventLines.length > 0 ? eventLines : [];
 }
 
 function createTranscriptBlocks(session: RuntimeSession): OpenTuiTranscriptBlock[] {
@@ -137,13 +137,7 @@ function createTranscriptBlocks(session: RuntimeSession): OpenTuiTranscriptBlock
       collapsedByDefault: false,
     }));
 
-  return eventBlocks.length > 0 ? eventBlocks : [createBlock({
-    id: "empty-transcript",
-    kind: "system",
-    label: "system",
-    lines: ["No transcript yet"],
-    collapsedByDefault: false,
-  })];
+  return eventBlocks;
 }
 
 function createTraceSummaryLines(session: RuntimeSession): string[] {
