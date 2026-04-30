@@ -53,6 +53,8 @@ test("OpenTUI app shell renders live view fields and Phase 66 command surfaces",
   assert.match(source, /position="absolute"/);
   assert.match(source, /zIndex=\{100\}/);
   assert.match(source, /backgroundColor="#000000"/);
+  assert.match(source, /paletteContentRows = 2/);
+  assert.match(source, /paletteOverlayHeight = paletteContentRows \+ 2/);
   assert.match(source, /paletteOverlayHeight/);
   assert.match(source, /transcriptPositionLabel/);
   assert.match(source, /const composerLine = composer\.text\.length > 0 \? renderComposerLine\(composer, contentWidth\) : `> \$\{COMPOSER_CURSOR\}`/);

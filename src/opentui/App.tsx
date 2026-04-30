@@ -213,7 +213,10 @@ export function OpenTuiApp({ view, session, keyboardSource, promptHistory = [], 
     }
   }
 
-  const paletteOverlayHeight = Math.min(PALETTE_VISIBLE_ROWS, Math.max(1, paletteRows.length)) + (paletteRows.length > PALETTE_VISIBLE_ROWS ? 4 : 3);
+  const paletteContentRows = 2
+    + Math.min(PALETTE_VISIBLE_ROWS, Math.max(1, paletteRows.length))
+    + (paletteRows.length > PALETTE_VISIBLE_ROWS ? 1 : 0);
+  const paletteOverlayHeight = paletteContentRows + 2;
   const paletteTop = Math.max(5, terminalHeight - paletteOverlayHeight - 5);
   const transcriptViewportHeight = Math.max(4, terminalHeight - 14);
   const transcriptBlocks = [...view.transcriptBlocks, ...outputBlocks, ...(traceExpanded ? view.traceBlocks : [])];
