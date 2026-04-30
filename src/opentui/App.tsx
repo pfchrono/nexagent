@@ -1,4 +1,4 @@
-import { useTerminalDimensions } from "@opentui/react";
+import { flushSync, useTerminalDimensions } from "@opentui/react";
 import { useEffect, useRef, useState } from "react";
 
 import { runRuntimeCommand } from "../cli.js";
@@ -54,7 +54,9 @@ export function OpenTuiApp({ view, session, keyboardSource, promptHistory = [], 
   keyHandlerRef.current = handleKeyboardKey;
 
   useEffect(() => {
-    return keyboardSource?.subscribe((key) => keyHandlerRef.current(key));
+    return keyboardSource?.subscribe((key) => {
+      flushSync(() => keyHandlerRef.current(key));
+    });
   }, [keyboardSource]);
 
   function handleKeyboardKey(key: OpenTuiKeyEvent): void {
@@ -121,6 +123,11 @@ export function OpenTuiApp({ view, session, keyboardSource, promptHistory = [], 
     }
     if (key.name === "enter" || key.name === "return") {
       if (!key.shift && composer.overlayMode !== "none") {
+        const selectedValue = paletteRows[composer.selectedIndex]?.value ?? paletteRows[0]?.value ?? "";
+        if (selectedValue.trim() === composer.text.trim()) {
+          applyComposerEvent({ kind: "enter", shift: false });
+          return;
+        }
         applyComposerEvent({ kind: "accept-selection", values: paletteRows.map((row) => row.value) });
         return;
       }

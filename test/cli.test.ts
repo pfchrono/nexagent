@@ -144,12 +144,27 @@ test("parseCommand preserves empty run prompt for resolvePrompt", async () => {
   const { parseCommand } = await import("../src/cli.js");
 
   assert.deepEqual(parseCommand([]), { kind: "inspect", yolo: false });
+  assert.deepEqual(parseCommand(["--help"]), { kind: "help" });
+  assert.deepEqual(parseCommand(["-h"]), { kind: "help" });
+  assert.deepEqual(parseCommand(["help"]), { kind: "help" });
   assert.deepEqual(parseCommand(["run", "say", "hi"]), { kind: "run", prompt: "say hi", yolo: false });
   assert.deepEqual(parseCommand(["run"]), { kind: "run", prompt: null, yolo: false });
   assert.deepEqual(parseCommand(["--yolo"]), { kind: "inspect", yolo: true });
   assert.deepEqual(parseCommand(["--opentui"]), { kind: "inspect", yolo: false, openTui: true });
   assert.deepEqual(parseCommand(["--yolo", "run", "say", "hi"]), { kind: "run", prompt: "say hi", yolo: true });
   assert.deepEqual(parseCommand(["run", "--yolo", "say", "hi"]), { kind: "run", prompt: "say hi", yolo: true });
+});
+
+test("formatLaunchHelp documents launch switches", async () => {
+  const { formatLaunchHelp } = await import("../src/cli.js");
+  const output = formatLaunchHelp();
+
+  assert.match(output, /Usage:/);
+  assert.match(output, /--help, -h\s+show this help and exit/);
+  assert.match(output, /--opentui\s+start OpenTUI terminal interface/);
+  assert.match(output, /--yolo\s+bypass guarded approval prompts/);
+  assert.match(output, /nexagent run/);
+  assert.match(output, /\/help - show available runtime commands/);
 });
 
 test("applyYoloMode is session scoped and leaves persisted defaults intact", async () => {

@@ -369,6 +369,11 @@ export type RuntimeCommandResult = RuntimeCommandSuccess | RuntimeCommandFailure
 async function main(): Promise<void> {
   const command = parseCommand(process.argv.slice(2));
 
+  if (command.kind === "help") {
+    process.stdout.write(`${formatLaunchHelp()}\n`);
+    return;
+  }
+
   if (command.kind === "run") {
     const prompt = resolvePrompt(command.prompt, await readPipedStdin(process.stdin));
     const runtime = await bootstrapRuntime(process.cwd());
@@ -442,7 +447,11 @@ interface InspectCommand {
   openTui?: boolean;
 }
 
-type CliCommand = RunCommand | InspectCommand;
+interface HelpCommand {
+  kind: "help";
+}
+
+type CliCommand = RunCommand | InspectCommand | HelpCommand;
 
 export interface RuntimeTuiView {
   title: string;
@@ -460,6 +469,9 @@ export interface RuntimeTuiView {
 export type RuntimeGuiView = RuntimeTuiView;
 
 export function parseCommand(argv: string[]): CliCommand {
+  if (argv.includes("--help") || argv.includes("-h") || argv[0] === "help") {
+    return { kind: "help" };
+  }
   const yolo = argv.includes("--yolo");
   const openTui = argv.includes("--opentui");
   const normalizedArgv = argv.filter((arg) => arg !== "--yolo" && arg !== "--opentui");
@@ -478,6 +490,29 @@ export function parseCommand(argv: string[]): CliCommand {
     command.openTui = true;
   }
   return command;
+}
+
+export function formatLaunchHelp(): string {
+  return [
+    "nexagent",
+    "",
+    "Usage:",
+    "  nexagent [--opentui] [--yolo]",
+    "  nexagent run [--opentui] [--yolo] <prompt>",
+    "  nexagent --help",
+    "",
+    "Launch switches:",
+    "  --help, -h   show this help and exit",
+    "  --opentui    start OpenTUI terminal interface instead of classic TUI",
+    "  --yolo       bypass guarded approval prompts while preserving destructive-command blocks",
+    "",
+    "Commands:",
+    "  run          execute one prompt from arguments and/or piped stdin",
+    "  help         show this help and exit",
+    "",
+    "In-session slash commands:",
+    formatCommandCatalog(),
+  ].join("\n");
 }
 
 export function resolvePrompt(prompt: string | null, pipedInput: string | null): string {
