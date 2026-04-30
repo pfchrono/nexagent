@@ -76,6 +76,18 @@
       },
       "type": "stdio",
       "description": "Archivist code navigation and persistent memory MCP server from Mibayy/token-savior"
+    },
+    "sentry": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@sentry/mcp-server@latest"
+      ],
+      "env": {
+        "SENTRY_ACCESS_TOKEN": "${SENTRY_ACCESS_TOKEN}"
+      },
+      "type": "stdio",
+      "description": "Official Sentry MCP for issue, event, trace, and production error debugging"
     }
   }
 }
