@@ -83,18 +83,72 @@ export function discoverSkills(cwd: string): RuntimeSkillDefinition[] {
 
 function parseSkillFile(skillPath: string, fallbackName: string): { name: string; description: string; aliases: string[] } {
   const content = safeReadFile(skillPath) ?? "";
-  const frontmatter = content.match(/^---\n([\s\S]*?)\n---/);
-  const metadata = frontmatter?.[1] ?? "";
-  const name = metadata.match(/^name:\s*"?([^"\n]+)"?\s*$/m)?.[1]?.trim() || fallbackName;
-  const description = metadata.match(/^description:\s*"?([^"\n]+)"?\s*$/m)?.[1]?.trim()
-    || metadata.match(/^short-description:\s*"?([^"\n]+)"?\s*$/m)?.[1]?.trim()
+  const frontmatter = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  const metadata = parseFlatFrontmatter(frontmatter?.[1] ?? "");
+  const name = metadata.get("name") || fallbackName;
+  const description = metadata.get("description")
+    || metadata.get("short-description")
+    || deriveSkillDescriptionFromBody(content)
     || "no description";
-  const aliasesLine = metadata.match(/^aliases:\s*\[([^\]]*)\]\s*$/m)?.[1] ?? "";
+  const aliasesLine = metadata.get("aliases") ?? "";
   const aliases = aliasesLine
     .split(",")
     .map((alias) => normalizeSkillToken(alias.replaceAll('"', "").replaceAll("'", "")))
     .filter((alias) => alias.length > 0);
   return { name, description, aliases };
+}
+
+function parseFlatFrontmatter(metadata: string): Map<string, string> {
+  const parsed = new Map<string, string>();
+  const lines = metadata.split(/\r?\n/);
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? "";
+    const match = line.match(/^([A-Za-z0-9_-]+):\s*(.*)$/);
+    if (!match) {
+      continue;
+    }
+    const key = match[1] ?? "";
+    const rawValue = (match[2] ?? "").trim();
+    if (/^[>|]-?$/.test(rawValue)) {
+      const blockLines: string[] = [];
+      while (index + 1 < lines.length) {
+        const nextLine = lines[index + 1] ?? "";
+        if (/^[A-Za-z0-9_-]+:\s*/.test(nextLine)) {
+          break;
+        }
+        if (nextLine.trim().length > 0) {
+          blockLines.push(nextLine.trim());
+        }
+        index += 1;
+      }
+      parsed.set(key, normalizeDescription(blockLines.join(" ")));
+      continue;
+    }
+    parsed.set(key, stripYamlQuotes(rawValue));
+  }
+  return parsed;
+}
+
+function deriveSkillDescriptionFromBody(content: string): string {
+  const withoutFrontmatter = content.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, "");
+  for (const line of withoutFrontmatter.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#") || trimmed.startsWith("```") || trimmed.startsWith("- ") || trimmed.startsWith("|")) {
+      continue;
+    }
+    return normalizeDescription(trimmed.replaceAll("**", "").replaceAll("`", ""));
+  }
+  return "";
+}
+
+function stripYamlQuotes(value: string): string {
+  const trimmed = value.trim();
+  const quoted = trimmed.match(/^["'](.*)["']$/);
+  return normalizeDescription(quoted?.[1] ?? trimmed);
+}
+
+function normalizeDescription(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
 }
 
 export function readSkillContent(skillPath: string): string {

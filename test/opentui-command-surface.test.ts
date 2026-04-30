@@ -40,6 +40,26 @@ test("OpenTUI command surface reports ambiguous skills", () => {
   assert.equal(preview.rows[0]?.hint, "alpha skill (project)");
 });
 
+test("OpenTUI command surface renders folded and body-derived skill descriptions", () => {
+  const cwd = mkdtempSync(path.join(tmpdir(), "nexagent-skill-description-test-"));
+  try {
+    writeSkillFile(
+      cwd,
+      "domore",
+      `---\nname: domore\ndescription: >-\n  Execute a concrete task end-to-end with stricter validation.\n---\n\n# DOMORE\n`,
+    );
+    writeSkillFile(cwd, "fallback", "# Fallback\n\nUse this skill when frontmatter lacks a description.\n");
+
+    const folded = resolveSkillPreview(cwd, "$domore");
+    const fallback = resolveSkillPreview(cwd, "$fallback");
+
+    assert.equal(folded.rows[0]?.hint, "Execute a concrete task end-to-end with stricter validation. (project)");
+    assert.equal(fallback.rows[0]?.hint, "Use this skill when frontmatter lacks a description. (project)");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("OpenTUI command surface keeps all rows selectable beyond visible palette window", () => {
   const cwd = makeSkillWorkspace(Array.from({ length: 10 }, (_, index) => `alpha-${String(index)}`));
   const preview = resolveSkillPreview(cwd, "$alpha", 9);
@@ -86,13 +106,13 @@ test("OpenTUI command surface converts skill shorthand to runtime command intent
 function makeSkillWorkspace(names: string[]): string {
   const cwd = mkdtempSync(path.join(tmpdir(), "nexagent-skill-test-"));
   for (const name of names) {
-    const dir = path.join(cwd, ".codex", "skills", name);
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(
-      path.join(dir, "SKILL.md"),
-      `---\nname: "${name}"\ndescription: "${name} skill"\n---\n`,
-      "utf8",
-    );
+    writeSkillFile(cwd, name, `---\nname: "${name}"\ndescription: "${name} skill"\n---\n`);
   }
   return cwd;
+}
+
+function writeSkillFile(cwd: string, name: string, content: string): void {
+  const dir = path.join(cwd, ".codex", "skills", name);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(path.join(dir, "SKILL.md"), content, "utf8");
 }
