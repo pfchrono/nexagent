@@ -124,3 +124,15 @@ test("OpenTUI composer history overlay selected row can load text", () => {
   assert.equal(result.state.overlayMode, "none");
   assert.equal(result.intent, null);
 });
+
+test("OpenTUI composer opens completion overlay for trailing path tokens", () => {
+  const homePath = handleOpenTuiComposerEvent(createOpenTuiComposerState(), { kind: "character", value: "~" });
+  const homeSlash = handleOpenTuiComposerEvent(homePath.state, { kind: "character", value: "/" });
+  const relativePath = handleOpenTuiComposerEvent(createOpenTuiComposerState(), { kind: "character", value: "." });
+  const relativeSlash = handleOpenTuiComposerEvent(relativePath.state, { kind: "character", value: "/" });
+  const prosePath = handleOpenTuiComposerEvent(createOpenTuiComposerState(), { kind: "character", value: "look at ./" });
+
+  assert.equal(homeSlash.state.overlayMode, "command");
+  assert.equal(relativeSlash.state.overlayMode, "command");
+  assert.equal(prosePath.state.overlayMode, "command");
+});

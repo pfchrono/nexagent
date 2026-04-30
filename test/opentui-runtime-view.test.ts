@@ -31,7 +31,7 @@ test("createOpenTuiRuntimeView maps runtime session without mutation", () => {
     cwdLabel: "/repo",
     transcriptLines: [],
     transcriptBlocks: [],
-    composerHint: "Type prompt. Enter submit. Esc clear/cancel. Ctrl+Q quit.",
+    composerHint: "",
     footerLabel: "approval open | tools repo-local-guarded",
     traceCollapsedLabel: "trace closed - Ctrl+T expand",
     traceExpandedLabel: "trace open - Ctrl+T collapse",

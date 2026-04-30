@@ -302,5 +302,12 @@ function overlayForText(text: string, current: ComposerOverlayMode): ComposerOve
   if (trimmed.startsWith("/")) {
     return "command";
   }
+  if (hasTrailingPathCompletionToken(text)) {
+    return "command";
+  }
   return "none";
+}
+
+function hasTrailingPathCompletionToken(text: string): boolean {
+  return /(?:^|\s)(~\/[^\s]*|~|\.{1,2}\/[^\s]*|\/[^\s]*|[^\s]*\/[^\s]*)$/.test(text);
 }

@@ -7,7 +7,7 @@ test("OpenTUI app shell renders live view fields and Phase 66 command surfaces",
 
   assert.doesNotMatch(source, /OpenTUI sidecar proof\. Full transcript port begins after migration contract\./);
   assert.match(source, /view\.transcriptBlocks/);
-  assert.match(source, /view\.composerHint/);
+  assert.doesNotMatch(source, /view\.composerHint/);
   assert.match(source, /traceExpanded/);
   assert.match(source, /createOpenTuiTranscriptState/);
   assert.match(source, /visibleLineWindow/);
@@ -41,12 +41,21 @@ test("OpenTUI app shell renders live view fields and Phase 66 command surfaces",
   assert.match(source, /key\.ctrl && key\.name === "q"/);
   assert.match(source, /key\.meta \|\| key\.option/);
   assert.match(source, /onMouseScroll/);
+  assert.match(source, /onMouseUp/);
+  assert.match(source, /handleTranscriptMouseScroll/);
+  assert.match(source, /event\.type === "scroll"/);
   assert.match(source, /selectable/);
   assert.match(source, /selectionBg/);
   assert.match(source, /PageUp\/PageDown Ctrl\+Up\/Ctrl\+Down wheel/);
   assert.match(source, /Ctrl\+C\/Ctrl\+Y copy/);
   assert.match(source, /visiblePaletteWindow/);
   assert.match(source, /PALETTE_VISIBLE_ROWS = 5/);
+  assert.match(source, /position="absolute"/);
+  assert.match(source, /zIndex=\{100\}/);
+  assert.match(source, /backgroundColor="#000000"/);
+  assert.match(source, /paletteOverlayHeight/);
+  assert.match(source, /transcriptPositionLabel/);
+  assert.match(source, /const composerLine = composer\.text\.length > 0 \? renderComposerLine\(composer, contentWidth\) : `> \$\{COMPOSER_CURSOR\}`/);
   assert.match(source, /row\.canToggle/);
   assert.match(source, /#8bd5ff/);
   assert.match(source, /#f9e2af/);

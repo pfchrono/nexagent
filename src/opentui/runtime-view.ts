@@ -74,7 +74,7 @@ export function createOpenTuiRuntimeView(session: RuntimeSession): OpenTuiRuntim
     cwdLabel: session.cwd,
     transcriptLines,
     transcriptBlocks,
-    composerHint: "Type prompt. Enter submit. Esc clear/cancel. Ctrl+Q quit.",
+    composerHint: "",
     footerLabel: `approval ${approval} | tools ${session.toolPolicy.mode}`,
     traceCollapsedLabel: "trace closed - Ctrl+T expand",
     traceExpandedLabel: "trace open - Ctrl+T collapse",

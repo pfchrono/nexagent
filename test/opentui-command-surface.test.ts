@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "bun:test";
@@ -48,6 +48,31 @@ test("OpenTUI command surface keeps all rows selectable beyond visible palette w
   assert.equal(preview.rows[9]?.selected, true);
   assert.ok(commandSurface.rows.length > 5);
   assert.equal(commandSurface.rows[9]?.selected, true);
+});
+
+test("OpenTUI command surface lists path rows for relative and home tokens", () => {
+  const cwd = mkdtempSync(path.join(tmpdir(), "nexagent-path-surface-"));
+  const home = mkdtempSync(path.join(tmpdir(), "nexagent-path-home-"));
+  const previousHome = process.env.HOME;
+  try {
+    process.env.HOME = home;
+    mkdirSync(path.join(cwd, "docs"));
+    mkdirSync(path.join(home, "code"));
+
+    const relative = createCommandSurface(cwd, "look at ./");
+    const homeRows = createCommandSurface(cwd, "look at ~/");
+
+    assert.ok(relative.rows.some((row) => row.label === "./docs/"));
+    assert.ok(homeRows.rows.some((row) => row.label === "~/code/"));
+  } finally {
+    if (previousHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = previousHome;
+    }
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test("OpenTUI command surface converts skill shorthand to runtime command intent", () => {
