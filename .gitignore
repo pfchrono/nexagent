@@ -5,6 +5,7 @@ dist/
 .claude/
 .codesight/
 .codex/
+.agents/
 .omc/
 .planning/
 openspec/
