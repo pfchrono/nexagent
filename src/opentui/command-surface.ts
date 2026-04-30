@@ -156,6 +156,9 @@ function surfaceTitle(trimmed: string): string {
 
 function parseSkillInput(input: string): { skillName: string; rawArgs: string } | null {
   const trimmed = input.trim();
+  if (trimmed === "$") {
+    return { skillName: "", rawArgs: "" };
+  }
   const shorthand = parseSkillShorthand(trimmed);
   if (shorthand) {
     return shorthand;

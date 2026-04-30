@@ -40,6 +40,17 @@ test("OpenTUI command surface reports ambiguous skills", () => {
   assert.equal(preview.rows[0]?.hint, "alpha skill (project)");
 });
 
+test("OpenTUI command surface lists bare skill shorthand with descriptions", () => {
+  const cwd = makeSkillWorkspace(["alpha", "alpine"]);
+  const surface = createCommandSurface(cwd, "$");
+  const alpha = surface.rows.find((row) => row.label === "alpha");
+  const alpine = surface.rows.find((row) => row.label === "alpine");
+
+  assert.equal(surface.title, "Select skill");
+  assert.equal(alpha?.hint, "alpha skill (project)");
+  assert.equal(alpine?.hint, "alpine skill (project)");
+});
+
 test("OpenTUI command surface renders folded and body-derived skill descriptions", () => {
   const cwd = mkdtempSync(path.join(tmpdir(), "nexagent-skill-description-test-"));
   try {
