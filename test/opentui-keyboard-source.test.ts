@@ -65,6 +65,41 @@ test("OpenTUI renderer key source buffers initial slash before app subscribes", 
   source.dispose();
 });
 
+test("OpenTUI renderer key source preserves startup named printable keys without sequence", () => {
+  const keyInput = new EventEmitter();
+  const source = createOpenTuiKeyboardSource({
+    on(event, handler) {
+      keyInput.on(event, handler);
+    },
+    off(event, handler) {
+      keyInput.off(event, handler);
+    },
+  });
+  const captured: string[] = [];
+
+  keyInput.emit("keypress", {
+    name: "slash",
+    ctrl: false,
+    meta: false,
+    shift: false,
+    option: false,
+    sequence: "",
+  });
+  keyInput.emit("keypress", {
+    name: "dollar",
+    ctrl: false,
+    meta: false,
+    shift: true,
+    option: false,
+    sequence: "",
+  });
+  const unsubscribe = source.subscribe((event) => captured.push(event.sequence));
+
+  assert.deepEqual(captured, ["/", "$"]);
+  unsubscribe();
+  source.dispose();
+});
+
 test("OpenTUI raw keyboard parser keeps Enter and Tab as special keys", () => {
   assert.deepEqual(parseRawKeyboardInput("\r\n\t").map((event) => [event.name, event.ctrl]), [
     ["return", false],

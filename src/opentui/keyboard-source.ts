@@ -87,14 +87,64 @@ function createBufferedSource<TEmitter extends {
 }
 
 function normalizeOpenTuiKeyEvent(key: OpenTuiKeyEvent): OpenTuiKeyEvent {
+  const fallbackSequence = !key.ctrl && !key.meta && !key.option ? printableSequenceForNamedKey(key.name, key.shift) : "";
   return {
     name: key.name,
     ctrl: key.ctrl,
     meta: key.meta,
     shift: key.shift,
     option: key.option,
-    sequence: key.sequence,
+    sequence: key.sequence && key.sequence.length > 0 ? key.sequence : fallbackSequence,
   };
+}
+
+function printableSequenceForNamedKey(name: string, shifted: boolean): string {
+  if (name.length === 1) {
+    return shifted ? name.toUpperCase() : name;
+  }
+  const printableNames: Record<string, string> = {
+    space: " ",
+    slash: "/",
+    backslash: "\\",
+    dollar: "$",
+    exclamation: "!",
+    bang: "!",
+    at: "@",
+    hash: "#",
+    pound: "#",
+    percent: "%",
+    caret: "^",
+    ampersand: "&",
+    asterisk: "*",
+    star: "*",
+    minus: "-",
+    hyphen: "-",
+    underscore: "_",
+    equal: "=",
+    plus: "+",
+    comma: ",",
+    period: ".",
+    dot: ".",
+    semicolon: ";",
+    colon: ":",
+    quote: "'",
+    apostrophe: "'",
+    doublequote: "\"",
+    backtick: "`",
+    tilde: "~",
+    leftbracket: "[",
+    rightbracket: "]",
+    leftbrace: "{",
+    rightbrace: "}",
+    leftparen: "(",
+    rightparen: ")",
+    question: "?",
+    questionmark: "?",
+    less: "<",
+    greater: ">",
+    pipe: "|",
+  };
+  return printableNames[name.toLowerCase()] ?? "";
 }
 
 export function parseRawKeyboardInput(chunk: Buffer | string): OpenTuiKeyEvent[] {
