@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import { createDefaultProviderRegistry } from "../src/provider/registry.js";
+import { resolveNexsightRuntime } from "../src/runtime/nexsight.js";
 import { classifyInternalToolRisk, executeInternalTool, executeInternalToolAsync } from "../src/runtime/tools.js";
 import type { RuntimeSession } from "../src/runtime/session.js";
 
@@ -13,6 +15,7 @@ function createSession(cwd: string): RuntimeSession {
     startedAt: "2025-01-01T00:00:00.000Z",
     product: "nexagent",
     provider: "codex",
+    providerRegistry: createDefaultProviderRegistry(),
     providerRouting: {
       fallback: {
         policy: "require-open-spec",
@@ -509,6 +512,19 @@ test("executeInternalTool search_files fallback respects gitignore", async () =>
     assert.doesNotMatch(result.output, /ignored\/drop\.ts/);
   } finally {
     await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("nexsight javascript runtime avoids compiled nexagent executable", () => {
+  const runtime = resolveNexsightRuntime("javascript", {
+    execPath: "/tmp/nexagent-linux-x64",
+    env: process.env,
+  });
+
+  assert.equal(runtime.ok, true);
+  if (runtime.ok) {
+    assert.notEqual(runtime.command, "/tmp/nexagent-linux-x64");
+    assert.match(path.basename(runtime.command), /^(bun|node)(\.exe)?$/);
   }
 });
 

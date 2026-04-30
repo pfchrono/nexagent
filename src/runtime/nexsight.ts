@@ -41,6 +41,8 @@ interface NexsightChunk {
   createdAt: string;
 }
 
+type NexsightRuntime = { ok: true; command: string; args: string[]; scriptName: string } | { ok: false; error: string };
+
 type SqliteStatement = {
   run: (...values: unknown[]) => unknown;
   all: (...values: unknown[]) => unknown[];
@@ -145,18 +147,44 @@ export function executeNexsight(session: RuntimeSession, input: NexsightExecuteI
   }
 }
 
-function resolveNexsightRuntime(language: string): { ok: true; command: string; args: string[]; scriptName: string } | { ok: false; error: string } {
+export function resolveNexsightRuntime(
+  language: string,
+  options: { execPath?: string; env?: NodeJS.ProcessEnv } = {},
+): NexsightRuntime {
   if (language === "shell") {
     return { ok: true, command: "bash", args: [], scriptName: "script.sh" };
   }
   if (language === "javascript") {
-    return { ok: true, command: process.execPath, args: [], scriptName: "script.js" };
+    return resolveJavaScriptRuntime(options.execPath ?? process.execPath, options.env ?? process.env);
   }
 
   const python = resolvePythonCommand();
   return python
     ? { ok: true, command: python, args: [], scriptName: "script.py" }
     : { ok: false, error: "python unavailable; install python3 or use javascript/shell" };
+}
+
+function resolveJavaScriptRuntime(execPath: string, env: NodeJS.ProcessEnv): NexsightRuntime {
+  const execName = path.basename(execPath).toLowerCase();
+  if (execName === "bun" || execName === "bun.exe" || execName === "node" || execName === "node.exe") {
+    return { ok: true, command: execPath, args: [], scriptName: "script.js" };
+  }
+
+  const candidates = [
+    env.NEXSIGHT_JS_RUNTIME,
+    env.BUN_INSTALL ? path.join(env.BUN_INSTALL, "bin", "bun") : null,
+    "bun",
+    "node",
+  ].filter((candidate): candidate is string => Boolean(candidate));
+
+  for (const candidate of [...new Set(candidates)]) {
+    const result = spawnSync(candidate, ["--version"], { encoding: "utf8", stdio: ["ignore", "ignore", "ignore"] });
+    if (!result.error && (result.status ?? 0) === 0) {
+      return { ok: true, command: candidate, args: [], scriptName: "script.js" };
+    }
+  }
+
+  return { ok: false, error: "javascript runtime unavailable; install bun or node" };
 }
 
 function resolvePythonCommand(): string | null {

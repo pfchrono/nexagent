@@ -244,7 +244,7 @@ export function getInternalToolDefinitions(): readonly InternalToolDefinition[] 
     },
     {
       name: "nexsight_execute",
-      description: "Run sandboxed analysis code and return only bounded stdout/stderr. Use for counts, parsing, filtering, and data processing.",
+      description: "Run sandboxed analysis code and return only bounded stdout/stderr. Use for counts, parsing, filtering, and data processing; print distilled findings, not raw dumps.",
       inputSchema: {
         type: "object",
         properties: {
@@ -277,7 +277,7 @@ export function getInternalToolDefinitions(): readonly InternalToolDefinition[] 
     },
     {
       name: "nexsight_batch",
-      description: "Index text files under a readable repo root into nexsight with ignore rules and bounded file count.",
+      description: "Index text files under a readable repo root into nexsight with ignore rules, source labels, and bounded file count for later focused search.",
       inputSchema: {
         type: "object",
         properties: {
@@ -290,7 +290,7 @@ export function getInternalToolDefinitions(): readonly InternalToolDefinition[] 
     },
     {
       name: "nexsight_search",
-      description: "Search the local nexsight index and return small ranked excerpts.",
+      description: "Search the local nexsight index and return small ranked excerpts. Use after indexing to retrieve focused evidence instead of rescanning raw files.",
       inputSchema: {
         type: "object",
         properties: {

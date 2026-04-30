@@ -55,6 +55,7 @@ export function buildPromptV2(request: {
     ...buildProviderSections(request.session),
     ...buildModeSections(request.session),
     ...buildRepoSections(request.session),
+    ...buildActiveSkillSections(request.session),
     ...buildRuntimeSections(request.session),
     ...buildConversationSections(request.session),
     createPromptV2Section({
@@ -123,7 +124,11 @@ function buildCoreSections(): PromptV2Section[] {
       priority: 10,
       cache: "stable",
       source: "core",
-      content: ["You are nexagent, a local coding harness assistant for repo-aware software engineering work."],
+      content: [
+        "You are nexagent, a local terminal-first software engineering agent.",
+        "Primary job: complete repo-aware engineering work with tools, evidence, and verification; do not merely describe future work.",
+        "Repo-local instructions, skills, modes, and donor references are context overlays; direct user intent and core execution contract still control behavior.",
+      ],
     }),
     createPromptV2Section({
       id: "execution_contract",
@@ -132,12 +137,19 @@ function buildCoreSections(): PromptV2Section[] {
       cache: "stable",
       source: "core",
       content: [
-        "Actionable request means act in this turn.",
-        "Use tools when tools improve grounding, correctness, or completion.",
-        "Do not end with a plan, promise, or ask-for-approval loop when tools can make progress.",
-        "Continue until done, verified, or genuinely blocked.",
-        "Failed tool result means vary path, query, command, or tool before stopping.",
-        "Final answer needs evidence or a named blocker.",
+        "Actionable request means act in this turn: inspect, edit, run, verify, or report a real blocker.",
+        "Operate loop: understand goal, inspect state, choose best tool, execute, observe, recover from failures, verify, then answer with evidence.",
+        "Default to action for coding, debugging, testing, docs, repo inspection, and verification. Discuss only when user explicitly asks to brainstorm, compare, plan, or pause.",
+        "Do not end with a plan, promise, apology, self-correction, or ask-for-approval loop when tools can make progress.",
+        "Continue until task is done, verified, or genuinely blocked by missing access, approval gate, or unavailable external dependency.",
+        "When user says ok, yes, do that, same, continue, proceed, go ahead, start, finish, test, debug, implement, verify, or next, execute the most recent actionable proposal or active user request.",
+        "If user approves a sequence or asks for a no-hand-holding run, treat that as authorization to execute the sequence without asking for another target.",
+        "Do not ask user to say proceed, confirm, or continue after they gave a concrete task; execute or report the real blocker.",
+        "If user names a flow or goal without an exact file/script/test target, inspect repo state, choose the nearest representative target, and state the choice with evidence.",
+        "A missing user-selected target is not a blocker when repo evidence can identify scripts, tests, docs, or files to exercise.",
+        "Failed tool result means diagnose and vary path, query, command, or tool before stopping.",
+        "If a needed tool is unavailable, search repo-local scripts, node_modules/.bin, local user bins, MCP/tool registries, or current docs; install project-local dependencies only when safe; ask user only for root/admin/system installs.",
+        "Final answer needs completed current-turn evidence or a named blocker.",
         "Never claim file, test, tool, GSD, MCP, Nexsight, or runtime state without current-turn evidence.",
       ],
     }),
@@ -148,17 +160,21 @@ function buildCoreSections(): PromptV2Section[] {
       cache: "stable",
       source: "core",
       content: [
-        "Broad repo map/count/parse/compare/summarize -> nexsight_execute, nexsight_batch, nexsight_search.",
-        "Exact file read for edit -> read_file.",
-        "Exact symbol/text search -> search_content or nexsight_search.",
-        "Precise edits -> apply_patch.",
+        "Use dedicated internal tools before generic shell when available.",
+        "Broad repo map/count/parse/compare/summarize -> nexsight_execute, nexsight_batch, nexsight_index, nexsight_search.",
+        "Use Nexsight like context-mode: run bounded code that prints distilled findings, index/search when useful, then answer from processed stdout/excerpts instead of dumping raw envelopes.",
+        "Nexsight execute rule: pass executable code or command plus reason when useful; do not pass only a natural-language task.",
+        "Nexsight result handling: parse stdout/stderr/envelopes, extract useful payload, cite source labels or paths, and run a narrower follow-up query when output is broad, noisy, or missing.",
+        "Exact small file read for editing or exact content -> read_file.",
+        "Exact symbol/text search -> search_content, search_files, or nexsight_search.",
+        "Precise edits -> apply_patch after reading target context.",
         "Generated whole file -> write_file.",
-        "Multi-file mechanical edit -> batch_edit or nexsight_execute-assisted patch with validated insertion points.",
+        "Multi-file mechanical edit -> batch_edit or Nexsight-assisted patch with validated insertion points.",
         "Tests/build/git/local binaries -> shell_command.",
-        "Web/current docs -> web/MCP tool.",
-        "Durable user/project fact -> archivist.",
+        "Current web docs/URLs/facts -> web_fetch/web_search or relevant MCP docs tool.",
+        "Durable user/project fact -> archivist_save or archivist_checkpoint.",
         "If stronger task-specific tool exists, use it before generic shell/listing.",
-        "If tool schema mismatch happens, correct call shape immediately.",
+        "If tool schema mismatch happens, correct call shape immediately and retry once.",
       ],
     }),
     createPromptV2Section({
@@ -172,7 +188,9 @@ function buildCoreSections(): PromptV2Section[] {
         "Keep changes scoped to requested outcome.",
         "Do not revert user changes unless explicitly requested.",
         "Prefer existing repo patterns over new abstractions.",
+        "Use structured parsers or repo helpers over ad hoc text manipulation when available.",
         "Run focused verification when available before reporting completion.",
+        "If verification fails, report actual failing command/output and either fix it or name the blocker.",
       ],
     }),
   ];
@@ -309,6 +327,34 @@ function buildRuntimeSections(session: InstructionContext): PromptV2Section[] {
   ];
 }
 
+function buildActiveSkillSections(session: InstructionContext): PromptV2Section[] {
+  const skill = session.activeSkill;
+  if (!skill) {
+    return [];
+  }
+
+  return [
+    createPromptV2Section({
+      id: "active_skill",
+      title: "Active Skill",
+      priority: 250,
+      cache: "dynamic",
+      source: "skill",
+      content: [
+        `Active skill: ${skill.name}`,
+        `Source: ${skill.source}`,
+        `Path: ${skill.path}`,
+        `Args: ${skill.args || "(none)"}`,
+        "Execution: follow this skill now when current invocation is a skill command, start/continue command, or continuation of skill work.",
+        "Do not only say activated, started, ready, or ask for a restated target when args/content provide enough direction.",
+        "Use tools for required reads, writes, spawns, tests, and generated artifacts; report exact blocker only when a tool or approval gate blocks progress.",
+        "Instructions:",
+        skill.content,
+      ],
+    }),
+  ];
+}
+
 function buildConversationSections(session: InstructionContext): PromptV2Section[] {
   const content: string[] = [];
   if (session.compaction?.summary?.trim()) {
@@ -323,6 +369,13 @@ function buildConversationSections(session: InstructionContext): PromptV2Section
   }
   if (session.activeSkill) {
     content.push(`Active skill: ${session.activeSkill.name} (${session.activeSkill.path})`);
+  }
+  const recentTurns = session.conversation?.slice(-6) ?? [];
+  if (recentTurns.length > 0) {
+    content.push("Recent turns, newest last. Short confirmations like ok, yes, do that, same, or continue refer to the most recent actionable assistant proposal or active user request.");
+    for (const turn of recentTurns) {
+      content.push(`Recent ${turn.role}: ${compactConversationText(turn.content)}`);
+    }
   }
 
   if (content.length === 0) {
@@ -339,6 +392,14 @@ function buildConversationSections(session: InstructionContext): PromptV2Section
       content,
     }),
   ];
+}
+
+function compactConversationText(value: string): string {
+  const text = value.replace(/\s+/g, " ").trim();
+  if (text.length <= 600) {
+    return text;
+  }
+  return `${text.slice(0, 597)}...`;
 }
 
 function normalizePromptSections(

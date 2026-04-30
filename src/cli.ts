@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { captureCliException } from "./instrument.js";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import process from "node:process";
@@ -14,7 +15,8 @@ import { buildPromptV2, summarizePromptV2 } from "./runtime/prompt-v2.js";
 import { checkpointNexsightSession, getNexsightStats, purgeNexsight, searchNexsight } from "./runtime/nexsight.js";
 import { loadPersistedPromptHistory, savePersistedPromptHistory, savePersistedRuntimeState } from "./runtime/persistence.js";
 import { executeInternalTool, getInternalToolDefinitions } from "./runtime/tools.js";
-import { CODEX_MODEL_CATALOG, DEFAULT_CODEX_MODEL, getCodexModelDefinition, normalizeCodexModel } from "./models.js";
+import { DEFAULT_CODEX_MODEL, getCodexModelDefinition, normalizeCodexModel } from "./models.js";
+import { getProviderDefinition, getProviderModelOptions, type ProviderModelOption } from "./provider/registry.js";
 import { ANSI, padLine, padVisibleLine, renderRule, renderScreen, resetScreenRenderer, tintLine, truncateLine, wrapText } from "./tui/primitives.js";
 import { autocompletePromptBuffer, describePromptHint, type PromptCompletionResult } from "./cli/autocomplete.js";
 import { COMMAND_CATALOG } from "./cli/catalog.js";
@@ -323,7 +325,7 @@ interface RuntimeTuiState {
   historyPopupIndex: number;
   modelPickerOpen: boolean;
   modelPickerIndex: number;
-  modelPickerEntries: Array<{ id: string; description: string; current: boolean }>;
+  modelPickerEntries: Array<{ id: string; description: string; current: boolean; disabledReason?: string }>;
   modelPickerQuery: string;
   chatScrollOffset: number;
   latestUserMessage: string | null;
@@ -792,6 +794,7 @@ export async function runPromptCommand(session: RuntimeSession, prompt: string):
     // Skill commands with autoInvokeAfterSkill fall through to model invocation
     if (commandResult.ok && commandResult.autoInvokeAfterSkill) {
       process.stdout.write(`${commandResult.output}\n`);
+      effectivePrompt = buildActiveSkillExecutionPrompt(session, effectivePrompt);
     } else if (commandResult.ok) {
       setRuntimeAction(session, "ready", "command complete");
       recordRuntimeEvent(session, {
@@ -1102,6 +1105,22 @@ function handleSkillCommand(session: RuntimeSession, args: string[]): RuntimeCom
     activity: `skill routed · ${resolution.skill.name}`,
     autoInvokeAfterSkill: true,
   };
+}
+
+function buildActiveSkillExecutionPrompt(session: RuntimeSession, originalCommand: string): string {
+  const skill = session.activeSkill;
+  if (!skill) {
+    return originalCommand;
+  }
+
+  return [
+    `Execute active skill ${skill.name} now.`,
+    `Args: ${skill.args || "(none)"}`,
+    `Original command: ${originalCommand}`,
+    "Follow skill workflow end-to-end with available tools.",
+    "Do not only acknowledge activation, readiness, or start state.",
+    "Ask only for required approval gates or real blockers.",
+  ].join("\n");
 }
 
 function formatDiagnosticSection(
@@ -1863,11 +1882,11 @@ function handleModelCommand(session: RuntimeSession, args: string[]): RuntimeCom
     };
   }
 
-  const normalizedModel = normalizeModelForProvider(provider, requestedModel);
+  const normalizedModel = normalizeModelForProvider(session, provider, requestedModel);
   if (!normalizedModel) {
     return {
       ok: false,
-      message: `model ${requestedModel} is not valid for ${provider}`,
+      message: `model ${requestedModel} is not available for ${provider}`,
       activity: `model rejected · ${requestedModel}`,
     };
   }
@@ -1884,10 +1903,16 @@ function handleModelCommand(session: RuntimeSession, args: string[]): RuntimeCom
 }
 
 function formatProviderStatus(session: RuntimeSession, detailMode: DetailMode = "compact"): string {
+  const definition = getProviderDefinition(session.providerRegistry, session.providerTransport.activeProvider);
+  const registryWarnings = [
+    ...(session.providerRegistry.warnings ?? []),
+    ...(definition?.warnings ?? []),
+  ];
   const compactRows: DiagnosticRow[] = [
     ["provider", session.provider],
     ["model", getCurrentProviderModel(session)],
     ["transport", session.providerTransport.mode],
+    ["wire-api", definition?.wireApi ?? "unknown"],
     ["auth-gate", session.providerTransport.authGate],
     ["active", session.providerTransport.activeProvider],
     ["caveats", formatTransportCaveat(session)],
@@ -1901,8 +1926,12 @@ function formatProviderStatus(session: RuntimeSession, detailMode: DetailMode = 
     ["transport", formatTransportSummary(session)],
     ["adapter", session.providerTransport.adapter],
     ["mode", session.providerTransport.mode],
+    ["wire-api", definition?.wireApi ?? "unknown"],
+    ["base-url", definition?.baseUrl ?? "none"],
     ["auth-source", session.providerTransport.authSource],
     ["auth-gate", session.providerTransport.authGate],
+    ["registry", definition?.disabledReason ? `disabled · ${definition.disabledReason}` : "ready"],
+    ["registry-warnings", registryWarnings.length > 0 ? registryWarnings.join(" | ") : "none"],
     ["capabilities", formatTransportCapabilities(session)],
     ["caveats", formatTransportCaveat(session)],
   ];
@@ -2231,24 +2260,20 @@ function getCurrentProviderModel(session: RuntimeSession): string {
 }
 
 function formatAvailableModels(session: RuntimeSession, provider: string): string {
-  if (provider === "codex") {
-    const apiOnly = session.providerTransport.mode !== "cli-exec";
-    return getAvailableModelsForProvider(session, provider)
-      .map((definition) => definition.id)
-      .join(", ");
+  const models = getAvailableModelsForProvider(session, provider);
+  if (models.length === 0) {
+    return "no catalog";
   }
-
-  const configuredModels = session.providerRouting.modelSelection.configuredModels as Record<string, string | undefined>;
-  const configured = configuredModels[provider];
-  return configured ? configured : "no catalog";
+  return models
+    .map((definition) => definition.disabledReason ? `${definition.id} (${definition.disabledReason})` : definition.id)
+    .join(", ");
 }
 
-function getAvailableModelsForProvider(session: RuntimeSession, provider: string) {
-  if (provider === "codex") {
-    const apiOnly = session.providerTransport.mode !== "cli-exec";
-    return CODEX_MODEL_CATALOG.filter((definition) => !apiOnly || definition.supportedInApi);
+function getAvailableModelsForProvider(session: RuntimeSession, provider: string): ProviderModelOption[] {
+  const registryModels = getProviderModelOptions(session.providerRegistry, provider, session.providerTransport.mode);
+  if (registryModels.length > 0) {
+    return registryModels;
   }
-
   const configuredModels = session.providerRouting.modelSelection.configuredModels as Record<string, string | undefined>;
   const configured = configuredModels[provider];
   if (!configured) {
@@ -2268,14 +2293,15 @@ function getAvailableModelsForProvider(session: RuntimeSession, provider: string
   }];
 }
 
-function normalizeModelForProvider(provider: string, requestedModel: string): string | null {
-  if (provider === "codex") {
-    const normalized = normalizeCodexModel(requestedModel);
-    return getCodexModelDefinition(normalized) ? normalized : null;
+function normalizeModelForProvider(session: RuntimeSession, provider: string, requestedModel: string): string | null {
+  const requested = provider === "codex"
+    ? (normalizeCodexModel(requestedModel) ?? requestedModel.trim())
+    : requestedModel.trim();
+  if (!requested) {
+    return null;
   }
-
-  const normalized = requestedModel.trim();
-  return normalized.length > 0 ? normalized : null;
+  const match = getAvailableModelsForProvider(session, provider).find((model) => model.id === requested);
+  return match && !match.disabledReason ? match.id : null;
 }
 
 function toolResultToCommandResult(command: string, detail: string, result: ReturnType<typeof executeInternalTool>): RuntimeCommandResult {
@@ -2754,6 +2780,20 @@ async function runRuntimeTui(session: RuntimeSession): Promise<void> {
         return false;
       }
       const configuredModels = session.providerRouting.modelSelection.configuredModels as Record<string, string | undefined>;
+      if (selected.disabledReason) {
+        closeModelPicker();
+        setRuntimeAction(session, "error", `model unavailable · ${selected.id}`);
+        recordRuntimeEvent(session, {
+          kind: "command",
+          status: "blocked",
+          summary: "model picker rejected unavailable model",
+          detail: `${selected.id}: ${selected.disabledReason}`,
+        });
+        state.action = session.action;
+        pushActivity(`model unavailable · ${selected.id}`);
+        render();
+        return true;
+      }
       configuredModels[provider] = selected.id;
       refreshInstructionState(session);
       savePersistedRuntimeState(session);
@@ -2861,7 +2901,7 @@ async function runRuntimeTui(session: RuntimeSession): Promise<void> {
       if (prompt.length === 0) {
         return;
       }
-      const effectivePrompt = toSkillCommandFromShorthand(prompt) ?? prompt;
+      let effectivePrompt = toSkillCommandFromShorthand(prompt) ?? prompt;
 
       const memoryMutation = parseMemoryMutationCommand(effectivePrompt);
       if (memoryMutation) {
@@ -2973,6 +3013,7 @@ async function runRuntimeTui(session: RuntimeSession): Promise<void> {
         // Skill commands with autoInvokeAfterSkill fall through to model invocation
         if (commandResult.ok && commandResult.autoInvokeAfterSkill) {
           process.stdout.write(`${commandResult.output}\n`);
+          effectivePrompt = buildActiveSkillExecutionPrompt(session, effectivePrompt);
           state.promptBuffer = "";
           state.promptCursor = 0;
           // fall through to provider request below
@@ -3651,6 +3692,7 @@ function syncTuiEventBuffers(session: RuntimeSession, state: RuntimeTuiState): v
     id: entry.id,
     description: entry.description,
     current: entry.id === currentModel,
+    disabledReason: entry.disabledReason,
   }));
 }
 
@@ -4543,7 +4585,8 @@ function renderModelPicker(state: RuntimeTuiState, width: number): string[] {
     const absoluteIndex = start + index;
     const selected = absoluteIndex === state.modelPickerIndex;
     const currentMark = entry.current ? " • current" : "";
-    return wrapText(`${selected ? "›" : " "} ${entry.id}${currentMark} - ${entry.description}`, Math.max(20, boxWidth - 6));
+    const disabledMark = entry.disabledReason ? ` • unavailable: ${entry.disabledReason}` : "";
+    return wrapText(`${selected ? "›" : " "} ${entry.id}${currentMark}${disabledMark} - ${entry.description}`, Math.max(20, boxWidth - 6));
   });
 
   return renderMessageBox(
@@ -5298,13 +5341,13 @@ export function summarizeTurnEvents(events: RuntimeSession["events"]): string[] 
   return lines;
 }
 
-function getFilteredModelPickerEntries(state: RuntimeTuiState): Array<{ id: string; description: string; current: boolean }> {
+function getFilteredModelPickerEntries(state: RuntimeTuiState): Array<{ id: string; description: string; current: boolean; disabledReason?: string }> {
   const query = state.modelPickerQuery.trim().toLowerCase();
   if (!query) {
     return state.modelPickerEntries;
   }
   return state.modelPickerEntries.filter((entry) =>
-    entry.id.toLowerCase().includes(query) || entry.description.toLowerCase().includes(query),
+    entry.id.toLowerCase().includes(query) || entry.description.toLowerCase().includes(query) || (entry.disabledReason ?? "").toLowerCase().includes(query),
   );
 }
 
@@ -5519,7 +5562,8 @@ function formatActivityLine(message: string): string {
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
-  main().catch((error: unknown) => {
+  main().catch(async (error: unknown) => {
+    await captureCliException(error);
     const message = error instanceof Error ? error.stack ?? error.message : String(error);
     process.stderr.write(`${message}\n`);
     process.exitCode = 1;

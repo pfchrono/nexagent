@@ -101,8 +101,7 @@ function completeSkillShorthand(cwd: string, input: string, tokenStart = 0, sele
   const needle = parsed ? normalizeSkillToken(parsed.skillName) : "";
 
   const matches = skills
-    .filter((s) => normalizeSkillToken(s.name).startsWith(needle))
-    .slice(0, 6);
+    .filter((s) => normalizeSkillToken(s.name).startsWith(needle));
 
   if (matches.length === 0) {
     return emptyCompletion(input);

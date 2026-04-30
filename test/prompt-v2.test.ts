@@ -96,6 +96,56 @@ test("buildPromptV2 emits stable section snapshot for default codex cli prompt",
   assert.match(prompt.prompt, /Transport: Codex CLI \(codex-cli-exec\); auth=ready\./);
 });
 
+test("buildPromptV2 tells models to infer test targets from repo evidence", () => {
+  const prompt = buildPromptV2({
+    session: createInstructionContext(),
+    prompt: "Run a real no-hand-holding harness test: simple, advanced, and export.",
+  });
+
+  assert.match(prompt.prompt, /no-hand-holding run/);
+  assert.match(prompt.prompt, /Do not ask user to say proceed/);
+  assert.match(prompt.prompt, /choose the nearest representative target/);
+  assert.match(prompt.prompt, /A missing user-selected target is not a blocker/);
+});
+
+test("buildPromptV2 includes recent turns so short acknowledgments resolve prior proposal", () => {
+  const session = createInstructionContext();
+  session.conversation = [
+    {
+      role: "user",
+      content: "Diagnose why the model only talks instead of using tools.",
+    },
+    {
+      role: "assistant",
+      content: "If you want, next I can do the same style scan on /home/pfchrono/code/openclaw and give directory map, language breakdown, likely entrypoints, and tests.",
+    },
+  ];
+
+  const prompt = buildPromptV2({
+    session,
+    prompt: "ok",
+  });
+
+  assert.match(prompt.prompt, /## Conversation State/);
+  assert.match(prompt.prompt, /Short confirmations like ok, yes, do that, same, or continue/);
+  assert.match(prompt.prompt, /Recent assistant:/);
+  assert.match(prompt.prompt, /openclaw/);
+  assert.match(prompt.prompt, /## Current Invocation/);
+  assert.match(prompt.prompt, /- ok/);
+});
+
+test("buildPromptV2 explains Nexsight processed-output workflow", () => {
+  const prompt = buildPromptV2({
+    session: createInstructionContext(),
+    prompt: "Use Nexsight to inspect the repo and summarize findings.",
+  });
+
+  assert.match(prompt.prompt, /Use Nexsight like context-mode/);
+  assert.match(prompt.prompt, /prints distilled findings/);
+  assert.ok(prompt.prompt.includes("parse stdout/stderr"));
+  assert.match(prompt.prompt, /run a narrower follow-up query/);
+});
+
 test("buildPromptV2 applies provider section overrides", () => {
   const prompt = buildPromptV2({
     session: createInstructionContext(),
@@ -168,7 +218,11 @@ test("buildPromptV2 snapshots archivist and active skill conversation context", 
   assert.match(prompt.prompt, /Archivist: enabled; retrieval matches=1/);
   assert.match(prompt.prompt, /Archivist retrieval: project-memory/);
   assert.match(prompt.prompt, /use codex-http for image attachments/);
+  assert.match(prompt.prompt, /## Active Skill/);
   assert.match(prompt.prompt, /Active skill: gsd-next/);
+  assert.match(prompt.prompt, /Args: \(none\)/);
+  assert.match(prompt.prompt, /Do not only say activated, started, ready/);
+  assert.match(prompt.prompt, /Advance to next GSD step\./);
 });
 
 test("buildPromptV2 switches provider guidance by transport", () => {
