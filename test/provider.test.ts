@@ -7,6 +7,7 @@ import test from "node:test";
 import { invokeCodexChatGptHttpTransport, resolveCodexAuthJson } from "../src/provider/codex-chatgpt-http.js";
 import { executeProviderRequest, type ProviderRequest } from "../src/provider.js";
 import { createDefaultProviderRegistry } from "../src/provider/registry.js";
+import { initializeRuntimeDebug } from "../src/runtime/debug.js";
 import type { RuntimeSession } from "../src/runtime/session.js";
 
 function createSession(provider = "codex", model: string | null = "gpt-5.4"): RuntimeSession {
@@ -190,6 +191,45 @@ test("executeProviderRequest returns codex output", async () => {
     fallbackApplied: false,
     output: "hello world",
   });
+});
+
+test("executeProviderRequest writes verbose debug input and output", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-debug-provider-"));
+  const logPath = path.join(cwd, "provider.log");
+  const session = createSession();
+  session.debug = initializeRuntimeDebug({ enabled: true, verbose: true, debugFile: logPath });
+
+  try {
+    const result = await executeProviderRequest(
+      {
+        session,
+        prompt: "say hi",
+      },
+      {
+        exec: async () => ({
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+          output: "hello debug\n",
+        }),
+        http: async () => {
+          throw new Error("http should not be used");
+        },
+        codexHttp: async () => {
+          throw new Error("codex-http should not be used");
+        },
+      },
+    );
+
+    assert.equal(result.ok, true);
+    const log = await readFile(logPath, "utf8");
+    assert.match(log, /provider\.assembled_prompt/);
+    assert.match(log, /provider\.invocation/);
+    assert.match(log, /say hi/);
+    assert.match(log, /hello debug/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
 });
 
 test("executeProviderRequest fails when provider exits zero but assistant text is empty", async () => {

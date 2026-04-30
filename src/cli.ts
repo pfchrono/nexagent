@@ -11,6 +11,7 @@ import { executeProviderRequest, type ImageAttachment } from "./provider.js";
 import { launchCodexLogin, probeCodexAuthStateSync } from "./runtime/auth.js";
 import { checkpointArchivistSession, saveArchivistMemory } from "./runtime/archivist.js";
 import { bootstrapRuntime } from "./runtime/bootstrap.js";
+import { initializeRuntimeDebug, writeDebugLog, type RuntimeDebugOptions } from "./runtime/debug.js";
 import { buildPromptV2, summarizePromptV2 } from "./runtime/prompt-v2.js";
 import { checkpointNexsightSession, getNexsightStats, purgeNexsight, searchNexsight } from "./runtime/nexsight.js";
 import { loadPersistedPromptHistory, savePersistedPromptHistory, savePersistedRuntimeState } from "./runtime/persistence.js";
@@ -378,6 +379,7 @@ async function main(): Promise<void> {
     const prompt = resolvePrompt(command.prompt, await readPipedStdin(process.stdin));
     const runtime = await bootstrapRuntime(process.cwd());
     const session = createRuntimeSession(runtime);
+    configureSessionDebug(session, command.debug);
     if (command.yolo) {
       applyYoloMode(session);
     }
@@ -388,6 +390,7 @@ async function main(): Promise<void> {
   if (!process.stdout.isTTY || !process.stdin.isTTY) {
     const runtime = await bootstrapRuntime(process.cwd());
     const session = createRuntimeSession(runtime);
+    configureSessionDebug(session, command.debug);
     if (command.yolo) {
       applyYoloMode(session);
     }
@@ -415,6 +418,7 @@ async function main(): Promise<void> {
     }
 
     const session = createRuntimeSession(runtime);
+    configureSessionDebug(session, command.debug);
     if (command.yolo) {
       applyYoloMode(session);
     }
@@ -439,12 +443,14 @@ interface RunCommand {
   prompt: string | null;
   yolo: boolean;
   openTui?: boolean;
+  debug: RuntimeDebugOptions;
 }
 
 interface InspectCommand {
   kind: "inspect";
   yolo: boolean;
   openTui?: boolean;
+  debug: RuntimeDebugOptions;
 }
 
 interface HelpCommand {
@@ -457,6 +463,9 @@ export const LAUNCH_SWITCHES = [
   { flag: "--help", alias: "-h", description: "show this help and exit" },
   { flag: "--opentui", description: "start OpenTUI terminal interface instead of classic TUI" },
   { flag: "--yolo", description: "bypass guarded approval prompts while preserving destructive-command blocks" },
+  { flag: "--debug", description: "write diagnostic log to /tmp/nexagent-debug-<timestamp>.log" },
+  { flag: "--debugfile", description: "write diagnostic log to a .log path under home or /tmp" },
+  { flag: "--verbose", description: "include internal core input/output in debug logs" },
 ] as const;
 
 type LaunchSwitch = {
@@ -486,10 +495,11 @@ export function parseCommand(argv: string[]): CliCommand {
   }
   const yolo = argv.includes("--yolo");
   const openTui = argv.includes("--opentui");
-  const normalizedArgv = argv.filter((arg) => arg !== "--yolo" && arg !== "--opentui");
+  const debug = parseDebugOptions(argv);
+  const normalizedArgv = stripLaunchSwitches(argv);
 
   if (normalizedArgv[0] !== "run") {
-    return openTui ? { kind: "inspect", yolo, openTui } : { kind: "inspect", yolo };
+    return openTui ? { kind: "inspect", yolo, openTui, debug } : { kind: "inspect", yolo, debug };
   }
 
   const prompt = normalizedArgv.slice(1).join(" ").trim();
@@ -497,11 +507,55 @@ export function parseCommand(argv: string[]): CliCommand {
     kind: "run",
     prompt: prompt.length > 0 ? prompt : null,
     yolo,
+    debug,
   };
   if (openTui) {
     command.openTui = true;
   }
   return command;
+}
+
+function configureSessionDebug(session: RuntimeSession, options: RuntimeDebugOptions): void {
+  session.debug = initializeRuntimeDebug(options);
+  writeDebugLog(session.debug, "session.start", {
+    session: session.id,
+    cwd: session.cwd,
+    provider: session.provider,
+    transport: session.providerTransport.mode,
+    verbose: session.debug.verbose,
+  });
+  if (session.debug.logPath) {
+    process.stderr.write(`debug log: ${session.debug.logPath}\n`);
+  }
+}
+
+function parseDebugOptions(argv: string[]): RuntimeDebugOptions {
+  const debugFileIndex = argv.indexOf("--debugfile");
+  const debugFile = debugFileIndex >= 0 ? argv[debugFileIndex + 1] ?? null : null;
+  if (debugFileIndex >= 0 && !debugFile) {
+    throw new Error("usage: --debugfile <path.log>");
+  }
+  return {
+    enabled: argv.includes("--debug"),
+    verbose: argv.includes("--verbose"),
+    debugFile,
+  };
+}
+
+function stripLaunchSwitches(argv: string[]): string[] {
+  const normalized: string[] = [];
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (arg === "--yolo" || arg === "--opentui" || arg === "--debug" || arg === "--verbose") {
+      continue;
+    }
+    if (arg === "--debugfile") {
+      index += 1;
+      continue;
+    }
+    normalized.push(arg);
+  }
+  return normalized;
 }
 
 export function formatLaunchHelp(): string {
@@ -757,6 +811,12 @@ export async function runPromptCommand(session: RuntimeSession, prompt: string):
     effectivePrompt = skillCommand;
   }
   const trimmedPrompt = effectivePrompt;
+  if (session.debug) {
+    writeDebugLog(session.debug, "prompt.accepted", {
+      chars: trimmedPrompt.length,
+      prompt: trimmedPrompt,
+    }, { verboseOnly: true });
+  }
   const memoryMutation = parseMemoryMutationCommand(trimmedPrompt);
 
   if (memoryMutation) {
@@ -886,6 +946,14 @@ export async function runPromptCommand(session: RuntimeSession, prompt: string):
     const result = await executeProviderRequest({ session, prompt: effectivePrompt });
 
     if (result.ok) {
+      if (session.debug) {
+        writeDebugLog(session.debug, "provider.result", {
+          provider: result.provider,
+          model: result.model,
+          transport: result.transport,
+          output: result.output,
+        }, { verboseOnly: true });
+      }
       recordConversationTurn(session, "user", effectivePrompt);
       recordConversationTurn(session, "assistant", result.output);
       recordTurnTelemetry(session, effectivePrompt, result.output);
@@ -897,6 +965,15 @@ export async function runPromptCommand(session: RuntimeSession, prompt: string):
     }
 
     setRuntimeAction(session, "error", result.message);
+    if (session.debug) {
+      writeDebugLog(session.debug, "provider.failure", {
+        provider: result.provider,
+        model: result.model,
+        transport: result.transport,
+        message: result.message,
+        detail: result.detail,
+      });
+    }
     recordRuntimeEvent(session, {
       kind: "provider",
       status: "failed",

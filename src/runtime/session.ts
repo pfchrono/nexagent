@@ -4,6 +4,7 @@ import type { PersistedTransportMode } from "./persistence.js";
 import { hasCodexAuthJsonCredentialsSync } from "../provider/codex-chatgpt-http.js";
 import { getCodexModelDefinition } from "../models.js";
 import { getTransportProviderDefinition } from "../provider/registry.js";
+import { createRuntimeDebugState, type RuntimeDebugState } from "./debug.js";
 
 export type RuntimeActionStatus = "ready" | "running" | "error";
 
@@ -112,6 +113,7 @@ export interface RuntimeSession extends RuntimeState {
   conversation: RuntimeConversationTurn[];
   compaction: RuntimeCompactionState;
   operationControls: RuntimeOperationControlsState;
+  debug?: RuntimeDebugState;
 }
 
 export function createRuntimeSession(runtime: RuntimeBootstrap): RuntimeSession {
@@ -128,6 +130,7 @@ export function createRuntimeSession(runtime: RuntimeBootstrap): RuntimeSession 
     conversation: [],
     compaction: createRuntimeCompactionState(),
     operationControls,
+    debug: createRuntimeDebugState(),
     ...runtimeState,
   };
 }

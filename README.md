@@ -20,6 +20,7 @@ Terminal-first AI coding harness for local operator-driven development.
 - Supports `$skill` shorthand for skill routing.
 - Supports `!<command>` for guarded shell command transcript output.
 - Supports `--yolo` session mode for guarded approval bypass while preserving destructive shell/tool blocks.
+- Supports `--debug`, `--debugfile <path.log>`, and `--verbose` for diagnostic logs.
 - Supports `/cavemanmode` and `/deadpoolmode` instruction overlays for concise/operator-style model replies.
 - Shows cockpit-style TUI panels for turn metadata, warnings, structured actions/results, risk/outcome state, recovery actions, navigation hints, and terminal capabilities.
 - Includes an opt-in OpenTUI shell baseline via `--opentui` for the ongoing v1.5 terminal UI rewrite.
@@ -101,6 +102,20 @@ bun run dev -- --opentui
 ```
 
 OpenTUI is not the default path yet. Current shell work is focused on boot/render/input safety before the composer, command surface, transcript scroll, and cockpit controls are moved over.
+
+Show launch help:
+
+```bash
+bun run dev -- --help
+```
+
+Debug a run:
+
+```bash
+bun run dev -- --debug --debugfile nexagent-debug.log --verbose run "inspect repo status"
+```
+
+`--debug` writes to `/tmp/nexagent-debug-<timestamp>.log`. `--debugfile` accepts `.log` paths under the user home or `/tmp`; bare filenames are stored under `~/.nexagent/debug/`. `--verbose` includes internal prompt/input/output details in debug logs and should be treated as sensitive.
 
 ## Configuration
 

@@ -13,6 +13,7 @@ import {
   withSentryAiToolSpan,
 } from "./instrument.js";
 import { applyArchivistRetrieval } from "./runtime/archivist.js";
+import { writeDebugLog } from "./runtime/debug.js";
 import { assemblePrompt } from "./runtime/instructions.js";
 import { consumeOperatorSteer, estimateTokenCount, recordRuntimeEvent, setRuntimeAction } from "./runtime/session.js";
 import type { RuntimeApprovalRequest, RuntimeSession } from "./runtime/session.js";
@@ -207,6 +208,14 @@ export async function executeProviderRequest(
     });
     await applyArchivistRetrieval(request.session, request.prompt);
     const assembled = await assemblePrompt(request);
+    if (request.session.debug) {
+      writeDebugLog(request.session.debug, "provider.assembled_prompt", {
+        provider,
+        model,
+        transport: request.session.providerTransport.mode,
+        prompt: assembled.prompt,
+      }, { verboseOnly: true });
+    }
     if (request.session.providerTransport.mode === "http-responses") {
       return executeOpenAiNativeToolLoop(request, assembled.prompt, model, transport, invokers.http);
     }
@@ -260,6 +269,16 @@ export async function executeProviderRequest(
           ? { ...request, prompt: request.prompt, instructions: prompt, nativeInput: codexHttpInput, abortSignal: signal }
           : { ...request, prompt, abortSignal: signal },
       );
+      if (request.session.debug) {
+        writeDebugLog(request.session.debug, "provider.invocation", {
+          cycle,
+          step,
+          adapter: transport.id,
+          input: prompt,
+          output: invocation.output,
+          exitCode: invocation.exitCode,
+        }, { verboseOnly: true });
+      }
 
       if (invocation.exitCode !== 0) {
         return createCodexFailure(provider, model, invocation.stderr, invocation.stdout, transport.id);
@@ -457,6 +476,14 @@ export async function executeProviderRequest(
             ? { ...request, prompt: request.prompt, instructions: finalPrompt, nativeInput: codexHttpInput, abortSignal: signal }
             : { ...request, prompt: finalPrompt, abortSignal: signal },
         );
+        if (request.session.debug) {
+          writeDebugLog(request.session.debug, "provider.final_invocation", {
+            adapter: transport.id,
+            input: finalPrompt,
+            output: finalInvocation.output,
+            exitCode: finalInvocation.exitCode,
+          }, { verboseOnly: true });
+        }
         if (finalInvocation.exitCode !== 0) {
           return createCodexFailure(provider, model, finalInvocation.stderr, finalInvocation.stdout, transport.id);
         }
@@ -826,6 +853,15 @@ async function executeOpenAiNativeToolLoop(
         abortSignal: signal,
       }),
     );
+    if (request.session.debug) {
+      writeDebugLog(request.session.debug, "provider.native_invocation", {
+        step,
+        adapter: transport.id,
+        input: nativeInput,
+        output: invocation.output,
+        exitCode: invocation.exitCode,
+      }, { verboseOnly: true });
+    }
 
     if (invocation.exitCode !== 0) {
       return createCodexFailure(request.session.provider, model, invocation.stderr, invocation.stdout, transport.id);

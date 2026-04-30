@@ -142,17 +142,24 @@ test("renderRuntimeTui shows warning lane without pinned cockpit panels", async 
 
 test("parseCommand preserves empty run prompt for resolvePrompt", async () => {
   const { parseCommand } = await import("../src/cli.js");
+  const debug = { enabled: false, verbose: false, debugFile: null };
 
-  assert.deepEqual(parseCommand([]), { kind: "inspect", yolo: false });
+  assert.deepEqual(parseCommand([]), { kind: "inspect", yolo: false, debug });
   assert.deepEqual(parseCommand(["--help"]), { kind: "help" });
   assert.deepEqual(parseCommand(["-h"]), { kind: "help" });
   assert.deepEqual(parseCommand(["help"]), { kind: "help" });
-  assert.deepEqual(parseCommand(["run", "say", "hi"]), { kind: "run", prompt: "say hi", yolo: false });
-  assert.deepEqual(parseCommand(["run"]), { kind: "run", prompt: null, yolo: false });
-  assert.deepEqual(parseCommand(["--yolo"]), { kind: "inspect", yolo: true });
-  assert.deepEqual(parseCommand(["--opentui"]), { kind: "inspect", yolo: false, openTui: true });
-  assert.deepEqual(parseCommand(["--yolo", "run", "say", "hi"]), { kind: "run", prompt: "say hi", yolo: true });
-  assert.deepEqual(parseCommand(["run", "--yolo", "say", "hi"]), { kind: "run", prompt: "say hi", yolo: true });
+  assert.deepEqual(parseCommand(["run", "say", "hi"]), { kind: "run", prompt: "say hi", yolo: false, debug });
+  assert.deepEqual(parseCommand(["run"]), { kind: "run", prompt: null, yolo: false, debug });
+  assert.deepEqual(parseCommand(["--yolo"]), { kind: "inspect", yolo: true, debug });
+  assert.deepEqual(parseCommand(["--opentui"]), { kind: "inspect", yolo: false, openTui: true, debug });
+  assert.deepEqual(parseCommand(["--yolo", "run", "say", "hi"]), { kind: "run", prompt: "say hi", yolo: true, debug });
+  assert.deepEqual(parseCommand(["run", "--yolo", "say", "hi"]), { kind: "run", prompt: "say hi", yolo: true, debug });
+  assert.deepEqual(parseCommand(["--debug", "--verbose", "--debugfile", "trace.log", "run", "say", "hi"]), {
+    kind: "run",
+    prompt: "say hi",
+    yolo: false,
+    debug: { enabled: true, verbose: true, debugFile: "trace.log" },
+  });
 });
 
 test("formatLaunchHelp documents launch switches", async () => {
@@ -168,6 +175,15 @@ test("formatLaunchHelp documents launch switches", async () => {
   }
   assert.match(output, /nexagent run/);
   assert.match(output, /\/help - show available runtime commands/);
+});
+
+test("debug log paths stay under home or temp roots", async () => {
+  const { resolveDebugLogPath } = await import("../src/runtime/debug.js");
+
+  assert.match(resolveDebugLogPath(null, new Date("2026-04-30T12:00:00.000Z")), /\/tmp\/nexagent-debug-2026-04-30T12-00-00-000Z\.log$/);
+  assert.match(resolveDebugLogPath("custom.log"), /\/\.nexagent\/debug\/custom\.log$/);
+  assert.throws(() => resolveDebugLogPath("/etc/nexagent.log"), /debug file must be under/);
+  assert.throws(() => resolveDebugLogPath("custom.txt"), /debug file must end with \.log/);
 });
 
 test("applyYoloMode is session scoped and leaves persisted defaults intact", async () => {

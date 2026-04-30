@@ -51,6 +51,12 @@ Use existing package scripts only:
 Do not invent commands. If command surface changes, update `package.json`, `README.md`, and this file.
 If a new launch switch is added or removed in `parseCommand`, update `formatLaunchHelp()` and tests so `nexagent --help` stays complete.
 
+## Debugging Runtime
+
+- Use `--debug` to create a diagnostic log at `/tmp/nexagent-debug-<timestamp>.log`.
+- Use `--debugfile <name>.log` or a `.log` path under the user home or `/tmp` for a specific diagnostic file. Do not allow debug logs in protected system paths such as `/etc`, `/usr`, `/bin`, or `/var`.
+- Use `--verbose` with debug logging when internal core prompt/input/output is needed for diagnosis. Treat verbose debug logs as sensitive because they can contain prompts, tool traces, provider payloads, and model output.
+
 ## Repo Rules
 
 - Prefer small, reversible changes.
