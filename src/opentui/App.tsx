@@ -255,6 +255,9 @@ export function OpenTuiApp({ view, session, keyboardSource, promptHistory = [], 
         appendOutput(result.message);
       }
       setShellNotice(result ? result.activity : "command routed");
+      if (result?.ok && intent.input.trim() === "/quit") {
+        onExit();
+      }
       return;
     }
     appendOutput(`prompt queued: ${intent.input}`);

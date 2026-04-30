@@ -28,6 +28,7 @@ test("OpenTUI app shell renders live view fields and Phase 66 command surfaces",
   assert.doesNotMatch(source, /key\.name === "q" \|\|/);
   assert.match(source, /outputLines/);
   assert.match(source, /result\.output/);
+  assert.match(source, /intent\.input\.trim\(\) === "\/quit"/);
   assert.match(source, /ALT_V_UNSUPPORTED_MESSAGE/);
   assert.match(source, /COMPOSER_CURSOR/);
   assert.match(source, /#8bd5ff/);

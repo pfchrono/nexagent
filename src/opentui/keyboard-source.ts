@@ -13,14 +13,14 @@ export interface OpenTuiKeyboardSource {
 }
 
 interface KeyInputEmitter {
-  on(event: "keypress", handler: (key: OpenTuiKeyEvent) => void): void;
-  off(event: "keypress", handler: (key: OpenTuiKeyEvent) => void): void;
+  on(event: "data", handler: (chunk: Buffer | string) => void): void;
+  off(event: "data", handler: (chunk: Buffer | string) => void): void;
 }
 
 export function createBufferedKeyboardSource(keyInput: KeyInputEmitter): OpenTuiKeyboardSource {
   const subscribers = new Set<(key: OpenTuiKeyEvent) => void>();
   const pending: OpenTuiKeyEvent[] = [];
-  const listener = (key: OpenTuiKeyEvent): void => {
+  const emit = (key: OpenTuiKeyEvent): void => {
     if (subscribers.size === 0) {
       pending.push(key);
       return;
@@ -29,8 +29,13 @@ export function createBufferedKeyboardSource(keyInput: KeyInputEmitter): OpenTui
       subscriber(key);
     }
   };
+  const listener = (chunk: Buffer | string): void => {
+    for (const key of parseRawKeyboardInput(chunk)) {
+      emit(key);
+    }
+  };
 
-  keyInput.on("keypress", listener);
+  keyInput.on("data", listener);
 
   return {
     subscribe(handler) {
@@ -48,7 +53,124 @@ export function createBufferedKeyboardSource(keyInput: KeyInputEmitter): OpenTui
     dispose() {
       subscribers.clear();
       pending.length = 0;
-      keyInput.off("keypress", listener);
+      keyInput.off("data", listener);
     },
+  };
+}
+
+export function parseRawKeyboardInput(chunk: Buffer | string): OpenTuiKeyEvent[] {
+  const input = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : chunk;
+  const events: OpenTuiKeyEvent[] = [];
+  for (let index = 0; index < input.length; index += 1) {
+    const char = input[index] ?? "";
+    if (char === "\x1b") {
+      const parsed = parseEscapeSequence(input, index);
+      index = parsed.nextIndex;
+      if (parsed.event) {
+        events.push(parsed.event);
+      }
+      continue;
+    }
+    const event = keyEventForCharacter(char);
+    if (event) {
+      events.push(event);
+    }
+  }
+  return events;
+}
+
+function parseEscapeSequence(input: string, startIndex: number): { event: OpenTuiKeyEvent | null; nextIndex: number } {
+  const next = input[startIndex + 1];
+  if (!next) {
+    return { event: specialKey("escape", "\x1b"), nextIndex: startIndex };
+  }
+  if (next === "[") {
+    let endIndex = startIndex + 2;
+    while (endIndex < input.length && !/[A-Za-z~]/.test(input[endIndex] ?? "")) {
+      endIndex += 1;
+    }
+    const sequence = input.slice(startIndex, Math.min(endIndex + 1, input.length));
+    const final = input[endIndex];
+    const mapped = mapCsiSequence(sequence, final);
+    return { event: mapped, nextIndex: Math.min(endIndex, input.length - 1) };
+  }
+  if (next === "]") {
+    const belIndex = input.indexOf("\x07", startIndex + 2);
+    const stIndex = input.indexOf("\x1b\\", startIndex + 2);
+    const endCandidates = [belIndex, stIndex >= 0 ? stIndex + 1 : -1].filter((value) => value >= 0);
+    return { event: null, nextIndex: endCandidates.length > 0 ? Math.min(...endCandidates) : input.length - 1 };
+  }
+  if (next.length === 1 && /[ -~]/.test(next)) {
+    const event = keyEventForCharacter(next, true);
+    return { event, nextIndex: startIndex + 1 };
+  }
+  return { event: null, nextIndex: startIndex + 1 };
+}
+
+function mapCsiSequence(sequence: string, final: string | undefined): OpenTuiKeyEvent | null {
+  switch (final) {
+    case "A":
+      return specialKey("up", sequence);
+    case "B":
+      return specialKey("down", sequence);
+    case "C":
+      return specialKey("right", sequence);
+    case "D":
+      return specialKey("left", sequence);
+    case "H":
+      return specialKey("home", sequence);
+    case "F":
+      return specialKey("end", sequence);
+    case "~": {
+      if (sequence === "\x1b[1~" || sequence === "\x1b[7~") {
+        return specialKey("home", sequence);
+      }
+      if (sequence === "\x1b[4~" || sequence === "\x1b[8~") {
+        return specialKey("end", sequence);
+      }
+      if (sequence === "\x1b[3~") {
+        return specialKey("delete", sequence);
+      }
+      return null;
+    }
+    default:
+      return null;
+  }
+}
+
+function keyEventForCharacter(char: string, meta = false): OpenTuiKeyEvent | null {
+  if (char === "\x03") {
+    return { name: "c", ctrl: true, meta: false, shift: false, option: false, sequence: char };
+  }
+  if (char === "\r" || char === "\n") {
+    return specialKey("return", char);
+  }
+  if (char === "\t") {
+    return specialKey("tab", char);
+  }
+  if (char === "\x7f" || char === "\b") {
+    return specialKey("backspace", char);
+  }
+  if (!/^[ -~]$/.test(char)) {
+    return null;
+  }
+  return {
+    name: char.toLowerCase(),
+    ctrl: false,
+    meta,
+    shift: char.toUpperCase() === char && char.toLowerCase() !== char,
+    option: meta,
+    sequence: char,
+  };
+}
+
+function specialKey(name: string, sequence: string): OpenTuiKeyEvent {
+  return {
+    name,
+    ctrl: false,
+    meta: false,
+    shift: false,
+    option: false,
+    sequence,
   };
 }

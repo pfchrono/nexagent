@@ -14,8 +14,9 @@ export async function runOpenTuiRuntime(session: RuntimeSession): Promise<void> 
     externalOutputMode: "passthrough",
     targetFps: 30,
     maxFps: 30,
+    useKittyKeyboard: null,
   });
-  const keyboardSource = createBufferedKeyboardSource(renderer.keyInput);
+  const keyboardSource = createBufferedKeyboardSource(process.stdin);
 
   let settled = false;
   await new Promise<void>((resolve) => {
