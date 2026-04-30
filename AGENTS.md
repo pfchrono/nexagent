@@ -49,6 +49,7 @@ Use existing package scripts only:
 - `bun run compile` — build platform binaries
 
 Do not invent commands. If command surface changes, update `package.json`, `README.md`, and this file.
+If a new launch switch is added or removed in `parseCommand`, update `formatLaunchHelp()` and tests so `nexagent --help` stays complete.
 
 ## Repo Rules
 

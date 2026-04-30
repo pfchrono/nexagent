@@ -156,13 +156,16 @@ test("parseCommand preserves empty run prompt for resolvePrompt", async () => {
 });
 
 test("formatLaunchHelp documents launch switches", async () => {
-  const { formatLaunchHelp } = await import("../src/cli.js");
+  const { LAUNCH_SWITCHES, formatLaunchHelp } = await import("../src/cli.js");
   const output = formatLaunchHelp();
 
   assert.match(output, /Usage:/);
-  assert.match(output, /--help, -h\s+show this help and exit/);
-  assert.match(output, /--opentui\s+start OpenTUI terminal interface/);
-  assert.match(output, /--yolo\s+bypass guarded approval prompts/);
+  for (const entry of LAUNCH_SWITCHES) {
+    assert.match(output, new RegExp(`${entry.flag.replace("-", "\\-")}.*${entry.description.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+    if ("alias" in entry) {
+      assert.match(output, new RegExp(entry.alias.replace("-", "\\-")));
+    }
+  }
   assert.match(output, /nexagent run/);
   assert.match(output, /\/help - show available runtime commands/);
 });

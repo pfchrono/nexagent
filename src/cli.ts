@@ -453,6 +453,18 @@ interface HelpCommand {
 
 type CliCommand = RunCommand | InspectCommand | HelpCommand;
 
+export const LAUNCH_SWITCHES = [
+  { flag: "--help", alias: "-h", description: "show this help and exit" },
+  { flag: "--opentui", description: "start OpenTUI terminal interface instead of classic TUI" },
+  { flag: "--yolo", description: "bypass guarded approval prompts while preserving destructive-command blocks" },
+] as const;
+
+type LaunchSwitch = {
+  flag: string;
+  alias?: string;
+  description: string;
+};
+
 export interface RuntimeTuiView {
   title: string;
   statusline: string | null;
@@ -502,9 +514,7 @@ export function formatLaunchHelp(): string {
     "  nexagent --help",
     "",
     "Launch switches:",
-    "  --help, -h   show this help and exit",
-    "  --opentui    start OpenTUI terminal interface instead of classic TUI",
-    "  --yolo       bypass guarded approval prompts while preserving destructive-command blocks",
+    ...LAUNCH_SWITCHES.map((entry) => formatLaunchSwitchHelp(entry)),
     "",
     "Commands:",
     "  run          execute one prompt from arguments and/or piped stdin",
@@ -513,6 +523,11 @@ export function formatLaunchHelp(): string {
     "In-session slash commands:",
     formatCommandCatalog(),
   ].join("\n");
+}
+
+function formatLaunchSwitchHelp(entry: LaunchSwitch): string {
+  const label = entry.alias ? `${entry.flag}, ${entry.alias}` : entry.flag;
+  return `  ${label.padEnd(12, " ")} ${entry.description}`;
 }
 
 export function resolvePrompt(prompt: string | null, pipedInput: string | null): string {
