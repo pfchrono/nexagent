@@ -6,9 +6,11 @@ test("OpenTUI app shell renders live view fields and Phase 66 command surfaces",
   const source = await readFile(new URL("../src/opentui/App.tsx", import.meta.url), "utf8");
 
   assert.doesNotMatch(source, /OpenTUI sidecar proof\. Full transcript port begins after migration contract\./);
-  assert.match(source, /view\.transcriptLines/);
+  assert.match(source, /view\.transcriptBlocks/);
   assert.match(source, /view\.composerHint/);
   assert.match(source, /traceExpanded/);
+  assert.match(source, /createOpenTuiTranscriptState/);
+  assert.match(source, /visibleLineWindow/);
   assert.doesNotMatch(source, /submitted shell intent:/);
   assert.doesNotMatch(source, /history placeholder - Phase 66/);
   assert.doesNotMatch(source, /model picker placeholder - Phase 66/);
@@ -27,11 +29,18 @@ test("OpenTUI app shell renders live view fields and Phase 66 command surfaces",
   assert.match(source, /subscribe/);
   assert.match(source, /selectedValue\.trim\(\) === composer\.text\.trim\(\)/);
   assert.doesNotMatch(source, /key\.name === "q" \|\|/);
-  assert.match(source, /outputLines/);
+  assert.match(source, /outputBlocks/);
+  assert.match(source, /createLocalOutputBlock/);
   assert.match(source, /result\.output/);
   assert.match(source, /intent\.input\.trim\(\) === "\/quit"/);
   assert.match(source, /ALT_V_UNSUPPORTED_MESSAGE/);
   assert.match(source, /COMPOSER_CURSOR/);
+  assert.match(source, /COPIED_RESULTS_NOTICE/);
+  assert.match(source, /copyTextToClipboardOsc52/);
+  assert.match(source, /onMouseScroll/);
+  assert.match(source, /selectable/);
+  assert.match(source, /selectionBg/);
+  assert.match(source, /PageUp\/PageDown Ctrl\+Up\/Ctrl\+Down wheel/);
   assert.match(source, /#8bd5ff/);
   assert.match(source, /#f9e2af/);
   assert.doesNotMatch(source, /\.\.\/provider/);

@@ -108,34 +108,53 @@ function parseEscapeSequence(input: string, startIndex: number): { event: OpenTu
 }
 
 function mapCsiSequence(sequence: string, final: string | undefined): OpenTuiKeyEvent | null {
+  const modifier = parseCsiModifier(sequence);
+  const withModifier = (name: string): OpenTuiKeyEvent => specialKey(name, sequence, modifier);
   switch (final) {
     case "A":
-      return specialKey("up", sequence);
+      return withModifier("up");
     case "B":
-      return specialKey("down", sequence);
+      return withModifier("down");
     case "C":
-      return specialKey("right", sequence);
+      return withModifier("right");
     case "D":
-      return specialKey("left", sequence);
+      return withModifier("left");
     case "H":
-      return specialKey("home", sequence);
+      return withModifier("home");
     case "F":
-      return specialKey("end", sequence);
+      return withModifier("end");
     case "~": {
       if (sequence === "\x1b[1~" || sequence === "\x1b[7~") {
-        return specialKey("home", sequence);
+        return withModifier("home");
       }
       if (sequence === "\x1b[4~" || sequence === "\x1b[8~") {
-        return specialKey("end", sequence);
+        return withModifier("end");
       }
       if (sequence === "\x1b[3~") {
-        return specialKey("delete", sequence);
+        return withModifier("delete");
+      }
+      if (sequence === "\x1b[5~") {
+        return withModifier("pageup");
+      }
+      if (sequence === "\x1b[6~") {
+        return withModifier("pagedown");
       }
       return null;
     }
     default:
       return null;
   }
+}
+
+function parseCsiModifier(sequence: string): Partial<OpenTuiKeyEvent> {
+  const match = sequence.match(/;(\d+)[A-Za-z~]$/);
+  const code = match ? Number(match[1]) : 1;
+  return {
+    shift: code === 2 || code === 4 || code === 6 || code === 8,
+    meta: code === 3 || code === 4 || code === 7 || code === 8,
+    option: code === 3 || code === 4 || code === 7 || code === 8,
+    ctrl: code === 5 || code === 6 || code === 7 || code === 8,
+  };
 }
 
 function keyEventForCharacter(char: string, meta = false): OpenTuiKeyEvent | null {
@@ -164,7 +183,7 @@ function keyEventForCharacter(char: string, meta = false): OpenTuiKeyEvent | nul
   };
 }
 
-function specialKey(name: string, sequence: string): OpenTuiKeyEvent {
+function specialKey(name: string, sequence: string, overrides: Partial<OpenTuiKeyEvent> = {}): OpenTuiKeyEvent {
   return {
     name,
     ctrl: false,
@@ -172,5 +191,6 @@ function specialKey(name: string, sequence: string): OpenTuiKeyEvent {
     shift: false,
     option: false,
     sequence,
+    ...overrides,
   };
 }

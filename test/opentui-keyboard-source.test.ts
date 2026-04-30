@@ -31,11 +31,22 @@ test("OpenTUI raw keyboard parser splits printable chunks", () => {
 });
 
 test("OpenTUI raw keyboard parser handles navigation keys", () => {
-  assert.deepEqual(parseRawKeyboardInput("\x1b[D\x1b[C\x1b[H\x1b[F").map((event) => event.name), [
+  assert.deepEqual(parseRawKeyboardInput("\x1b[D\x1b[C\x1b[H\x1b[F\x1b[5~\x1b[6~").map((event) => event.name), [
     "left",
     "right",
     "home",
     "end",
+    "pageup",
+    "pagedown",
+  ]);
+});
+
+test("OpenTUI raw keyboard parser handles modified transcript scroll keys", () => {
+  const events = parseRawKeyboardInput("\x1b[1;5A\x1b[1;5B");
+
+  assert.deepEqual(events.map((event) => [event.name, event.ctrl]), [
+    ["up", true],
+    ["down", true],
   ]);
 });
 
@@ -47,5 +58,7 @@ test("OpenTUI entry disables Kitty keyboard startup negotiation", async () => {
   const source = await readFile(new URL("../src/opentui/entry.tsx", import.meta.url), "utf8");
 
   assert.match(source, /useKittyKeyboard: null/);
+  assert.match(source, /useMouse: true/);
+  assert.match(source, /enableMouseMovement: true/);
   assert.match(source, /createBufferedKeyboardSource/);
 });

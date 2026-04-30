@@ -12,11 +12,24 @@ import {
 } from "./composer-state.js";
 import { createCommandSurface, createRuntimeCommandIntent, resolveSkillPreview, type CommandPaletteRow } from "./command-surface.js";
 import type { OpenTuiKeyEvent, OpenTuiKeyboardSource } from "./keyboard-source.js";
-import type { OpenTuiRuntimeView } from "./runtime-view.js";
+import {
+  createLocalOutputBlock,
+  type OpenTuiRuntimeView,
+  type OpenTuiTranscriptBlock,
+} from "./runtime-view.js";
+import {
+  createOpenTuiTranscriptState,
+  handleOpenTuiTranscriptEvent,
+  isBlockExpanded,
+  visibleLineWindow,
+  type OpenTuiTranscriptState,
+  type TranscriptMetrics,
+} from "./transcript-state.js";
 
 const SKILL_PREVIEW_PREFIX = "skill:";
 const COMPOSER_CURSOR = "|";
 const ALT_V_UNSUPPORTED_MESSAGE = "Alt+V paste-image unavailable in OpenTUI; use /attach <image-path>";
+const COPIED_RESULTS_NOTICE = "copied results to clipboard";
 
 export interface OpenTuiAppProps {
   view: OpenTuiRuntimeView;
@@ -38,7 +51,8 @@ export function OpenTuiApp({ view, session, keyboardSource, promptHistory = [], 
   const [history, setHistory] = useState(promptHistory);
   const [traceExpanded, setTraceExpanded] = useState(false);
   const [shellNotice, setShellNotice] = useState("ready");
-  const [outputLines, setOutputLines] = useState<string[]>([]);
+  const [outputBlocks, setOutputBlocks] = useState<OpenTuiTranscriptBlock[]>([]);
+  const [transcriptState, setTranscriptState] = useState<OpenTuiTranscriptState>(() => createOpenTuiTranscriptState());
 
   const commandSurface = createCommandSurface(view.cwd, composer.text, composer.selectedIndex);
   const skillPreview = resolveSkillPreview(view.cwd, composer.text, composer.selectedIndex);
@@ -72,14 +86,30 @@ export function OpenTuiApp({ view, session, keyboardSource, promptHistory = [], 
       applyComposerEvent({ kind: "open-history-search" });
       return;
     }
+    if (key.ctrl && key.name === "y") {
+      copySelectedTranscriptBlock();
+      return;
+    }
     if ((key.name === "v" || key.sequence.toLowerCase() === "v") && (key.meta || key.option)) {
       appendOutput(ALT_V_UNSUPPORTED_MESSAGE);
       setShellNotice("paste-image shortcut unavailable");
       return;
     }
+    if (key.name === "pageup") {
+      updateTranscriptState({ kind: "scroll-page", direction: -1, metrics: transcriptMetrics });
+      return;
+    }
+    if (key.name === "pagedown") {
+      updateTranscriptState({ kind: "scroll-page", direction: 1, metrics: transcriptMetrics });
+      return;
+    }
     if (key.name === "up") {
       if (composer.overlayMode !== "none") {
         applyComposerEvent({ kind: "move-selection", direction: -1, rowCount: paletteRows.length });
+        return;
+      }
+      if (key.ctrl) {
+        updateTranscriptState({ kind: "scroll-lines", delta: -1, metrics: transcriptMetrics });
         return;
       }
       applyComposerEvent({ kind: "history", direction: -1, force: key.ctrl, history });
@@ -88,6 +118,10 @@ export function OpenTuiApp({ view, session, keyboardSource, promptHistory = [], 
     if (key.name === "down") {
       if (composer.overlayMode !== "none") {
         applyComposerEvent({ kind: "move-selection", direction: 1, rowCount: paletteRows.length });
+        return;
+      }
+      if (key.ctrl) {
+        updateTranscriptState({ kind: "scroll-lines", delta: 1, metrics: transcriptMetrics });
         return;
       }
       applyComposerEvent({ kind: "history", direction: 1, force: key.ctrl, history });
@@ -106,6 +140,10 @@ export function OpenTuiApp({ view, session, keyboardSource, promptHistory = [], 
       return;
     }
     if (key.name === "end") {
+      if (key.ctrl) {
+        updateTranscriptState({ kind: "jump-latest", metrics: transcriptMetrics });
+        return;
+      }
       applyComposerEvent({ kind: "move-cursor-to", position: "end" });
       return;
     }
@@ -154,11 +192,24 @@ export function OpenTuiApp({ view, session, keyboardSource, promptHistory = [], 
     }
   }
 
-  const transcriptLines = view.transcriptLines.slice(-12);
-  const visibleTranscriptLines = [...transcriptLines, ...outputLines.slice(-8)].slice(-12);
-  const traceLines = traceExpanded ? view.traceDetailLines : view.traceSummaryLines;
+  const transcriptViewportHeight = Math.max(4, terminalHeight - 14);
+  const transcriptBlocks = [...view.transcriptBlocks, ...outputBlocks, ...(traceExpanded ? view.traceBlocks : [])];
+  const transcriptRenderRows = flattenTranscriptBlocks(transcriptBlocks, transcriptState);
+  const transcriptMetrics: TranscriptMetrics = {
+    contentLineCount: transcriptRenderRows.length,
+    viewportLineCount: transcriptViewportHeight,
+    blockCount: transcriptBlocks.length,
+  };
+  const visibleTranscriptRows = visibleLineWindow(transcriptRenderRows, transcriptState, transcriptViewportHeight);
   const traceLabel = traceExpanded ? view.traceExpandedLabel : view.traceCollapsedLabel;
   const composerLine = composer.text.length > 0 ? renderComposerLine(composer) : `> ${view.composerHint} ${COMPOSER_CURSOR}`;
+
+  useEffect(() => {
+    setTranscriptState((current) => handleOpenTuiTranscriptEvent(current, {
+      kind: "content-updated",
+      metrics: transcriptMetrics,
+    }));
+  }, [transcriptRenderRows.length, transcriptViewportHeight, transcriptBlocks.length]);
 
   return (
     <box flexDirection="column" width={terminalWidth} height={terminalHeight} padding={1}>
@@ -169,15 +220,41 @@ export function OpenTuiApp({ view, session, keyboardSource, promptHistory = [], 
         <text width={contentWidth}>{view.statusLabel}</text>
         <text width={contentWidth} fg="#a6adc8">{view.footerLabel}</text>
       </box>
-      <box flexDirection="column" width={contentWidth} flexGrow={1} marginTop={1}>
+      <box
+        flexDirection="column"
+        width={contentWidth}
+        flexGrow={1}
+        marginTop={1}
+        onMouseScroll={(event) => {
+          const direction = event.button === 4 ? -3 : 3;
+          updateTranscriptState({ kind: "scroll-lines", delta: direction, metrics: transcriptMetrics });
+          event.preventDefault();
+        }}
+      >
         <text width={contentWidth} fg="#f9e2af">transcript</text>
-        {visibleTranscriptLines.map((line, index) => (
-          <text key={`transcript-${String(index)}`} width={contentWidth}>{line}</text>
+        {visibleTranscriptRows.map((row) => (
+          <text
+            key={row.key}
+            width={contentWidth}
+            selectable
+            selectionBg="#8bd5ff"
+            selectionFg="#000000"
+            fg={row.fg}
+            onMouseDown={(event) => {
+              updateTranscriptState({ kind: "set-selected-block", index: row.blockIndex, metrics: transcriptMetrics });
+              if (row.isLabel) {
+                updateTranscriptState({ kind: "toggle-block", blockId: row.blockId });
+              }
+              event.preventDefault();
+            }}
+          >
+            {row.text}
+          </text>
         ))}
         <text width={contentWidth} fg="#f9e2af">{traceLabel}</text>
-        {traceLines.slice(0, traceExpanded ? 8 : 3).map((line, index) => (
-          <text key={`trace-${String(index)}`} width={contentWidth} fg="#a6adc8">{line}</text>
-        ))}
+        <text width={contentWidth} fg="#a6adc8">
+          {`${transcriptState.atLatest ? "latest" : "scrolled"} | ${String(transcriptState.scrollOffset + 1)}/${String(Math.max(1, transcriptRenderRows.length))} | PageUp/PageDown Ctrl+Up/Ctrl+Down wheel | Ctrl+Y copy`}
+        </text>
       </box>
       {composer.overlayMode !== "none" ? (
         <box flexDirection="column" width={paletteWidth} marginLeft={paletteMarginLeft} marginTop={1} padding={1}>
@@ -279,7 +356,69 @@ export function OpenTuiApp({ view, session, keyboardSource, promptHistory = [], 
     if (lines.length === 0) {
       return;
     }
-    setOutputLines((current) => [...current, ...lines].slice(-40));
+    const block = createLocalOutputBlock(`local-output-${Date.now().toString(36)}-${String(lines.length)}`, lines);
+    setOutputBlocks((current) => [...current, block].slice(-20));
+  }
+
+  function updateTranscriptState(event: Parameters<typeof handleOpenTuiTranscriptEvent>[1]): void {
+    setTranscriptState((current) => handleOpenTuiTranscriptEvent(current, event));
+  }
+
+  function copySelectedTranscriptBlock(): void {
+    const selectedBlock = transcriptBlocks[transcriptState.selectedBlockIndex] ?? transcriptBlocks[transcriptBlocks.length - 1];
+    const text = selectedBlock ? blockTextForCopy(selectedBlock, transcriptState) : "";
+    if (!text.trim()) {
+      setShellNotice("nothing selected to copy");
+      return;
+    }
+    const copied = copyTextToClipboardOsc52(text);
+    setShellNotice(copied ? COPIED_RESULTS_NOTICE : "copy unavailable");
+  }
+}
+
+interface TranscriptRenderRow {
+  key: string;
+  text: string;
+  fg?: string;
+  blockId: string;
+  blockIndex: number;
+  isLabel: boolean;
+}
+
+function flattenTranscriptBlocks(blocks: OpenTuiTranscriptBlock[], state: OpenTuiTranscriptState): TranscriptRenderRow[] {
+  return blocks.flatMap((block, blockIndex) => {
+    const selected = blockIndex === state.selectedBlockIndex;
+    const expanded = isBlockExpanded(state, block.id, block.collapsedByDefault);
+    const detailAvailable = block.detailLines.length > block.summaryLines.length || block.collapsedByDefault;
+    const label = `${selected ? "> " : "  "}${block.label}${detailAvailable ? (expanded ? " [-]" : " [+]") : ""}`;
+    const lines = expanded ? block.detailLines : block.summaryLines;
+    return [
+      { key: `${block.id}-label`, text: label, fg: selected ? "#8bd5ff" : "#f9e2af", blockId: block.id, blockIndex, isLabel: true },
+      ...lines.map((line, lineIndex) => ({
+        key: `${block.id}-${String(lineIndex)}`,
+        text: `    ${line}`,
+        fg: block.kind === "trace" || block.kind === "tool" ? "#a6adc8" : undefined,
+        blockId: block.id,
+        blockIndex,
+        isLabel: false,
+      })),
+    ];
+  });
+}
+
+function blockTextForCopy(block: OpenTuiTranscriptBlock, state: OpenTuiTranscriptState): string {
+  const expanded = isBlockExpanded(state, block.id, block.collapsedByDefault);
+  const lines = expanded ? block.detailLines : block.summaryLines;
+  return [`${block.label}:`, ...lines].join("\n");
+}
+
+function copyTextToClipboardOsc52(text: string): boolean {
+  try {
+    const encoded = Buffer.from(text, "utf8").toString("base64");
+    process.stdout.write(`\x1b]52;c;${encoded}\x07`);
+    return true;
+  } catch {
+    return false;
   }
 }
 

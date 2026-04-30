@@ -14,6 +14,8 @@ export async function runOpenTuiRuntime(session: RuntimeSession): Promise<void> 
     externalOutputMode: "passthrough",
     targetFps: 30,
     maxFps: 30,
+    useMouse: true,
+    enableMouseMovement: true,
     useKittyKeyboard: null,
   });
   const keyboardSource = createBufferedKeyboardSource(process.stdin);

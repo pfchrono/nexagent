@@ -28,6 +28,7 @@ Canonical guidance for coding agents working in `nexagent`.
 - `--yolo` session mode that bypasses guarded approvals while preserving destructive shell/tool blocks
 - provider-gated image attachment flow for HTTP transports
 - cockpit-style TUI surfaces: paced assistant replies, turn metadata, warning lane, turn blocks, risk/outcome/action rows, navigation hints, capability panel
+- opt-in OpenTUI sidecar via `--opentui` with multiline composer, command/skill overlays, bounded transcript blocks, collapsible trace blocks, mouse wheel transcript scroll, and OSC52 selected-block copy feedback
 
 ## Canonical Docs
 

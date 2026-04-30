@@ -30,12 +30,28 @@ test("createOpenTuiRuntimeView maps runtime session without mutation", () => {
     statusLabel: "ready - runtime baseline",
     cwdLabel: "/repo",
     transcriptLines: ["No transcript yet"],
+    transcriptBlocks: [{
+      id: "empty-transcript",
+      kind: "system",
+      label: "system",
+      summaryLines: ["No transcript yet"],
+      detailLines: ["No transcript yet"],
+      collapsedByDefault: false,
+    }],
     composerHint: "Type prompt. Enter submit. Esc clear/cancel. Ctrl+C quit.",
     footerLabel: "approval open | tools repo-local-guarded",
     traceCollapsedLabel: "trace closed - Ctrl+T expand",
     traceExpandedLabel: "trace open - Ctrl+T collapse",
     traceSummaryLines: ["no turn events"],
     traceDetailLines: ["trace empty"],
+    traceBlocks: [{
+      id: "empty-trace",
+      kind: "trace",
+      label: "trace",
+      summaryLines: ["trace empty"],
+      detailLines: ["trace empty"],
+      collapsedByDefault: true,
+    }],
   });
   assert.equal(JSON.stringify(session.action), before);
 });
@@ -66,11 +82,16 @@ test("createOpenTuiRuntimeView maps transcript and trace lines", () => {
   const view = createOpenTuiRuntimeView(session);
 
   assert.deepEqual(view.transcriptLines, ["you: inspect repo second line", "agent: done"]);
+  assert.deepEqual(view.transcriptBlocks.map((block) => block.label), ["you", "agent"]);
+  assert.equal(view.transcriptBlocks[0]?.kind, "user");
+  assert.equal(view.transcriptBlocks[1]?.kind, "assistant");
   assert.deepEqual(view.traceSummaryLines, [
     "provider started - provider request started",
     "tool completed - tool nexsight_execute completed",
   ]);
   assert.match(view.traceDetailLines.join("\n"), /transport=codex-http/);
+  assert.equal(view.traceBlocks[0]?.collapsedByDefault, true);
+  assert.match(view.traceBlocks.map((block) => block.detailLines.join("\n")).join("\n"), /transport=codex-http/);
 });
 
 function createSession(): RuntimeSession {
