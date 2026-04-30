@@ -4,6 +4,7 @@ import { createRoot } from "@opentui/react";
 import { loadPersistedPromptHistory, savePersistedPromptHistory } from "../runtime/persistence.js";
 import type { RuntimeSession } from "../runtime/session.js";
 import { OpenTuiApp } from "./App.js";
+import { createBufferedKeyboardSource } from "./keyboard-source.js";
 import { createOpenTuiRuntimeView } from "./runtime-view.js";
 
 export async function runOpenTuiRuntime(session: RuntimeSession): Promise<void> {
@@ -14,6 +15,7 @@ export async function runOpenTuiRuntime(session: RuntimeSession): Promise<void> 
     targetFps: 30,
     maxFps: 30,
   });
+  const keyboardSource = createBufferedKeyboardSource(renderer.keyInput);
 
   let settled = false;
   await new Promise<void>((resolve) => {
@@ -25,6 +27,7 @@ export async function runOpenTuiRuntime(session: RuntimeSession): Promise<void> 
       process.removeListener("SIGINT", cleanup);
       process.removeListener("SIGTERM", cleanup);
       try {
+        keyboardSource.dispose();
         renderer.destroy();
       } finally {
         resolve();
@@ -36,6 +39,7 @@ export async function runOpenTuiRuntime(session: RuntimeSession): Promise<void> 
     createRoot(renderer).render(
       <OpenTuiApp
         session={session}
+        keyboardSource={keyboardSource}
         view={createOpenTuiRuntimeView(session)}
         promptHistory={loadPersistedPromptHistory(session.cwd)}
         onPromptHistoryChange={(history) => savePersistedPromptHistory(session.cwd, history)}

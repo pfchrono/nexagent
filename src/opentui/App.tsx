@@ -1,5 +1,5 @@
-import { useKeyboard, useTerminalDimensions } from "@opentui/react";
-import { useState } from "react";
+import { useTerminalDimensions } from "@opentui/react";
+import { useEffect, useRef, useState } from "react";
 
 import { runRuntimeCommand } from "../cli.js";
 import type { RuntimeSession } from "../runtime/session.js";
@@ -11,6 +11,7 @@ import {
   type OpenTuiComposerState,
 } from "./composer-state.js";
 import { createCommandSurface, createRuntimeCommandIntent, resolveSkillPreview, type CommandPaletteRow } from "./command-surface.js";
+import type { OpenTuiKeyEvent, OpenTuiKeyboardSource } from "./keyboard-source.js";
 import type { OpenTuiRuntimeView } from "./runtime-view.js";
 
 const SKILL_PREVIEW_PREFIX = "skill:";
@@ -20,12 +21,13 @@ const ALT_V_UNSUPPORTED_MESSAGE = "Alt+V paste-image unavailable in OpenTUI; use
 export interface OpenTuiAppProps {
   view: OpenTuiRuntimeView;
   session?: RuntimeSession;
+  keyboardSource?: OpenTuiKeyboardSource;
   promptHistory?: string[];
   onPromptHistoryChange?: (history: string[]) => void;
   onExit: () => void;
 }
 
-export function OpenTuiApp({ view, session, promptHistory = [], onPromptHistoryChange, onExit }: OpenTuiAppProps) {
+export function OpenTuiApp({ view, session, keyboardSource, promptHistory = [], onPromptHistoryChange, onExit }: OpenTuiAppProps) {
   const { width, height } = useTerminalDimensions();
   const terminalWidth = width > 0 ? width : process.stdout.columns || 80;
   const terminalHeight = height > 0 ? height : process.stdout.rows || 24;
@@ -48,7 +50,14 @@ export function OpenTuiApp({ view, session, promptHistory = [], onPromptHistoryC
       : "Image attach unavailable for current transport"
     : null;
 
-  useKeyboard((key) => {
+  const keyHandlerRef = useRef<(key: OpenTuiKeyEvent) => void>(() => undefined);
+  keyHandlerRef.current = handleKeyboardKey;
+
+  useEffect(() => {
+    return keyboardSource?.subscribe((key) => keyHandlerRef.current(key));
+  }, [keyboardSource]);
+
+  function handleKeyboardKey(key: OpenTuiKeyEvent): void {
     if (key.ctrl && key.name === "c") {
       onExit();
       return;
@@ -136,7 +145,7 @@ export function OpenTuiApp({ view, session, promptHistory = [], onPromptHistoryC
     if (printableValue) {
       applyComposerEvent({ kind: "character", value: printableValue });
     }
-  });
+  }
 
   const transcriptLines = view.transcriptLines.slice(-12);
   const visibleTranscriptLines = [...transcriptLines, ...outputLines.slice(-8)].slice(-12);
