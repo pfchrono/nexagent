@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "bun:test";
 
-import { createOpenTuiRuntimeView } from "../src/opentui/runtime-view.js";
+import { createLocalOutputBlock, createOpenTuiRuntimeView } from "../src/opentui/runtime-view.js";
 import { createDefaultProviderRegistry } from "../src/provider/registry.js";
 import type { RuntimeSession } from "../src/runtime/session.js";
 
@@ -85,6 +85,49 @@ test("createOpenTuiRuntimeView maps transcript and trace lines", () => {
   assert.match(view.traceDetailLines.join("\n"), /transport=codex-http/);
   assert.equal(view.traceBlocks[0]?.collapsedByDefault, true);
   assert.match(view.traceBlocks.map((block) => block.detailLines.join("\n")).join("\n"), /transport=codex-http/);
+});
+
+test("OpenTUI short command output stays expanded by default", () => {
+  const lines = Array.from({ length: 12 }, (_, index) => `help line ${String(index + 1)}`);
+
+  const block = createLocalOutputBlock("local-help", lines);
+
+  assert.equal(block.collapsedByDefault, false);
+  assert.deepEqual(block.summaryLines, lines);
+  assert.deepEqual(block.detailLines, lines);
+});
+
+test("OpenTUI huge command output is capped until expanded", () => {
+  const lines = Array.from({ length: 36 }, (_, index) => `output line ${String(index + 1)}`);
+
+  const block = createLocalOutputBlock("local-long", lines);
+
+  assert.equal(block.collapsedByDefault, true);
+  assert.equal(block.summaryLines.length, 31);
+  assert.equal(block.summaryLines[0], "output line 1");
+  assert.equal(block.summaryLines[29], "output line 30");
+  assert.match(block.summaryLines[30] ?? "", /\.\.\. truncated 6 more lines; expand for full output/);
+  assert.equal(block.detailLines.length, 36);
+});
+
+test("OpenTUI assistant replies preserve multiline content and cap huge replies", () => {
+  const session = createSession();
+  session.conversation = [
+    {
+      role: "assistant",
+      content: Array.from({ length: 32 }, (_, index) => `reply line ${String(index + 1)}`).join("\n"),
+      tokens: 32,
+    },
+  ];
+
+  const view = createOpenTuiRuntimeView(session);
+  const block = view.transcriptBlocks[0];
+
+  assert.equal(block?.kind, "assistant");
+  assert.equal(block?.collapsedByDefault, true);
+  assert.equal(block?.summaryLines.length, 31);
+  assert.equal(block?.detailLines.length, 32);
+  assert.equal(block?.detailLines[1], "reply line 2");
 });
 
 function createSession(): RuntimeSession {

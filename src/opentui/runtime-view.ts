@@ -1,5 +1,7 @@
 import type { RuntimeSession } from "../runtime/session.js";
 
+const OPEN_BY_DEFAULT_LINE_CAP = 30;
+
 export type OpenTuiTranscriptBlockKind = "user" | "assistant" | "command" | "tool" | "result" | "trace" | "system";
 
 export interface OpenTuiTranscriptBlock {
@@ -90,7 +92,7 @@ export function createLocalOutputBlock(id: string, lines: string[]): OpenTuiTran
     kind: "command",
     label: "command",
     lines,
-    collapsedByDefault: lines.length > 4,
+    collapsedByDefault: false,
   });
 }
 
@@ -118,7 +120,7 @@ function createTranscriptBlocks(session: RuntimeSession): OpenTuiTranscriptBlock
     id: `conversation-${String(index)}`,
     kind: turn.role === "user" ? "user" : "assistant",
     label: turn.role === "user" ? "you" : "agent",
-    lines: [firstLine(turn.content)],
+    lines: splitTranscriptLines(turn.content),
     collapsedByDefault: false,
   }));
 
@@ -189,19 +191,30 @@ function createBlock(options: {
   const detailLines = options.lines
     .map((line) => firstLine(line))
     .filter((line) => line.length > 0);
-  const summaryLines = detailLines.length > 4
-    ? [`${detailLines[0] ?? ""} (+${String(detailLines.length - 1)} more lines)`]
-    : detailLines.slice(0, 4);
+  const summaryLines = detailLines.length > OPEN_BY_DEFAULT_LINE_CAP
+    ? [
+      ...detailLines.slice(0, OPEN_BY_DEFAULT_LINE_CAP),
+      `... truncated ${String(detailLines.length - OPEN_BY_DEFAULT_LINE_CAP)} more lines; expand for full output`,
+    ]
+    : detailLines;
+  const collapsedByDefault = options.collapsedByDefault || detailLines.length > OPEN_BY_DEFAULT_LINE_CAP;
   return {
     id: options.id,
     kind: options.kind,
     label: options.label,
     summaryLines: summaryLines.length > 0 ? summaryLines : [options.label],
     detailLines,
-    collapsedByDefault: options.collapsedByDefault,
+    collapsedByDefault,
   };
 }
 
 function firstLine(value: string): string {
   return value.replace(/\s+/g, " ").trim();
+}
+
+function splitTranscriptLines(value: string): string[] {
+  return value
+    .split(/\r?\n/)
+    .map((line) => line.trimEnd())
+    .filter((line) => line.trim().length > 0);
 }
