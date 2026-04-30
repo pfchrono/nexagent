@@ -46,3 +46,16 @@ test("OpenTUI app shell renders live view fields and Phase 66 command surfaces",
   assert.doesNotMatch(source, /\.\.\/provider/);
   assert.doesNotMatch(source, /\.\.\/runtime\/tools/);
 });
+
+test("OpenTUI transcript scroll shortcuts preserve overlay selection ownership", async () => {
+  const source = await readFile(new URL("../src/opentui/App.tsx", import.meta.url), "utf8");
+  const upBranch = source.slice(source.indexOf('if (key.name === "up")'), source.indexOf('if (key.name === "down")'));
+  const downBranch = source.slice(source.indexOf('if (key.name === "down")'), source.indexOf('if (key.name === "left")'));
+
+  assert.ok(upBranch.indexOf('composer.overlayMode !== "none"') < upBranch.indexOf("key.ctrl"));
+  assert.ok(downBranch.indexOf('composer.overlayMode !== "none"') < downBranch.indexOf("key.ctrl"));
+  assert.match(upBranch, /move-selection/);
+  assert.match(downBranch, /move-selection/);
+  assert.match(upBranch, /scroll-lines/);
+  assert.match(downBranch, /scroll-lines/);
+});
