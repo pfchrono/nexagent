@@ -49,7 +49,7 @@ export function OpenTuiApp({ view, session, promptHistory = [], onPromptHistoryC
     : null;
 
   useKeyboard((key) => {
-    if (key.name === "q" || (key.ctrl && key.name === "c")) {
+    if (key.ctrl && key.name === "c") {
       onExit();
       return;
     }
@@ -126,8 +126,15 @@ export function OpenTuiApp({ view, session, promptHistory = [], onPromptHistoryC
       applyComposerEvent({ kind: "delete-forward" });
       return;
     }
-    if (!key.ctrl && !key.meta && key.sequence.length === 1) {
-      applyComposerEvent({ kind: "character", value: key.sequence });
+    const printableValue = !key.ctrl && !key.meta && !key.option
+      ? key.sequence.length === 1
+        ? key.sequence
+        : key.name.length === 1
+          ? key.name
+          : null
+      : null;
+    if (printableValue) {
+      applyComposerEvent({ kind: "character", value: printableValue });
     }
   });
 
