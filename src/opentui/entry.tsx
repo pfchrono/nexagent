@@ -4,7 +4,7 @@ import { createRoot } from "@opentui/react";
 import { loadPersistedPromptHistory, savePersistedPromptHistory } from "../runtime/persistence.js";
 import type { RuntimeSession } from "../runtime/session.js";
 import { OpenTuiApp } from "./App.js";
-import { createBufferedKeyboardSource } from "./keyboard-source.js";
+import { createOpenTuiKeyboardSource } from "./keyboard-source.js";
 import { createOpenTuiRuntimeView } from "./runtime-view.js";
 
 export async function runOpenTuiRuntime(session: RuntimeSession): Promise<void> {
@@ -18,7 +18,7 @@ export async function runOpenTuiRuntime(session: RuntimeSession): Promise<void> 
     enableMouseMovement: true,
     useKittyKeyboard: null,
   });
-  const keyboardSource = createBufferedKeyboardSource(process.stdin);
+  const keyboardSource = createOpenTuiKeyboardSource(renderer.keyInput);
 
   let settled = false;
   await new Promise<void>((resolve) => {

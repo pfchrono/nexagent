@@ -17,7 +17,35 @@ interface KeyInputEmitter {
   off(event: "data", handler: (chunk: Buffer | string) => void): void;
 }
 
+interface OpenTuiKeyInputEmitter {
+  on(event: "keypress", handler: (key: OpenTuiKeyEvent) => void): void;
+  off(event: "keypress", handler: (key: OpenTuiKeyEvent) => void): void;
+}
+
 export function createBufferedKeyboardSource(keyInput: KeyInputEmitter): OpenTuiKeyboardSource {
+  return createBufferedSource<KeyInputEmitter, Buffer | string>(
+    keyInput,
+    "data",
+    (chunk) => parseRawKeyboardInput(chunk),
+  );
+}
+
+export function createOpenTuiKeyboardSource(keyInput: OpenTuiKeyInputEmitter): OpenTuiKeyboardSource {
+  return createBufferedSource<OpenTuiKeyInputEmitter, OpenTuiKeyEvent>(
+    keyInput,
+    "keypress",
+    (key) => [normalizeOpenTuiKeyEvent(key)],
+  );
+}
+
+function createBufferedSource<TEmitter extends {
+  on(event: TEvent, handler: (payload: TPayload) => void): void;
+  off(event: TEvent, handler: (payload: TPayload) => void): void;
+}, TPayload, TEvent extends string = string>(
+  keyInput: TEmitter,
+  eventName: TEvent,
+  parse: (payload: TPayload) => OpenTuiKeyEvent[],
+): OpenTuiKeyboardSource {
   const subscribers = new Set<(key: OpenTuiKeyEvent) => void>();
   const pending: OpenTuiKeyEvent[] = [];
   const emit = (key: OpenTuiKeyEvent): void => {
@@ -29,13 +57,13 @@ export function createBufferedKeyboardSource(keyInput: KeyInputEmitter): OpenTui
       subscriber(key);
     }
   };
-  const listener = (chunk: Buffer | string): void => {
-    for (const key of parseRawKeyboardInput(chunk)) {
+  const listener = (payload: TPayload): void => {
+    for (const key of parse(payload)) {
       emit(key);
     }
   };
 
-  keyInput.on("data", listener);
+  keyInput.on(eventName, listener);
 
   return {
     subscribe(handler) {
@@ -53,8 +81,19 @@ export function createBufferedKeyboardSource(keyInput: KeyInputEmitter): OpenTui
     dispose() {
       subscribers.clear();
       pending.length = 0;
-      keyInput.off("data", listener);
+      keyInput.off(eventName, listener);
     },
+  };
+}
+
+function normalizeOpenTuiKeyEvent(key: OpenTuiKeyEvent): OpenTuiKeyEvent {
+  return {
+    name: key.name,
+    ctrl: key.ctrl,
+    meta: key.meta,
+    shift: key.shift,
+    option: key.option,
+    sequence: key.sequence,
   };
 }
 

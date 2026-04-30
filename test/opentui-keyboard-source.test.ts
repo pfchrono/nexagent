@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events";
 import { readFile } from "node:fs/promises";
 import { test } from "bun:test";
 
-import { createBufferedKeyboardSource, parseRawKeyboardInput } from "../src/opentui/keyboard-source.js";
+import { createBufferedKeyboardSource, createOpenTuiKeyboardSource, parseRawKeyboardInput } from "../src/opentui/keyboard-source.js";
 
 test("OpenTUI keyboard source buffers first key before app subscribes", () => {
   const keyInput = new EventEmitter();
@@ -28,6 +28,41 @@ test("OpenTUI keyboard source buffers first key before app subscribes", () => {
 
 test("OpenTUI raw keyboard parser splits printable chunks", () => {
   assert.deepEqual(parseRawKeyboardInput("quit").map((event) => event.sequence), ["q", "u", "i", "t"]);
+});
+
+test("OpenTUI renderer key source buffers initial slash before app subscribes", () => {
+  const keyInput = new EventEmitter();
+  const source = createOpenTuiKeyboardSource({
+    on(event, handler) {
+      keyInput.on(event, handler);
+    },
+    off(event, handler) {
+      keyInput.off(event, handler);
+    },
+  });
+  const captured: string[] = [];
+
+  keyInput.emit("keypress", {
+    name: "slash",
+    ctrl: false,
+    meta: false,
+    shift: false,
+    option: false,
+    sequence: "/",
+  });
+  const unsubscribe = source.subscribe((event) => captured.push(event.sequence));
+  keyInput.emit("keypress", {
+    name: "h",
+    ctrl: false,
+    meta: false,
+    shift: false,
+    option: false,
+    sequence: "h",
+  });
+
+  assert.deepEqual(captured, ["/", "h"]);
+  unsubscribe();
+  source.dispose();
 });
 
 test("OpenTUI raw keyboard parser keeps Enter and Tab as special keys", () => {
@@ -83,5 +118,7 @@ test("OpenTUI entry disables Kitty keyboard startup negotiation", async () => {
   assert.match(source, /useKittyKeyboard: null/);
   assert.match(source, /useMouse: true/);
   assert.match(source, /enableMouseMovement: true/);
-  assert.match(source, /createBufferedKeyboardSource/);
+  assert.match(source, /createOpenTuiKeyboardSource/);
+  assert.match(source, /renderer\.keyInput/);
+  assert.doesNotMatch(source, /createBufferedKeyboardSource\(process\.stdin\)/);
 });
