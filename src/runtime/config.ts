@@ -3,6 +3,7 @@ import { readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 
+import { mergeProviderRegistryConfigs, type ProviderConfigInput, type ProviderRegistry } from "../provider/registry.js";
 import { resolveNexagentHome, resolvePathFromBase } from "./paths.js";
 
 const execFileAsync = promisify(execFile);
@@ -11,6 +12,7 @@ export interface HarnessConfig {
   cwd: string;
   productName: string;
   provider: string;
+  providerRegistry?: ProviderRegistry;
   providerRouting: ProviderRoutingConfig;
   prompt: PromptConfig;
   mcpConfigPath: string;
@@ -167,6 +169,8 @@ interface NexagentSettings {
   };
 }
 
+interface NexagentConfig extends NexagentSettings, ProviderConfigInput {}
+
 interface ResolvedConfigSource {
   provider?: string;
   providerModels?: ProviderModelMatrix;
@@ -182,9 +186,11 @@ const DEFAULT_PRODUCT_NAME = "nexagent";
 const DEFAULT_PROVIDER = "codex";
 const DEFAULT_MCP_CONFIG_FILE = ".mcp.json";
 const NEXAGENT_SETTINGS_DIR = ".nexagent";
+const NEXAGENT_CONFIG_BASENAME = "config.json";
 const NEXAGENT_SETTINGS_BASENAME = "settings.json";
 const NEXAGENT_LOCAL_SETTINGS_BASENAME = "settings.local.json";
 const NEXAGENT_SETTINGS_FILE = path.join(NEXAGENT_SETTINGS_DIR, NEXAGENT_SETTINGS_BASENAME);
+const NEXAGENT_CONFIG_FILE = path.join(NEXAGENT_SETTINGS_DIR, NEXAGENT_CONFIG_BASENAME);
 const NEXAGENT_LOCAL_SETTINGS_FILE = path.join(NEXAGENT_SETTINGS_DIR, NEXAGENT_LOCAL_SETTINGS_BASENAME);
 const CLAUDE_SETTINGS_FILE = path.join(".claude", "settings.json");
 const CLAUDE_LOCAL_SETTINGS_FILE = path.join(".claude", "settings.local.json");
@@ -201,11 +207,13 @@ const REPO_INSTRUCTION_SOURCE_CANDIDATES = [
 
 export async function loadHarnessConfig(cwd: string): Promise<HarnessConfig> {
   const nexagentHome = resolveNexagentHome();
-  const [globalSettings, globalLocalSettings, settings, localSettings, instructionSources] = await Promise.all([
+  const [globalConfig, globalSettings, globalLocalSettings, settings, localSettings, repoConfig, instructionSources] = await Promise.all([
+    readJsonIfExists<NexagentConfig>(path.join(nexagentHome, NEXAGENT_CONFIG_BASENAME)),
     readJsonIfExists<NexagentSettings>(path.join(nexagentHome, NEXAGENT_SETTINGS_BASENAME)),
     readJsonIfExists<NexagentSettings>(path.join(nexagentHome, NEXAGENT_LOCAL_SETTINGS_BASENAME)),
     readJsonIfExists<NexagentSettings>(path.join(cwd, NEXAGENT_SETTINGS_FILE)),
     readJsonIfExists<NexagentSettings>(path.join(cwd, NEXAGENT_LOCAL_SETTINGS_FILE)),
+    readJsonIfExists<NexagentConfig>(path.join(cwd, NEXAGENT_CONFIG_FILE)),
     discoverInstructionSources(cwd),
   ]);
   const importedClaude = await loadImportedClaudeSettings(cwd, nexagentHome, globalSettings, globalLocalSettings, settings, localSettings);
@@ -217,12 +225,15 @@ export async function loadHarnessConfig(cwd: string): Promise<HarnessConfig> {
       enabledMcpServers: [],
       archivist: { enabled: true },
     },
+    mapNexagentSettings(globalConfig, nexagentHome),
     mapNexagentSettings(globalSettings, nexagentHome),
     mapNexagentSettings(globalLocalSettings, nexagentHome),
     importedClaude?.values ?? {},
     mapNexagentSettings(settings, cwd),
     mapNexagentSettings(localSettings, cwd),
+    mapNexagentSettings(repoConfig, cwd),
   );
+  const providerRegistry = mergeProviderRegistryConfigs(globalConfig, repoConfig);
 
   const provider = mergedConfig.provider ?? DEFAULT_PROVIDER;
 
@@ -230,6 +241,7 @@ export async function loadHarnessConfig(cwd: string): Promise<HarnessConfig> {
     cwd,
     productName: DEFAULT_PRODUCT_NAME,
     provider,
+    providerRegistry,
     prompt: mergedConfig.prompt ?? { assembly: "v2" },
     providerRouting: {
       fallback: {

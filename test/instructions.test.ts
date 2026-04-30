@@ -6,6 +6,7 @@ import test from "node:test";
 
 import { loadHarnessConfig } from "../src/runtime/config.js";
 import { assemblePrompt } from "../src/runtime/instructions.js";
+import { createDefaultProviderRegistry } from "../src/provider/registry.js";
 import type { RuntimeSession } from "../src/runtime/session.js";
 
 function createSession(cwd: string): RuntimeSession {
@@ -14,6 +15,7 @@ function createSession(cwd: string): RuntimeSession {
     startedAt: "2025-01-01T00:00:00.000Z",
     product: "nexagent",
     provider: "codex",
+    providerRegistry: createDefaultProviderRegistry(),
     prompt: {
       assembly: "legacy",
     },

@@ -3,6 +3,7 @@ import { buildPromptV2, summarizePromptV2 } from "./prompt-v2.js";
 import type { PersistedTransportMode } from "./persistence.js";
 import { hasCodexAuthJsonCredentialsSync } from "../provider/codex-chatgpt-http.js";
 import { getCodexModelDefinition } from "../models.js";
+import { getTransportProviderDefinition } from "../provider/registry.js";
 
 export type RuntimeActionStatus = "ready" | "running" | "error";
 
@@ -394,29 +395,30 @@ export function applyProviderSelection(session: RuntimeSession, provider: string
 }
 
 export function applyTransportMode(session: RuntimeSession, mode: PersistedTransportMode): void {
+  const definition = getTransportProviderDefinition(session.providerRegistry, mode);
   session.providerTransport.mode = mode;
 
   if (mode === "codex-http") {
-    session.providerTransport.executor = "fetch";
-    session.providerTransport.adapter = "codex-chatgpt-http";
-    session.providerTransport.authSource = "codex-auth-json";
+    session.providerTransport.executor = definition?.executor ?? "fetch";
+    session.providerTransport.adapter = definition?.adapter ?? "codex-chatgpt-http";
+    session.providerTransport.authSource = definition?.authSource ?? "codex-auth-json";
     session.providerTransport.authGate = hasCodexAuthJsonCredentialsSync() ? "ready" : "missing";
-    session.providerTransport.openaiBaseUrl = session.providerRouting.transport.openaiBaseUrl ?? "https://chatgpt.com/backend-api/codex";
+    session.providerTransport.openaiBaseUrl = session.providerRouting.transport.openaiBaseUrl ?? definition?.baseUrl ?? "https://chatgpt.com/backend-api/codex";
     return;
   }
 
   if (mode === "http-responses") {
-    session.providerTransport.executor = "fetch";
-    session.providerTransport.adapter = "openai-http-responses";
-    session.providerTransport.authSource = "openai-api-key";
+    session.providerTransport.executor = definition?.executor ?? "fetch";
+    session.providerTransport.adapter = definition?.adapter ?? "openai-http-responses";
+    session.providerTransport.authSource = definition?.authSource ?? "openai-api-key";
     session.providerTransport.authGate = process.env.OPENAI_API_KEY?.trim() ? "ready" : "missing";
-    session.providerTransport.openaiBaseUrl = session.providerRouting.transport.openaiBaseUrl ?? "https://api.openai.com/v1";
+    session.providerTransport.openaiBaseUrl = session.providerRouting.transport.openaiBaseUrl ?? definition?.baseUrl ?? "https://api.openai.com/v1";
     return;
   }
 
-  session.providerTransport.executor = "codex";
-  session.providerTransport.adapter = "codex-cli-exec";
-  session.providerTransport.authSource = "codex-login";
+  session.providerTransport.executor = definition?.executor ?? "codex";
+  session.providerTransport.adapter = definition?.adapter ?? "codex-cli-exec";
+  session.providerTransport.authSource = definition?.authSource ?? "codex-login";
   session.providerTransport.authGate = session.auth.loggedIn ? "ready" : "missing";
 }
 

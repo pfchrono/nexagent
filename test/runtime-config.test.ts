@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import { createDefaultProviderRegistry } from "../src/provider/registry.js";
 import { createRuntimeState } from "../src/runtime/bootstrap.js";
 import { loadHarnessConfig } from "../src/runtime/config.js";
 import { loadPersistedRuntimeState, savePersistedRuntimeState } from "../src/runtime/persistence.js";
@@ -215,6 +216,65 @@ test("loadHarnessConfig lets repo nexagent settings override global settings", a
 
     assert.equal(config.provider, "codex");
     assert.deepEqual(config.prompt, { assembly: "v2" });
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+    await rm(nexagentHome, { recursive: true, force: true });
+  }
+});
+
+test("loadHarnessConfig merges global and repo provider registry JSON", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-provider-registry-"));
+  const nexagentHome = await mkdtemp(path.join(tmpdir(), "nexagent-home-"));
+
+  try {
+    await mkdir(path.join(cwd, ".nexagent"));
+    await writeFile(
+      path.join(nexagentHome, "config.json"),
+      JSON.stringify({
+        modelProviders: {
+          codex: {
+            baseUrl: "https://global.codex.test/backend-api/codex",
+            models: ["gpt-5.4", "gpt-5.3-codex-spark"],
+          },
+          local: {
+            name: "Local",
+            baseUrl: "http://localhost:1234/v1",
+            authSource: "openai-api-key",
+            wireApi: "responses",
+            models: ["local-model"],
+            extraField: true,
+          },
+        },
+      }),
+      "utf8",
+    );
+    await writeFile(
+      path.join(cwd, ".nexagent", "config.json"),
+      JSON.stringify({
+        modelProviders: {
+          local: {
+            baseUrl: "http://localhost:5678/v1",
+            models: ["repo-model"],
+          },
+          bad: {
+            wireApi: "banana",
+          },
+        },
+      }),
+      "utf8",
+    );
+
+    const config = await withNexagentHome(nexagentHome, () => loadHarnessConfig(cwd));
+    const registry = config.providerRegistry;
+
+    assert.equal(registry?.providers.codex.baseUrl, "https://global.codex.test/backend-api/codex");
+    assert.deepEqual(registry?.providers.codex.modelIds, ["gpt-5.4", "gpt-5.3-codex-spark"]);
+    assert.equal(registry?.providers.local.name, "Local");
+    assert.equal(registry?.providers.local.baseUrl, "http://localhost:5678/v1");
+    assert.deepEqual(registry?.providers.local.modelIds, ["repo-model"]);
+    assert.equal(registry?.providers.bad.disabledReason, "invalid wireApi");
+    assert.ok(registry?.warnings.includes("modelProviders.local: unknown field extraField"));
+    assert.ok(registry?.warnings.includes("modelProviders.bad.wireApi: expected cli-exec, responses, or responses_websocket"));
   } finally {
     await rm(cwd, { recursive: true, force: true });
     await rm(nexagentHome, { recursive: true, force: true });
@@ -452,6 +512,7 @@ test("createRuntimeState exposes discovered instruction sources", () => {
     {
       product: "nexagent",
       provider: "codex",
+      providerRegistry: createDefaultProviderRegistry(),
       prompt: {
         assembly: "v2",
       },
@@ -508,17 +569,18 @@ test("createRuntimeState exposes discovered instruction sources", () => {
       instructionSources,
       promptV2Summary: {
         assembly: "v2",
-        count: 40,
+        count: 55,
         stableSections: "identity, execution_contract, tool_routing, editing_safety, provider_guidance",
         dynamicSections: "repo_context, runtime_state",
         dynamicBoundary: "__NEXAGENT_PROMPT_DYNAMIC_BOUNDARY__",
-        identity: "You are nexagent, a local coding harness assistant for repo-aware software engineering work.",
+        identity:
+          "You are nexagent, a local terminal-first software engineering agent. | Primary job: complete repo-aware engineering work with tools, evidence, and verification; do not merely describe future work. | Repo-local instructions, skills, modes, and donor references are context overlays; direct user intent and core execution contract still control behavior.",
         executionContract:
-          "Actionable request means act in this turn. | Use tools when tools improve grounding, correctness, or completion. | Do not end with a plan, promise, or ask-for-approval loop when tools can make progress. | Continue until done, verified, or genuinely blocked. | Failed tool result means vary path, query, command, or tool before stopping. | Final answer needs evidence or a named blocker. | Never claim file, test, tool, GSD, MCP, Nexsight, or runtime state without current-turn evidence.",
+          "Actionable request means act in this turn: inspect, edit, run, verify, or report a real blocker. | Operate loop: understand goal, inspect state, choose best tool, execute, observe, recover from failures, verify, then answer with evidence. | Default to action for coding, debugging, testing, docs, repo inspection, and verification. Discuss only when user explicitly asks to brainstorm, compare, pla... | Do not end with a plan, promise, apology, self-correction, or ask-for-approval loop when tools can make progress. | Continue until task is done, verified, or genuinely blocked by missing access, approval gate, or unavailable external dependency. | When user says ok, yes, do that, same, continue, proceed, go ahead, start, finish, test, debug, implement, verify, or next, execute the most recent actionabl... | If user approves a sequence or asks for a no-hand-holding run, treat that as authorization to execute the sequence without asking for another target. | Do not ask user to say proceed, confirm, or continue after they gave a concrete task; execute or report the real blocker. | If user names a flow or goal without an exact file/script/test target, inspect repo state, choose the nearest representative target, and state the choice wit... | A missing user-selected target is not a blocker when repo evidence can identify scripts, tests, docs, or files to exercise. | Failed tool result means diagnose and vary path, query, command, or tool before stopping. | If a needed tool is unavailable, search repo-local scripts, node_modules/.bin, local user bins, MCP/tool registries, or current docs; install project-local d... | Final answer needs completed current-turn evidence or a named blocker. | Never claim file, test, tool, GSD, MCP, Nexsight, or runtime state without current-turn evidence.",
         toolRouting:
-          "Broad repo map/count/parse/compare/summarize -> nexsight_execute, nexsight_batch, nexsight_search. | Exact file read for edit -> read_file. | Exact symbol/text search -> search_content or nexsight_search. | Precise edits -> apply_patch. | Generated whole file -> write_file. | Multi-file mechanical edit -> batch_edit or nexsight_execute-assisted patch with validated insertion points. | Tests/build/git/local binaries -> shell_command. | Web/current docs -> web/MCP tool. | Durable user/project fact -> archivist. | If stronger task-specific tool exists, use it before generic shell/listing. | If tool schema mismatch happens, correct call shape immediately.",
+          "Use dedicated internal tools before generic shell when available. | Broad repo map/count/parse/compare/summarize -> nexsight_execute, nexsight_batch, nexsight_index, nexsight_search. | Use Nexsight like context-mode: run bounded code that prints distilled findings, index/search when useful, then answer from processed stdout/excerpts instead... | Nexsight execute rule: pass executable code or command plus reason when useful; do not pass only a natural-language task. | Nexsight result handling: parse stdout/stderr/envelopes, extract useful payload, cite source labels or paths, and run a narrower follow-up query when output ... | Exact small file read for editing or exact content -> read_file. | Exact symbol/text search -> search_content, search_files, or nexsight_search. | Precise edits -> apply_patch after reading target context. | Generated whole file -> write_file. | Multi-file mechanical edit -> batch_edit or Nexsight-assisted patch with validated insertion points. | Tests/build/git/local binaries -> shell_command. | Current web docs/URLs/facts -> web_fetch/web_search or relevant MCP docs tool. | Durable user/project fact -> archivist_save or archivist_checkpoint. | If stronger task-specific tool exists, use it before generic shell/listing. | If tool schema mismatch happens, correct call shape immediately and retry once.",
         editingSafety:
-          "Read relevant code before editing behavior. | Keep changes scoped to requested outcome. | Do not revert user changes unless explicitly requested. | Prefer existing repo patterns over new abstractions. | Run focused verification when available before reporting completion.",
+          "Read relevant code before editing behavior. | Keep changes scoped to requested outcome. | Do not revert user changes unless explicitly requested. | Prefer existing repo patterns over new abstractions. | Use structured parsers or repo helpers over ad hoc text manipulation when available. | Run focused verification when available before reporting completion. | If verification fails, report actual failing command/output and either fix it or name the blocker.",
         providerGuidance:
           "Active provider: codex | Provider fallback policy: require-open-spec | Do not silently switch providers. Use configured provider and transport unless user or config changes it. | Tool calls must use Nexagent internal tool envelope exactly when provider text transport requires tool markup. | Transport: Codex ChatGPT HTTP (codex-chatgpt-http); auth=ready. | Keep instructions separate from user input. Use native/request tool loop shape supplied by transport. | Avoid CLI-only assumptions; API transport may not expose local Codex shell behavior.",
         style: "none",

@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import type { RuntimeTuiView } from "../src/cli.js";
+import { createDefaultProviderRegistry } from "../src/provider/registry.js";
 import type { RuntimeSession } from "../src/runtime/session.js";
 
 test("cli module import does not start the runtime", async () => {
@@ -199,6 +200,7 @@ function createSession(provider = "codex"): RuntimeSession {
     startedAt: "2025-01-01T00:00:00.000Z",
     product: "nexagent",
     provider,
+    providerRegistry: createDefaultProviderRegistry(),
     providerRouting: {
       fallback: {
         policy: "require-open-spec",
@@ -419,13 +421,13 @@ test("runRuntimeCommand shows and sets model for active provider", async () => {
 
   assert.deepEqual(runRuntimeCommand(session, "/model"), {
     ok: true,
-    output: "provider: codex\ncurrent: gpt-5.4\navailable: gpt-5.4, gpt-5.5, gpt-5.4-mini, gpt-5.3-codex, gpt-5.3-codex-spark, gpt-5.2",
+    output: "provider: codex\ncurrent: gpt-5.4\navailable: gpt-5.4, gpt-5.5, gpt-5.4-mini, gpt-5.3-codex, gpt-5.3-codex-spark (needs websocket/realtime Codex adapter), gpt-5.2",
     activity: "model status · codex",
   });
 
   assert.deepEqual(runRuntimeCommand(session, "/model gpt-5.5"), {
     ok: true,
-    output: "provider: codex\ncurrent: gpt-5.5\navailable: gpt-5.4, gpt-5.5, gpt-5.4-mini, gpt-5.3-codex, gpt-5.3-codex-spark, gpt-5.2",
+    output: "provider: codex\ncurrent: gpt-5.5\navailable: gpt-5.4, gpt-5.5, gpt-5.4-mini, gpt-5.3-codex, gpt-5.3-codex-spark (needs websocket/realtime Codex adapter), gpt-5.2",
     activity: "model set · gpt-5.5",
   });
 });
@@ -1206,6 +1208,47 @@ test("autocompletePromptBuffer completes trailing skill shorthand inside prompt 
   }
 });
 
+test("autocompletePromptBuffer returns all matching skill shorthand suggestions", async () => {
+  const { autocompletePromptBuffer } = await import("../src/cli.js");
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-cli-skill-list-"));
+
+  try {
+    for (let index = 0; index < 9; index += 1) {
+      const name = `zz-skill-${String(index)}`;
+      await mkdir(path.join(cwd, ".codex", "skills", name), { recursive: true });
+      await writeFile(path.join(cwd, ".codex", "skills", name, "SKILL.md"), [
+        "---",
+        `name: ${name}`,
+        `description: test skill ${String(index)}`,
+        "---",
+        "",
+        `# ${name}`,
+      ].join("\n"));
+    }
+
+    const session = createSession();
+    session.cwd = cwd;
+    session.repo.root = cwd;
+
+    const completion = autocompletePromptBuffer(session, "use $zz-skill");
+
+    assert.equal(completion.suggestions.length, 9);
+    assert.deepEqual(completion.suggestions.map((suggestion) => suggestion.label), [
+      "$zz-skill-0",
+      "$zz-skill-1",
+      "$zz-skill-2",
+      "$zz-skill-3",
+      "$zz-skill-4",
+      "$zz-skill-5",
+      "$zz-skill-6",
+      "$zz-skill-7",
+      "$zz-skill-8",
+    ]);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test("autocompletePromptBuffer discovers global nexagent skills with repo override", async () => {
   const { autocompletePromptBuffer, describePromptHint } = await import("../src/cli.js");
   const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-cli-global-skill-"));
@@ -1397,9 +1440,9 @@ test("createRuntimeInspectPayload includes prompt v2 summaries", async () => {
   const payload = createRuntimeInspectPayload(createSession());
 
   assert.equal(payload.promptV2.assembly, "v2");
-  assert.match(payload.promptV2.identity, /nexagent, a local coding harness assistant/);
+  assert.match(payload.promptV2.identity, /nexagent, a local terminal-first software engineering agent/);
   assert.equal(payload.promptV2.style, "none");
-  assert.match(payload.promptV2.executionContract, /Continue until done, verified, or genuinely blocked/);
+  assert.match(payload.promptV2.executionContract, /Continue until task is done, verified, or genuinely blocked/);
   assert.match(payload.promptV2.toolRouting, /Broad repo map\/count\/parse\/compare\/summarize -> nexsight_execute/);
   assert.match(payload.promptV2.providerGuidance, /Transport: Codex CLI/);
   assert.match(payload.promptV2.repoContext, /AGENTS\.md: # Repo Guardrails/);
@@ -1428,7 +1471,7 @@ test("createRuntimeTuiView includes grouped instruction sources", async () => {
   assert.match(instructionRows.get("repoSources") ?? "", /AGENTS\.md=AGENTS\.md: # Repo Guardrails/);
   assert.match(instructionRows.get("taskSources") ?? "", /openspec=openspec includes changes, SPEC\.md/);
   assert.equal(instructionRows.get("assembly"), "v2");
-  assert.match(instructionRows.get("identity") ?? "", /nexagent, a local coding harness assistant/);
+  assert.match(instructionRows.get("identity") ?? "", /nexagent, a local terminal-first software engineering agent/);
   assert.match(instructionRows.get("executionContract") ?? "", /Actionable request means act in this turn/);
   assert.match(instructionRows.get("toolRouting") ?? "", /Broad repo map\/count\/parse\/compare\/summarize/);
   assert.match(instructionRows.get("providerGuidance") ?? "", /Transport: Codex CLI/);

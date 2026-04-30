@@ -106,16 +106,44 @@ OpenTUI is not the default path yet. Current shell work is focused on boot/rende
 
 Nexagent now has a Codex-style global home. By default this is `~/.nexagent/`; set `NEXAGENT_HOME` to use a different location for tests or portable installs.
 
-Settings merge in this order:
+Runtime settings merge in this order:
 
 1. built-in defaults
-2. `~/.nexagent/settings.json`
-3. `~/.nexagent/settings.local.json`
-4. imported assistant settings such as repo `.claude/settings*.json`
-5. repo `.nexagent/settings.json`
-6. repo `.nexagent/settings.local.json`
+2. `~/.nexagent/config.json`
+3. `~/.nexagent/settings.json`
+4. `~/.nexagent/settings.local.json`
+5. imported assistant settings such as repo `.claude/settings*.json`
+6. repo `.nexagent/settings.json`
+7. repo `.nexagent/settings.local.json`
+8. repo `.nexagent/config.json`
 
 Repo settings win over global settings. Relative paths inside global settings resolve from `~/.nexagent/`; relative paths inside repo settings resolve from the repo root.
+
+Provider registry config lives in `config.json` and currently supports JSON-first provider definitions. Repo `.nexagent/config.json` overrides global `~/.nexagent/config.json`; invalid provider entries are disabled with warnings instead of crashing startup.
+
+Example:
+
+```json
+{
+  "modelProviders": {
+    "codex": {
+      "baseUrl": "https://chatgpt.com/backend-api/codex",
+      "authSource": "codex-auth-json",
+      "wireApi": "responses",
+      "supportsWebsockets": true,
+      "models": ["gpt-5.4", "gpt-5.5", "gpt-5.3-codex-spark"]
+    },
+    "openai": {
+      "baseUrl": "https://api.openai.com/v1",
+      "authSource": "openai-api-key",
+      "wireApi": "responses",
+      "models": ["gpt-5.4", "gpt-5.5", "gpt-5.2"]
+    }
+  }
+}
+```
+
+`gpt-5.3-codex-spark` is visible in the catalog but disabled until the WebSocket/realtime Codex adapter is implemented.
 
 Skills are discovered from repo roots first, then global user roots:
 
@@ -139,6 +167,24 @@ Prompt assembly defaults to V2:
 ```
 
 Set `"assembly": "legacy"` in `~/.nexagent/settings.local.json` or repo `.nexagent/settings.local.json` only when debugging old prompt behavior. V2 separates stable execution rules, provider transport guidance, and dynamic repo/runtime context with a cache boundary, so provider prompts stay denser and less prone to tool-loop drift.
+
+Sentry error monitoring uses the bundled project DSN by default; set `SENTRY_DSN` to override it for another project. `bun run start` preloads `dist/instrument.js` so Sentry initializes before the built CLI entrypoint.
+
+Optional Sentry environment variables:
+
+- `SENTRY_ENVIRONMENT` — deployment environment label
+- `SENTRY_RELEASE` — release version
+- `SENTRY_TRACES_SAMPLE_RATE` — tracing sample rate from `0` to `1`; defaults to `1.0` in development and `0.1` otherwise
+- `SENTRY_SEND_DEFAULT_PII=false` — opt out of Sentry default PII capture
+- `SENTRY_INCLUDE_LOCAL_VARIABLES=true` — opt in to local variable capture in stack frames
+- `SENTRY_RECORD_AI_CONTENT=true` — opt in to capturing prompt/output text on AI spans; disabled by default because prompts and model responses can contain sensitive user content
+- `SENTRY_ENABLED=false` — disable Sentry even when `SENTRY_DSN` is set
+
+Sentry logs are enabled through `enableLogs: true`. Nexagent records concise provider lifecycle logs and manual AI monitoring spans:
+
+- `gen_ai.invoke_agent` for provider turns
+- `gen_ai.request` for model calls, with model/provider/transport metadata and token usage when returned by the provider
+- `gen_ai.execute_tool` for internal tool calls
 
 ## Common Runtime Commands
 

@@ -1,6 +1,7 @@
 import { CODEX_CHATGPT_HTTP_ADAPTER, hasCodexAuthJsonCredentialsSync } from "../provider/codex-chatgpt-http.js";
 import { CODEX_HTTP_ADAPTER } from "../provider/codex-http.js";
 import { CODEX_EXEC_ADAPTER } from "../provider/codex-exec.js";
+import { createDefaultProviderRegistry, getTransportProviderDefinition, type ProviderRegistry } from "../provider/registry.js";
 import { buildPromptV2, summarizePromptV2, type PromptV2Summary } from "./prompt-v2.js";
 import { probeCodexAuthState, type RuntimeAuthState } from "./auth.js";
 import { loadHarnessConfig, type HarnessConfig, type HooksConfig } from "./config.js";
@@ -18,6 +19,7 @@ export interface RuntimeState {
   product: string;
   provider: string;
   prompt: HarnessConfig["prompt"];
+  providerRegistry: ProviderRegistry;
   providerRouting: HarnessConfig["providerRouting"];
   providerTransport: ProviderTransportState;
   commandModes: RuntimeCommandModeState;
@@ -82,6 +84,7 @@ export function createRuntimeState(runtime: RuntimeBootstrap): RuntimeState {
       },
     },
   };
+  const providerRegistry = runtime.config.providerRegistry ?? createDefaultProviderRegistry();
   const provider = resolveActiveProvider(runtime);
   const providerTransport = createProviderTransportState(runtime, provider);
   const promptV2 = buildPromptV2({
@@ -105,6 +108,7 @@ export function createRuntimeState(runtime: RuntimeBootstrap): RuntimeState {
     product: runtime.config.productName,
     provider,
     prompt: runtime.config.prompt,
+    providerRegistry,
     providerRouting,
     providerTransport,
     commandModes: {
@@ -154,27 +158,29 @@ function resolveActiveProvider(runtime: RuntimeBootstrap): string {
 function createProviderTransportState(runtime: RuntimeBootstrap, activeProvider: string): ProviderTransportState {
   const mode = resolveTransportMode(runtime.persisted?.transportMode);
   if (mode === "codex-http") {
+    const definition = getTransportProviderDefinition(runtime.config.providerRegistry, mode);
     return {
-      executor: "fetch",
-      adapter: CODEX_CHATGPT_HTTP_ADAPTER.id,
+      executor: definition?.executor ?? "fetch",
+      adapter: definition?.adapter ?? CODEX_CHATGPT_HTTP_ADAPTER.id,
       mode: CODEX_CHATGPT_HTTP_ADAPTER.mode,
-      authSource: CODEX_CHATGPT_HTTP_ADAPTER.authSource,
+      authSource: definition?.authSource ?? CODEX_CHATGPT_HTTP_ADAPTER.authSource,
       authGate: hasCodexAuthJsonCredentialsSync() ? "ready" : "missing",
       activeProvider,
-      openaiBaseUrl: runtime.config.providerRouting.transport.openaiBaseUrl ?? "https://chatgpt.com/backend-api/codex",
+      openaiBaseUrl: runtime.config.providerRouting.transport.openaiBaseUrl ?? definition?.baseUrl ?? "https://chatgpt.com/backend-api/codex",
       silentFallback: false,
     };
   }
 
   if (mode === "http-responses") {
+    const definition = getTransportProviderDefinition(runtime.config.providerRegistry, mode);
     return {
-      executor: "fetch",
-      adapter: CODEX_HTTP_ADAPTER.id,
+      executor: definition?.executor ?? "fetch",
+      adapter: definition?.adapter ?? CODEX_HTTP_ADAPTER.id,
       mode: CODEX_HTTP_ADAPTER.mode,
-      authSource: CODEX_HTTP_ADAPTER.authSource,
+      authSource: definition?.authSource ?? CODEX_HTTP_ADAPTER.authSource,
       authGate: process.env.OPENAI_API_KEY?.trim() ? "ready" : "missing",
       activeProvider,
-      openaiBaseUrl: runtime.config.providerRouting.transport.openaiBaseUrl ?? "https://api.openai.com/v1",
+      openaiBaseUrl: runtime.config.providerRouting.transport.openaiBaseUrl ?? definition?.baseUrl ?? "https://api.openai.com/v1",
       silentFallback: false,
     };
   }
