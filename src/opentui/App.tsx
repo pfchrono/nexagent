@@ -31,6 +31,7 @@ const COMPOSER_CURSOR = "|";
 const ALT_V_UNSUPPORTED_MESSAGE = "Alt+V paste-image unavailable in OpenTUI; use /attach <image-path>";
 const COPIED_RESULTS_NOTICE = "copied results to clipboard";
 const PALETTE_VISIBLE_ROWS = 5;
+const PALETTE_CHROME_ROWS = 5;
 
 interface OpenTuiMouseLikeEvent {
   type?: string;
@@ -70,6 +71,8 @@ export function OpenTuiApp({ view, session, keyboardSource, promptHistory = [], 
   const skillPreview = resolveSkillPreview(view.cwd, composer.text, composer.selectedIndex);
   const paletteRows = rowsForOverlay(composer, commandSurface.rows, history);
   const visiblePaletteRows = visiblePaletteWindow(paletteRows, composer.selectedIndex, PALETTE_VISIBLE_ROWS);
+  const paletteDisplayRows = createPaletteDisplayRows(composer, paletteRows, visiblePaletteRows, paletteWidth);
+  const paletteFooterLine = paletteRows.length > PALETTE_VISIBLE_ROWS ? `${String(composer.selectedIndex + 1)}/${String(paletteRows.length)} - use arrows` : "";
   const previewLine = skillPreview.status === "none" ? commandSurface.hint : skillPreview.label.replace(/^skill:/, SKILL_PREVIEW_PREFIX);
   const attachmentLine = composer.attachment
     ? composer.attachment.supported
@@ -213,10 +216,7 @@ export function OpenTuiApp({ view, session, keyboardSource, promptHistory = [], 
     }
   }
 
-  const paletteContentRows = 2
-    + Math.min(PALETTE_VISIBLE_ROWS, Math.max(1, paletteRows.length))
-    + (paletteRows.length > PALETTE_VISIBLE_ROWS ? 1 : 0);
-  const paletteOverlayHeight = paletteContentRows + 2;
+  const paletteOverlayHeight = PALETTE_VISIBLE_ROWS + PALETTE_CHROME_ROWS;
   const paletteTop = Math.max(5, terminalHeight - paletteOverlayHeight - 5);
   const transcriptViewportHeight = Math.max(4, terminalHeight - 14);
   const transcriptBlocks = [...view.transcriptBlocks, ...outputBlocks, ...(traceExpanded ? view.traceBlocks : [])];
@@ -286,20 +286,18 @@ export function OpenTuiApp({ view, session, keyboardSource, promptHistory = [], 
           left={paletteMarginLeft + 1}
           zIndex={100}
           padding={1}
+          overflow="hidden"
+          shouldFill
           backgroundColor="#000000"
         >
           <text width={paletteWidth} fg="#f9e2af">{commandSurface.title}</text>
           <text width={paletteWidth} fg="#a6adc8">{fitLine(composer.overlayMode === "history-search" ? "history search" : commandSurface.query, paletteWidth)}</text>
-          {paletteRows.length > 0 ? visiblePaletteRows.map((row) => (
-            <text key={`palette-${row.value}`} width={paletteWidth} fg={row.selected ? "#8bd5ff" : "#a6adc8"}>
-              {fitLine(`${row.selected ? "> " : "  "}${row.label} ${row.hint}`, paletteWidth)}
+          {paletteDisplayRows.map((row) => (
+            <text key={row.key} width={paletteWidth} fg={row.fg}>
+              {row.text}
             </text>
-          )) : (
-            <text width={paletteWidth} fg="#a6adc8">{composer.overlayMode === "history-search" ? "No history matches" : "No matches"}</text>
-          )}
-          {paletteRows.length > PALETTE_VISIBLE_ROWS ? (
-            <text width={paletteWidth} fg="#a6adc8">{`${String(composer.selectedIndex + 1)}/${String(paletteRows.length)} - use arrows`}</text>
-          ) : null}
+          ))}
+          <text width={paletteWidth} fg="#a6adc8">{paletteFooterLine}</text>
         </box>
       ) : null}
       <box flexDirection="column" width={contentWidth} marginTop={1}>
@@ -524,6 +522,31 @@ function rowsForOverlay(
       value: entry,
       selected: index === composer.selectedIndex,
     }));
+}
+
+function createPaletteDisplayRows(
+  composer: OpenTuiComposerState,
+  paletteRows: CommandPaletteRow[],
+  visibleRows: CommandPaletteRow[],
+  width: number,
+): Array<{ key: string; text: string; fg: string }> {
+  const rows = paletteRows.length > 0
+    ? visibleRows.map((row) => ({
+      key: `palette-${row.value}`,
+      text: fitLine(`${row.selected ? "> " : "  "}${row.label} ${row.hint}`, width),
+      fg: row.selected ? "#8bd5ff" : "#a6adc8",
+    }))
+    : [{
+      key: "palette-empty",
+      text: composer.overlayMode === "history-search" ? "No history matches" : "No matches",
+      fg: "#a6adc8",
+    }];
+
+  return Array.from({ length: PALETTE_VISIBLE_ROWS }, (_, index) => rows[index] ?? {
+    key: `palette-blank-${String(index)}`,
+    text: "",
+    fg: "#a6adc8",
+  });
 }
 
 function visiblePaletteWindow(rows: CommandPaletteRow[], selectedIndex: number, maxRows: number): CommandPaletteRow[] {
