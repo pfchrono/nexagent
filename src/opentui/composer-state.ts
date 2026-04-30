@@ -9,6 +9,7 @@ export interface ComposerAttachmentState {
 
 export interface OpenTuiComposerState {
   text: string;
+  cursorIndex: number;
   overlayMode: ComposerOverlayMode;
   selectedIndex: number;
   promptDraft: string | null;
@@ -27,6 +28,9 @@ export type ComposerIntent =
 export type ComposerKeyEvent =
   | { kind: "character"; value: string }
   | { kind: "backspace" }
+  | { kind: "delete-forward" }
+  | { kind: "move-cursor"; direction: -1 | 1 }
+  | { kind: "move-cursor-to"; position: "start" | "end" }
   | { kind: "enter"; shift?: boolean }
   | { kind: "tab"; completion?: PromptCompletionResult | null }
   | { kind: "move-selection"; direction: -1 | 1; rowCount: number }
@@ -44,6 +48,7 @@ export interface ComposerEventResult {
 export function createOpenTuiComposerState(): OpenTuiComposerState {
   return {
     text: "",
+    cursorIndex: 0,
     overlayMode: "none",
     selectedIndex: 0,
     promptDraft: null,
@@ -60,11 +65,13 @@ export function handleOpenTuiComposerEvent(
 ): ComposerEventResult {
   switch (event.kind) {
     case "character": {
-      const text = `${state.text}${event.value}`;
+      const cursorIndex = clampCursor(state.cursorIndex, state.text);
+      const text = `${state.text.slice(0, cursorIndex)}${event.value}${state.text.slice(cursorIndex)}`;
       return {
         state: {
           ...state,
           text,
+          cursorIndex: cursorIndex + event.value.length,
           overlayMode: overlayForText(text, state.overlayMode),
           historyIndex: -1,
           selectedIndex: 0,
@@ -74,11 +81,16 @@ export function handleOpenTuiComposerEvent(
       };
     }
     case "backspace": {
-      const text = state.text.slice(0, -1);
+      const cursorIndex = clampCursor(state.cursorIndex, state.text);
+      if (cursorIndex === 0) {
+        return { state: { ...state, notice: "editing" }, intent: null };
+      }
+      const text = `${state.text.slice(0, cursorIndex - 1)}${state.text.slice(cursorIndex)}`;
       return {
         state: {
           ...state,
           text,
+          cursorIndex: cursorIndex - 1,
           overlayMode: overlayForText(text, state.overlayMode),
           selectedIndex: 0,
           notice: "editing",
@@ -86,10 +98,50 @@ export function handleOpenTuiComposerEvent(
         intent: null,
       };
     }
+    case "delete-forward": {
+      const cursorIndex = clampCursor(state.cursorIndex, state.text);
+      if (cursorIndex >= state.text.length) {
+        return { state: { ...state, notice: "editing" }, intent: null };
+      }
+      const text = `${state.text.slice(0, cursorIndex)}${state.text.slice(cursorIndex + 1)}`;
+      return {
+        state: {
+          ...state,
+          text,
+          cursorIndex,
+          overlayMode: overlayForText(text, state.overlayMode),
+          selectedIndex: 0,
+          notice: "editing",
+        },
+        intent: null,
+      };
+    }
+    case "move-cursor": {
+      return {
+        state: {
+          ...state,
+          cursorIndex: Math.max(0, Math.min(state.text.length, clampCursor(state.cursorIndex, state.text) + event.direction)),
+          notice: "cursor moved",
+        },
+        intent: null,
+      };
+    }
+    case "move-cursor-to": {
+      return {
+        state: {
+          ...state,
+          cursorIndex: event.position === "start" ? 0 : state.text.length,
+          notice: "cursor moved",
+        },
+        intent: null,
+      };
+    }
     case "enter": {
       if (event.shift) {
+        const cursorIndex = clampCursor(state.cursorIndex, state.text);
+        const text = `${state.text.slice(0, cursorIndex)}\n${state.text.slice(cursorIndex)}`;
         return {
-          state: { ...state, text: `${state.text}\n`, notice: "newline inserted" },
+          state: { ...state, text, cursorIndex: cursorIndex + 1, notice: "newline inserted" },
           intent: null,
         };
       }
@@ -101,6 +153,7 @@ export function handleOpenTuiComposerEvent(
         state: {
           ...state,
           text: "",
+          cursorIndex: 0,
           overlayMode: "none",
           historyIndex: -1,
           promptDraft: null,
@@ -119,6 +172,7 @@ export function handleOpenTuiComposerEvent(
         state: {
           ...state,
           text: first,
+          cursorIndex: first.length,
           overlayMode: overlayForText(first, state.overlayMode),
           selectedIndex: 0,
           notice: "completion accepted",
@@ -146,6 +200,7 @@ export function handleOpenTuiComposerEvent(
         state: {
           ...state,
           text: value,
+          cursorIndex: value.length,
           overlayMode: "none",
           selectedIndex: 0,
           historyIndex: -1,
@@ -163,7 +218,7 @@ export function handleOpenTuiComposerEvent(
       }
       if (state.text.length > 0) {
         return {
-          state: { ...state, text: "", promptDraft: null, historyIndex: -1, notice: "composer cleared" },
+          state: { ...state, text: "", cursorIndex: 0, promptDraft: null, historyIndex: -1, notice: "composer cleared" },
           intent: null,
         };
       }
@@ -221,6 +276,7 @@ function browseHistory(
     state: {
       ...state,
       text: history[historyIndex] ?? draft,
+      cursorIndex: (history[historyIndex] ?? draft).length,
       promptDraft: draft,
       historyIndex,
       overlayMode: "history-search",
@@ -229,6 +285,10 @@ function browseHistory(
     },
     intent: null,
   };
+}
+
+function clampCursor(cursorIndex: number, text: string): number {
+  return Math.max(0, Math.min(text.length, cursorIndex));
 }
 
 function overlayForText(text: string, current: ComposerOverlayMode): ComposerOverlayMode {

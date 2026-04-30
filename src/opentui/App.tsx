@@ -82,6 +82,22 @@ export function OpenTuiApp({ view, session, promptHistory = [], onPromptHistoryC
       applyComposerEvent({ kind: "history", direction: 1, force: key.ctrl, history });
       return;
     }
+    if (key.name === "left") {
+      applyComposerEvent({ kind: "move-cursor", direction: -1 });
+      return;
+    }
+    if (key.name === "right") {
+      applyComposerEvent({ kind: "move-cursor", direction: 1 });
+      return;
+    }
+    if (key.name === "home") {
+      applyComposerEvent({ kind: "move-cursor-to", position: "start" });
+      return;
+    }
+    if (key.name === "end") {
+      applyComposerEvent({ kind: "move-cursor-to", position: "end" });
+      return;
+    }
     if (key.name === "escape") {
       applyComposerEvent({ kind: "escape" });
       return;
@@ -102,8 +118,12 @@ export function OpenTuiApp({ view, session, promptHistory = [], onPromptHistoryC
       applyComposerEvent({ kind: "enter", shift: key.shift });
       return;
     }
-    if (key.name === "backspace" || key.name === "delete") {
+    if (key.name === "backspace") {
       applyComposerEvent({ kind: "backspace" });
+      return;
+    }
+    if (key.name === "delete") {
+      applyComposerEvent({ kind: "delete-forward" });
       return;
     }
     if (!key.ctrl && !key.meta && key.sequence.length === 1) {
@@ -115,7 +135,7 @@ export function OpenTuiApp({ view, session, promptHistory = [], onPromptHistoryC
   const visibleTranscriptLines = [...transcriptLines, ...outputLines.slice(-8)].slice(-12);
   const traceLines = traceExpanded ? view.traceDetailLines : view.traceSummaryLines;
   const traceLabel = traceExpanded ? view.traceExpandedLabel : view.traceCollapsedLabel;
-  const composerLine = composer.text.length > 0 ? `> ${composer.text}${COMPOSER_CURSOR}` : `> ${view.composerHint} ${COMPOSER_CURSOR}`;
+  const composerLine = composer.text.length > 0 ? renderComposerLine(composer) : `> ${view.composerHint} ${COMPOSER_CURSOR}`;
 
   return (
     <box flexDirection="column" width={terminalWidth} height={terminalHeight} padding={1}>
@@ -184,7 +204,7 @@ export function OpenTuiApp({ view, session, promptHistory = [], onPromptHistoryC
   function submitPrompt(prompt: string): void {
     if (skillPreview.status === "ambiguous") {
       setShellNotice("Select skill");
-      setComposer((current) => ({ ...current, text: prompt, overlayMode: "skill" }));
+      setComposer((current) => ({ ...current, text: prompt, cursorIndex: prompt.length, overlayMode: "skill" }));
       return;
     }
     if (prompt === "/detach" || prompt === "/attach clear") {
@@ -235,6 +255,11 @@ export function OpenTuiApp({ view, session, promptHistory = [], onPromptHistoryC
     }
     setOutputLines((current) => [...current, ...lines].slice(-40));
   }
+}
+
+function renderComposerLine(composer: OpenTuiComposerState): string {
+  const cursorIndex = Math.max(0, Math.min(composer.text.length, composer.cursorIndex));
+  return `> ${composer.text.slice(0, cursorIndex)}${COMPOSER_CURSOR}${composer.text.slice(cursorIndex)}`;
 }
 
 function rowsForOverlay(

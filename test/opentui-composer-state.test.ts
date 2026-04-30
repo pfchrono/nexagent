@@ -39,6 +39,39 @@ test("OpenTUI composer Tab accepts first matching completion", () => {
   });
 
   assert.equal(result.state.text, "/status ");
+  assert.equal(result.state.cursorIndex, "/status ".length);
+});
+
+test("OpenTUI composer Left Right Home and End move editing cursor", () => {
+  const state = { ...createOpenTuiComposerState(), text: "abcd", cursorIndex: 4 };
+
+  const left = handleOpenTuiComposerEvent(state, { kind: "move-cursor", direction: -1 });
+  assert.equal(left.state.cursorIndex, 3);
+
+  const home = handleOpenTuiComposerEvent(left.state, { kind: "move-cursor-to", position: "start" });
+  assert.equal(home.state.cursorIndex, 0);
+
+  const right = handleOpenTuiComposerEvent(home.state, { kind: "move-cursor", direction: 1 });
+  assert.equal(right.state.cursorIndex, 1);
+
+  const end = handleOpenTuiComposerEvent(right.state, { kind: "move-cursor-to", position: "end" });
+  assert.equal(end.state.cursorIndex, 4);
+});
+
+test("OpenTUI composer inserts and deletes at cursor", () => {
+  const state = { ...createOpenTuiComposerState(), text: "ac", cursorIndex: 1 };
+
+  const inserted = handleOpenTuiComposerEvent(state, { kind: "character", value: "b" });
+  assert.equal(inserted.state.text, "abc");
+  assert.equal(inserted.state.cursorIndex, 2);
+
+  const backspaced = handleOpenTuiComposerEvent(inserted.state, { kind: "backspace" });
+  assert.equal(backspaced.state.text, "ac");
+  assert.equal(backspaced.state.cursorIndex, 1);
+
+  const deleted = handleOpenTuiComposerEvent(backspaced.state, { kind: "delete-forward" });
+  assert.equal(deleted.state.text, "a");
+  assert.equal(deleted.state.cursorIndex, 1);
 });
 
 test("OpenTUI composer history browsing preserves draft text", () => {
