@@ -299,7 +299,7 @@ function overlayForText(text: string, current: ComposerOverlayMode): ComposerOve
   if (trimmed.startsWith("$") || trimmed.startsWith("/skill")) {
     return "skill";
   }
-  if (trimmed.startsWith("/")) {
+  if (/^\/\S*$/.test(trimmed)) {
     return "command";
   }
   if (hasTrailingPathCompletionToken(text)) {

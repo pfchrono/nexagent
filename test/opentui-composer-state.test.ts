@@ -136,3 +136,13 @@ test("OpenTUI composer opens completion overlay for trailing path tokens", () =>
   assert.equal(relativeSlash.state.overlayMode, "command");
   assert.equal(prosePath.state.overlayMode, "command");
 });
+
+test("OpenTUI composer closes slash command palette after args start", () => {
+  const command = handleOpenTuiComposerEvent(createOpenTuiComposerState(), { kind: "character", value: "/model" });
+  const withSpace = handleOpenTuiComposerEvent(command.state, { kind: "character", value: " " });
+  const withArg = handleOpenTuiComposerEvent(withSpace.state, { kind: "character", value: "g" });
+
+  assert.equal(command.state.overlayMode, "command");
+  assert.equal(withSpace.state.overlayMode, "none");
+  assert.equal(withArg.state.overlayMode, "none");
+});

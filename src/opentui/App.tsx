@@ -185,6 +185,10 @@ export function OpenTuiApp({ view, session, keyboardSource, promptHistory = [], 
         return;
       }
       if (!key.shift && composer.overlayMode !== "none") {
+        if (paletteRows.length === 0) {
+          applyComposerEvent({ kind: "enter", shift: false });
+          return;
+        }
         const selectedValue = paletteRows[composer.selectedIndex]?.value ?? paletteRows[0]?.value ?? "";
         if (selectedValue.trim() === composer.text.trim()) {
           applyComposerEvent({ kind: "enter", shift: false });
