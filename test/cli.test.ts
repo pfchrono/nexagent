@@ -228,6 +228,14 @@ test("buildPacedReplyFrames reveals assistant reply monotonically", async () => 
   }
 });
 
+test("package dev script uses Bun for OpenTUI asset imports", async () => {
+  const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")) as {
+    scripts?: Record<string, string>;
+  };
+
+  assert.equal(packageJson.scripts?.dev, "bun run src/cli.ts");
+});
+
 function createSession(provider = "codex"): RuntimeSession {
   return {
     id: "session_test",

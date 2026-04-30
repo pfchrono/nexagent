@@ -45,7 +45,7 @@ Use existing package scripts only:
 
 - `bun run build` — TypeScript compile
 - `bun run test` or `bun test ./test/*.test.ts` — test suite
-- `bun run dev` — run TypeScript CLI via loader
+- `bun run dev` — run TypeScript CLI via Bun
 - `bun run start` — run built `dist/cli.js`
 - `bun run compile` — build platform binaries
 

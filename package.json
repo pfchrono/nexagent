@@ -11,7 +11,7 @@
     "lint": "eslint \"src/**/*.{ts,tsx}\" \"test/**/*.ts\"",
     "test": "bun test ./test/*.test.ts",
     "start": "node --import ./dist/instrument.js dist/cli.js",
-    "dev": "node --loader ts-node/esm src/cli.ts",
+    "dev": "bun run src/cli.ts",
     "dev:opentui": "bun run src/cli.ts --opentui",
     "compile": "bun run compile:linux && bun run compile:macos && bun run compile:windows",
     "compile:linux": "bun build ./src/cli.ts --compile --outfile ./dist/nexagent-linux-x64 --target=bun-linux-x64",
