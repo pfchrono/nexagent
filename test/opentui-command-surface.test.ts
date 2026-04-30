@@ -26,6 +26,7 @@ test("OpenTUI command surface resolves skill preview", () => {
   assert.equal(preview.status, "resolved");
   assert.equal(preview.label, "skill: alpha");
   assert.equal(preview.command, "/skill alpha");
+  assert.equal(preview.rows[0]?.hint, "alpha skill (project)");
 });
 
 test("OpenTUI command surface reports ambiguous skills", () => {
@@ -36,6 +37,7 @@ test("OpenTUI command surface reports ambiguous skills", () => {
   assert.equal(preview.label, "Select skill");
   assert.equal(preview.command, null);
   assert.equal(preview.rows.length, 2);
+  assert.equal(preview.rows[0]?.hint, "alpha skill (project)");
 });
 
 test("OpenTUI command surface keeps all rows selectable beyond visible palette window", () => {

@@ -1,8 +1,12 @@
-import path from "node:path";
-
 import { autocompletePromptBuffer, describePromptHint, type PromptCompletionResult, type PromptCompletionSuggestion } from "../cli/autocomplete.js";
 import { COMMAND_CATALOG } from "../cli/catalog.js";
-import { discoverSkills, normalizeSkillToken, parseSkillShorthand, toSkillCommandFromShorthand } from "../cli/skills.js";
+import {
+  discoverSkills,
+  normalizeSkillToken,
+  parseSkillShorthand,
+  toSkillCommandFromShorthand,
+  type RuntimeSkillDefinition,
+} from "../cli/skills.js";
 
 export interface CommandPaletteRow {
   label: string;
@@ -64,7 +68,7 @@ export function resolveSkillPreview(cwd: string, input: string, selectedIndex = 
   const selected = clampIndex(selectedIndex, matches.length);
   const rows = matches.map((skill, index) => ({
     label: skill.name,
-    hint: `${skill.source} ${path.basename(path.dirname(skill.path))}`,
+    hint: skillPaletteHint(skill),
     value: `/skill ${skill.name}${parsed.rawArgs ? ` ${parsed.rawArgs}` : ""}`,
     selected: index === selected,
   }));
@@ -136,6 +140,11 @@ function suggestionToRow(suggestion: PromptCompletionSuggestion, index: number, 
     value: suggestion.value,
     selected: index === selectedIndex,
   };
+}
+
+function skillPaletteHint(skill: RuntimeSkillDefinition): string {
+  const description = skill.description.trim();
+  return description ? `${description} (${skill.source})` : skill.source;
 }
 
 function surfaceTitle(trimmed: string): string {
