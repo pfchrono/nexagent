@@ -248,7 +248,7 @@ export function OpenTuiApp({ view, session, keyboardSource, promptHistory = [], 
             fg={row.fg}
             onMouseDown={(event) => {
               updateTranscriptState({ kind: "set-selected-block", index: row.blockIndex, metrics: transcriptMetrics });
-              if (row.isLabel) {
+              if (row.canToggle) {
                 updateTranscriptState({ kind: "toggle-block", blockId: row.blockId });
               }
               event.preventDefault();
@@ -392,6 +392,7 @@ interface TranscriptRenderRow {
   blockId: string;
   blockIndex: number;
   isLabel: boolean;
+  canToggle: boolean;
 }
 
 function flattenTranscriptBlocks(blocks: OpenTuiTranscriptBlock[], state: OpenTuiTranscriptState): TranscriptRenderRow[] {
@@ -402,7 +403,15 @@ function flattenTranscriptBlocks(blocks: OpenTuiTranscriptBlock[], state: OpenTu
     const label = `${selected ? "> " : "  "}${block.label}${detailAvailable ? (expanded ? " [-]" : " [+]") : ""}`;
     const lines = expanded ? block.detailLines : block.summaryLines;
     return [
-      { key: `${block.id}-label`, text: label, fg: selected ? "#8bd5ff" : "#f9e2af", blockId: block.id, blockIndex, isLabel: true },
+      {
+        key: `${block.id}-label`,
+        text: label,
+        fg: selected ? "#8bd5ff" : "#f9e2af",
+        blockId: block.id,
+        blockIndex,
+        isLabel: true,
+        canToggle: detailAvailable,
+      },
       ...lines.map((line, lineIndex) => ({
         key: `${block.id}-${String(lineIndex)}`,
         text: `    ${line}`,
@@ -410,6 +419,7 @@ function flattenTranscriptBlocks(blocks: OpenTuiTranscriptBlock[], state: OpenTu
         blockId: block.id,
         blockIndex,
         isLabel: false,
+        canToggle: detailAvailable,
       })),
     ];
   });

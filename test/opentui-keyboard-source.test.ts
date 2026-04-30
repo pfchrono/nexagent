@@ -30,6 +30,14 @@ test("OpenTUI raw keyboard parser splits printable chunks", () => {
   assert.deepEqual(parseRawKeyboardInput("quit").map((event) => event.sequence), ["q", "u", "i", "t"]);
 });
 
+test("OpenTUI raw keyboard parser keeps Enter and Tab as special keys", () => {
+  assert.deepEqual(parseRawKeyboardInput("\r\n\t").map((event) => [event.name, event.ctrl]), [
+    ["return", false],
+    ["return", false],
+    ["tab", false],
+  ]);
+});
+
 test("OpenTUI raw keyboard parser handles navigation keys", () => {
   assert.deepEqual(parseRawKeyboardInput("\x1b[D\x1b[C\x1b[H\x1b[F\x1b[5~\x1b[6~").map((event) => event.name), [
     "left",

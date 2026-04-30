@@ -158,6 +158,15 @@ function parseCsiModifier(sequence: string): Partial<OpenTuiKeyEvent> {
 }
 
 function keyEventForCharacter(char: string, meta = false): OpenTuiKeyEvent | null {
+  if (char === "\r" || char === "\n") {
+    return specialKey("return", char);
+  }
+  if (char === "\t") {
+    return specialKey("tab", char);
+  }
+  if (char === "\x7f" || char === "\b") {
+    return specialKey("backspace", char);
+  }
   const controlCode = char.charCodeAt(0);
   if (controlCode >= 1 && controlCode <= 26) {
     return {
@@ -168,15 +177,6 @@ function keyEventForCharacter(char: string, meta = false): OpenTuiKeyEvent | nul
       option: false,
       sequence: char,
     };
-  }
-  if (char === "\r" || char === "\n") {
-    return specialKey("return", char);
-  }
-  if (char === "\t") {
-    return specialKey("tab", char);
-  }
-  if (char === "\x7f" || char === "\b") {
-    return specialKey("backspace", char);
   }
   if (!/^[ -~]$/.test(char)) {
     return null;
