@@ -11,6 +11,8 @@ export interface OpenTuiRuntimeView {
   turnCount: number;
   approval: string;
   toolPolicy: string;
+  providerTransportMode: string;
+  imageAttachmentSupported: boolean;
   headerTitle: string;
   providerLabel: string;
   sessionLabel: string;
@@ -48,6 +50,8 @@ export function createOpenTuiRuntimeView(session: RuntimeSession): OpenTuiRuntim
     turnCount: session.telemetry.turnCount,
     approval,
     toolPolicy: session.toolPolicy.mode,
+    providerTransportMode: session.providerTransport.mode,
+    imageAttachmentSupported: session.providerTransport.mode !== "cli-exec",
     headerTitle: "nexagent :: opentui",
     providerLabel: `${provider}/${model}`,
     sessionLabel: `session ${session.id} | turns ${String(session.telemetry.turnCount)}`,

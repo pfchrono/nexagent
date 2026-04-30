@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "bun:test";
 
 import { createOpenTuiRuntimeView } from "../src/opentui/runtime-view.js";
+import { createDefaultProviderRegistry } from "../src/provider/registry.js";
 import type { RuntimeSession } from "../src/runtime/session.js";
 
 test("createOpenTuiRuntimeView maps runtime session without mutation", () => {
@@ -21,6 +22,8 @@ test("createOpenTuiRuntimeView maps runtime session without mutation", () => {
     turnCount: 2,
     approval: "open",
     toolPolicy: "repo-local-guarded",
+    providerTransportMode: "cli-exec",
+    imageAttachmentSupported: false,
     headerTitle: "nexagent :: opentui",
     providerLabel: "codex/gpt-5.4",
     sessionLabel: "session session_test | turns 2",
@@ -76,6 +79,7 @@ function createSession(): RuntimeSession {
     startedAt: "2025-01-01T00:00:00.000Z",
     product: "nexagent",
     provider: "codex",
+    providerRegistry: createDefaultProviderRegistry(),
     providerRouting: {
       fallback: { policy: "require-open-spec", silentProviderSwitch: false },
       modelSelection: {

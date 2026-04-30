@@ -1,6 +1,7 @@
 import { createCliRenderer } from "@opentui/core";
 import { createRoot } from "@opentui/react";
 
+import { loadPersistedPromptHistory, savePersistedPromptHistory } from "../runtime/persistence.js";
 import type { RuntimeSession } from "../runtime/session.js";
 import { OpenTuiApp } from "./App.js";
 import { createOpenTuiRuntimeView } from "./runtime-view.js";
@@ -32,6 +33,14 @@ export async function runOpenTuiRuntime(session: RuntimeSession): Promise<void> 
 
     process.once("SIGINT", cleanup);
     process.once("SIGTERM", cleanup);
-    createRoot(renderer).render(<OpenTuiApp view={createOpenTuiRuntimeView(session)} onExit={cleanup} />);
+    createRoot(renderer).render(
+      <OpenTuiApp
+        session={session}
+        view={createOpenTuiRuntimeView(session)}
+        promptHistory={loadPersistedPromptHistory(session.cwd)}
+        onPromptHistoryChange={(history) => savePersistedPromptHistory(session.cwd, history)}
+        onExit={cleanup}
+      />,
+    );
   });
 }
