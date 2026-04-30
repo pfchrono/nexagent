@@ -54,6 +54,15 @@ test("OpenTUI raw keyboard parser skips terminal protocol responses", () => {
   assert.deepEqual(parseRawKeyboardInput("\x1b[?2026$p").map((event) => event.name), []);
 });
 
+test("OpenTUI raw keyboard parser handles control shortcuts", () => {
+  assert.deepEqual(parseRawKeyboardInput("\x03\x11\x14\x19").map((event) => [event.name, event.ctrl]), [
+    ["c", true],
+    ["q", true],
+    ["t", true],
+    ["y", true],
+  ]);
+});
+
 test("OpenTUI entry disables Kitty keyboard startup negotiation", async () => {
   const source = await readFile(new URL("../src/opentui/entry.tsx", import.meta.url), "utf8");
 

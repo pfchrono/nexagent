@@ -35,6 +35,7 @@ test("OpenTUI transcript state preserves latest anchoring only when attached", (
     metrics: { contentLineCount: 12, viewportLineCount: 5, blockCount: 2 },
   });
   assert.equal(state.scrollOffset, 7);
+  assert.equal(state.selectedBlockIndex, 1);
 
   state = handleOpenTuiTranscriptEvent(state, {
     kind: "content-updated",
@@ -42,6 +43,7 @@ test("OpenTUI transcript state preserves latest anchoring only when attached", (
   });
   assert.equal(state.scrollOffset, 11);
   assert.equal(state.atLatest, true);
+  assert.equal(state.selectedBlockIndex, 2);
 
   state = handleOpenTuiTranscriptEvent(state, {
     kind: "scroll-lines",
@@ -56,6 +58,7 @@ test("OpenTUI transcript state preserves latest anchoring only when attached", (
   });
   assert.equal(state.scrollOffset, 9);
   assert.equal(state.atLatest, false);
+  assert.equal(state.selectedBlockIndex, 2);
 
   state = handleOpenTuiTranscriptEvent(state, {
     kind: "jump-latest",

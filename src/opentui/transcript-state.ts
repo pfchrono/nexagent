@@ -45,11 +45,12 @@ export function handleOpenTuiTranscriptEvent(
 
   if (event.kind === "content-updated") {
     const scrollOffset = state.atLatest ? maxOffset : clamp(state.scrollOffset, 0, maxOffset);
+    const maxBlockIndex = Math.max(0, metrics.blockCount - 1);
     return {
       ...state,
       scrollOffset,
       atLatest: scrollOffset === maxOffset,
-      selectedBlockIndex: clamp(state.selectedBlockIndex, 0, Math.max(0, metrics.blockCount - 1)),
+      selectedBlockIndex: state.atLatest ? maxBlockIndex : clamp(state.selectedBlockIndex, 0, maxBlockIndex),
     };
   }
 

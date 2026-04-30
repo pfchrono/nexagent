@@ -30,6 +30,7 @@ const SKILL_PREVIEW_PREFIX = "skill:";
 const COMPOSER_CURSOR = "|";
 const ALT_V_UNSUPPORTED_MESSAGE = "Alt+V paste-image unavailable in OpenTUI; use /attach <image-path>";
 const COPIED_RESULTS_NOTICE = "copied results to clipboard";
+const PALETTE_VISIBLE_ROWS = 5;
 
 export interface OpenTuiAppProps {
   view: OpenTuiRuntimeView;
@@ -57,6 +58,7 @@ export function OpenTuiApp({ view, session, keyboardSource, promptHistory = [], 
   const commandSurface = createCommandSurface(view.cwd, composer.text, composer.selectedIndex);
   const skillPreview = resolveSkillPreview(view.cwd, composer.text, composer.selectedIndex);
   const paletteRows = rowsForOverlay(composer, commandSurface.rows, history);
+  const visiblePaletteRows = visiblePaletteWindow(paletteRows, composer.selectedIndex, PALETTE_VISIBLE_ROWS);
   const previewLine = skillPreview.status === "none" ? commandSurface.hint : skillPreview.label.replace(/^skill:/, SKILL_PREVIEW_PREFIX);
   const attachmentLine = composer.attachment
     ? composer.attachment.supported
@@ -75,6 +77,10 @@ export function OpenTuiApp({ view, session, keyboardSource, promptHistory = [], 
 
   function handleKeyboardKey(key: OpenTuiKeyEvent): void {
     if (key.ctrl && key.name === "c") {
+      copySelectedTranscriptBlock();
+      return;
+    }
+    if (key.ctrl && key.name === "q") {
       onExit();
       return;
     }
@@ -253,20 +259,23 @@ export function OpenTuiApp({ view, session, keyboardSource, promptHistory = [], 
         ))}
         <text width={contentWidth} fg="#f9e2af">{traceLabel}</text>
         <text width={contentWidth} fg="#a6adc8">
-          {`${transcriptState.atLatest ? "latest" : "scrolled"} | ${String(transcriptState.scrollOffset + 1)}/${String(Math.max(1, transcriptRenderRows.length))} | PageUp/PageDown Ctrl+Up/Ctrl+Down wheel | Ctrl+Y copy`}
+          {`${transcriptState.atLatest ? "latest" : "scrolled"} | ${String(transcriptState.scrollOffset + 1)}/${String(Math.max(1, transcriptRenderRows.length))} | PageUp/PageDown Ctrl+Up/Ctrl+Down wheel | Ctrl+C/Ctrl+Y copy`}
         </text>
       </box>
       {composer.overlayMode !== "none" ? (
         <box flexDirection="column" width={paletteWidth} marginLeft={paletteMarginLeft} marginTop={1} padding={1}>
           <text width={paletteWidth} fg="#f9e2af">{commandSurface.title}</text>
           <text width={paletteWidth} fg="#a6adc8">{composer.overlayMode === "history-search" ? "history search" : commandSurface.query}</text>
-          {paletteRows.length > 0 ? paletteRows.slice(0, 8).map((row, index) => (
-            <text key={`palette-${String(index)}`} width={paletteWidth} fg={row.selected ? "#8bd5ff" : "#a6adc8"}>
+          {paletteRows.length > 0 ? visiblePaletteRows.map((row) => (
+            <text key={`palette-${row.value}`} width={paletteWidth} fg={row.selected ? "#8bd5ff" : "#a6adc8"}>
               {`${row.selected ? "> " : "  "}${row.label} ${row.hint}`}
             </text>
           )) : (
             <text width={paletteWidth} fg="#a6adc8">{composer.overlayMode === "history-search" ? "No history matches" : "No matches"}</text>
           )}
+          {paletteRows.length > PALETTE_VISIBLE_ROWS ? (
+            <text width={paletteWidth} fg="#a6adc8">{`${String(composer.selectedIndex + 1)}/${String(paletteRows.length)} - use arrows`}</text>
+          ) : null}
         </box>
       ) : null}
       <box flexDirection="column" width={contentWidth} marginTop={1}>
@@ -439,11 +448,20 @@ function rowsForOverlay(
   return [...history]
     .reverse()
     .filter((entry) => query.length === 0 || entry.toLowerCase().includes(query))
-    .slice(0, 8)
     .map((entry, index) => ({
       label: entry,
       hint: "recent prompt",
       value: entry,
       selected: index === composer.selectedIndex,
     }));
+}
+
+function visiblePaletteWindow(rows: CommandPaletteRow[], selectedIndex: number, maxRows: number): CommandPaletteRow[] {
+  if (rows.length <= maxRows) {
+    return rows;
+  }
+  const clampedIndex = Math.max(0, Math.min(rows.length - 1, selectedIndex));
+  const halfWindow = Math.floor(maxRows / 2);
+  const start = Math.max(0, Math.min(rows.length - maxRows, clampedIndex - halfWindow));
+  return rows.slice(start, start + maxRows);
 }

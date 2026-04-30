@@ -101,7 +101,7 @@ Run the opt-in OpenTUI shell baseline:
 bun run dev -- --opentui
 ```
 
-OpenTUI is not the default path yet. Current shell work includes the live runtime shell, multiline composer, slash/skill command surfaces, bounded transcript review, collapsible trace blocks, mouse wheel scrolling, and OSC52 copy feedback. Transcript review uses `PageUp`/`PageDown`, `Ctrl+Up`/`Ctrl+Down`, mouse wheel, `Ctrl+End` for latest output, `Ctrl+T` for trace, and `Ctrl+Y` to copy the selected block.
+OpenTUI is not the default path yet. Current shell work includes the live runtime shell, multiline composer, slash/skill command surfaces, bounded transcript review, collapsible trace blocks, mouse wheel scrolling, and OSC52 copy feedback. Transcript review uses `PageUp`/`PageDown`, `Ctrl+Up`/`Ctrl+Down`, mouse wheel, `Ctrl+End` for latest output, `Ctrl+T` for trace, and `Ctrl+C`/`Ctrl+Y` to copy the selected block. Use `Ctrl+Q` or `/quit` to exit OpenTUI.
 
 Show launch help:
 

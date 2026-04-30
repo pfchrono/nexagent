@@ -38,6 +38,18 @@ test("OpenTUI command surface reports ambiguous skills", () => {
   assert.equal(preview.rows.length, 2);
 });
 
+test("OpenTUI command surface keeps all rows selectable beyond visible palette window", () => {
+  const cwd = makeSkillWorkspace(Array.from({ length: 10 }, (_, index) => `alpha-${String(index)}`));
+  const preview = resolveSkillPreview(cwd, "$alpha", 9);
+  const commandSurface = createCommandSurface(process.cwd(), "/", 9);
+
+  assert.equal(preview.status, "ambiguous");
+  assert.equal(preview.rows.length, 10);
+  assert.equal(preview.rows[9]?.selected, true);
+  assert.ok(commandSurface.rows.length > 5);
+  assert.equal(commandSurface.rows[9]?.selected, true);
+});
+
 test("OpenTUI command surface converts skill shorthand to runtime command intent", () => {
   const intent = createRuntimeCommandIntent("$alpha args");
 

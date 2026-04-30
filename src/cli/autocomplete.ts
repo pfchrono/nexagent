@@ -262,7 +262,7 @@ function completePathFromCwd(cwd: string, partialPath: string, selectedIndex = 0
   const labels = entries.map((entry) => entry.label);
   const common = longestCommonPrefix(labels);
   const prefix = formatCompletionPrefix(baseToken);
-  const suggestions = entries.slice(0, 8).map((entry) => {
+  const suggestions = entries.map((entry) => {
     const value = `${prefix}${entry.label}${entry.isDirectory ? "/" : ""}`;
     return {
       value,

@@ -158,8 +158,16 @@ function parseCsiModifier(sequence: string): Partial<OpenTuiKeyEvent> {
 }
 
 function keyEventForCharacter(char: string, meta = false): OpenTuiKeyEvent | null {
-  if (char === "\x03") {
-    return { name: "c", ctrl: true, meta: false, shift: false, option: false, sequence: char };
+  const controlCode = char.charCodeAt(0);
+  if (controlCode >= 1 && controlCode <= 26) {
+    return {
+      name: String.fromCharCode(controlCode + 96),
+      ctrl: true,
+      meta: false,
+      shift: false,
+      option: false,
+      sequence: char,
+    };
   }
   if (char === "\r" || char === "\n") {
     return specialKey("return", char);

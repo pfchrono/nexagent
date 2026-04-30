@@ -1374,6 +1374,26 @@ test("autocompletePromptBuffer completes repo paths", async () => {
   }
 });
 
+test("autocompletePromptBuffer keeps all file suggestions selectable", async () => {
+  const { autocompletePromptBuffer } = await import("../src/cli.js");
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-cli-complete-many-"));
+
+  try {
+    await mkdir(path.join(cwd, "docs"));
+    for (let index = 0; index < 10; index += 1) {
+      await writeFile(path.join(cwd, "docs", `note-${String(index)}.md`), "note\n", "utf8");
+    }
+    const session = { ...createSession(), cwd };
+    const completion = autocompletePromptBuffer(session, "open docs/note-", 9);
+
+    assert.equal(completion.suggestions.length, 10);
+    assert.equal(completion.value, "open docs/note-9.md");
+    assert.equal(completion.selectedIndex, 9);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test("autocompletePromptBuffer completes home and absolute path tokens without stealing slash commands", async () => {
   const { autocompletePromptBuffer } = await import("../src/cli.js");
   const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-cli-paths-"));

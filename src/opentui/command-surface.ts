@@ -61,11 +61,12 @@ export function resolveSkillPreview(cwd: string, input: string, selectedIndex = 
     return { status: "missing", label: "No matches", command: null, rows: [] };
   }
 
-  const rows = matches.slice(0, 8).map((skill, index) => ({
+  const selected = clampIndex(selectedIndex, matches.length);
+  const rows = matches.map((skill, index) => ({
     label: skill.name,
     hint: `${skill.source} ${path.basename(path.dirname(skill.path))}`,
     value: `/skill ${skill.name}${parsed.rawArgs ? ` ${parsed.rawArgs}` : ""}`,
-    selected: index === clampIndex(selectedIndex, matches.length),
+    selected: index === selected,
   }));
 
   if (matches.length === 1 || normalizeSkillToken(matches[0]?.name ?? "") === needle) {
@@ -111,11 +112,12 @@ function rowsForInput(
   if (trimmed.startsWith("/") && !trimmed.includes(" ")) {
     const partial = trimmed.toLowerCase();
     const matches = COMMAND_CATALOG.filter((entry) => entry.name.startsWith(partial));
-    return matches.slice(0, 8).map((entry, index) => ({
+    const selected = clampIndex(selectedIndex, matches.length);
+    return matches.map((entry, index) => ({
       label: entry.name,
       hint: entry.description,
       value: `${entry.name} `,
-      selected: index === clampIndex(selectedIndex, matches.length),
+      selected: index === selected,
     }));
   }
 
@@ -124,7 +126,7 @@ function rowsForInput(
     return skill.rows;
   }
 
-  return completion.suggestions.slice(0, 8).map((suggestion, index) => suggestionToRow(suggestion, index, completion.selectedIndex));
+  return completion.suggestions.map((suggestion, index) => suggestionToRow(suggestion, index, completion.selectedIndex));
 }
 
 function suggestionToRow(suggestion: PromptCompletionSuggestion, index: number, selectedIndex: number): CommandPaletteRow {
