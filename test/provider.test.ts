@@ -6,6 +6,7 @@ import test from "node:test";
 
 import { invokeCodexChatGptHttpTransport, resolveCodexAuthJson } from "../src/provider/codex-chatgpt-http.js";
 import { executeProviderRequest, type ProviderRequest } from "../src/provider.js";
+import { createDefaultProviderRegistry } from "../src/provider/registry.js";
 import type { RuntimeSession } from "../src/runtime/session.js";
 
 function createSession(provider = "codex", model: string | null = "gpt-5.4"): RuntimeSession {
@@ -14,6 +15,7 @@ function createSession(provider = "codex", model: string | null = "gpt-5.4"): Ru
     startedAt: "2025-01-01T00:00:00.000Z",
     product: "nexagent",
     provider,
+    providerRegistry: createDefaultProviderRegistry(),
     providerRouting: {
       fallback: {
         policy: "require-open-spec",
@@ -681,6 +683,120 @@ test("executeProviderRequest redirects explicit Nexsight requests away from gene
   }
 });
 
+test("executeProviderRequest preflights Nexsight evidence before provider response", async () => {
+  const session = createSession();
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-provider-required-nexsight-fallback-"));
+  session.cwd = cwd;
+  session.repo.root = cwd;
+  session.toolPolicy.allowedRoots = [cwd];
+  const prompts: string[] = [];
+
+  try {
+    await writeFile(path.join(cwd, "README.md"), "# Test Repo\n", "utf8");
+    await Promise.all(
+      Array.from({ length: 90 }, async (_, index) => {
+        await writeFile(path.join(cwd, `sample-${String(index).padStart(2, "0")}.ts`), "export const value = 1;\n", "utf8");
+      }),
+    );
+    const result = await executeProviderRequest(
+      {
+        session,
+        prompt: "use Nexsight to inspect the repo and summarize layout",
+      },
+      {
+        exec: async (request) => {
+          prompts.push(request.prompt);
+          return {
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            output: prompts.length === 1
+              ? "Done - inspected repo layout and summarized it."
+              : "Done - concise layout summary from repo inspection.",
+          };
+        },
+        http: async () => {
+          throw new Error("http should not be used");
+        },
+        codexHttp: async () => {
+          throw new Error("codex-http should not be used");
+        },
+      },
+    );
+
+    assert.equal(result.ok, true);
+    assert.equal(prompts.length, 1);
+    assert.match(prompts[0] ?? "", /Required Nexsight preflight evidence/);
+    assert.match(prompts[0] ?? "", /README\.md/);
+    if (result.ok) {
+      assert.equal(result.output, "Done - inspected repo layout and summarized it.");
+      assert.doesNotMatch(result.output, /unstructured output/);
+    }
+    assert.equal(
+      session.events.some((event) => event.kind === "control" && event.summary === "required nexsight preflight started"),
+      true,
+    );
+    assert.equal(
+      session.events.some((event) => event.kind === "control" && event.summary === "required nexsight fallback started"),
+      false,
+    );
+    assert.equal(
+      session.events.some((event) => event.kind === "tool" && event.summary === "tool nexsight_execute completed"),
+      true,
+    );
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("executeProviderRequest accepts explicit Nexsight request after preflight evidence", async () => {
+  const session = createSession();
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-provider-required-nexsight-"));
+  session.cwd = cwd;
+  session.repo.root = cwd;
+  session.toolPolicy.allowedRoots = [cwd];
+  const prompts: string[] = [];
+
+  try {
+    const result = await executeProviderRequest(
+      {
+        session,
+        prompt: "use Nexsight to inspect the repo and summarize layout",
+      },
+      {
+        exec: async (request) => {
+          prompts.push(request.prompt);
+          return {
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            output: "Done - inspected repo layout and summarized it.",
+          };
+        },
+        http: async () => {
+          throw new Error("http should not be used");
+        },
+        codexHttp: async () => {
+          throw new Error("codex-http should not be used");
+        },
+      },
+    );
+
+    assert.equal(result.ok, true);
+    assert.equal(prompts.length, 1);
+    assert.equal(
+      session.events.some((event) => event.kind === "control" && event.summary === "required nexsight fallback started"),
+      false,
+    );
+    assert.equal(
+      session.events.some((event) => event.kind === "tool" && event.summary === "tool nexsight_execute completed"),
+      true,
+    );
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test("executeProviderRequest synthesizes after repeated guidance with evidence", async () => {
   const session = createSession();
   const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-provider-guidance-synthesis-"));
@@ -755,6 +871,77 @@ test("executeProviderRequest synthesizes after repeated guidance with evidence",
   }
 });
 
+test("executeProviderRequest returns partial evidence when final synthesis defers again", async () => {
+  const session = createSession();
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-provider-guidance-final-deferral-"));
+  session.cwd = cwd;
+  session.repo.root = cwd;
+  session.toolPolicy.allowedRoots = [cwd];
+  const prompts: string[] = [];
+
+  try {
+    const result = await executeProviderRequest(
+      {
+        session,
+        prompt: "use nexsight to inspect the repo",
+      },
+      {
+        exec: async (request) => {
+          prompts.push(request.prompt);
+          if (prompts.length === 1) {
+            return {
+              exitCode: 0,
+              stdout: "",
+              stderr: "",
+              output: '<nexagent_tool_call>{"name":"list_dir","arguments":{"path":"."}}</nexagent_tool_call>',
+            };
+          }
+          if (prompts.length === 2) {
+            return {
+              exitCode: 0,
+              stdout: "",
+              stderr: "",
+              output: '<nexagent_tool_call>{"name":"nexsight_execute","arguments":{"code":"console.log(\\"used-nexsight\\")"}}</nexagent_tool_call>',
+            };
+          }
+          if (prompts.length === 3) {
+            return {
+              exitCode: 0,
+              stdout: "",
+              stderr: "",
+              output: '<nexagent_tool_call>{"name":"shell_command","arguments":{"command":"pwd"}}</nexagent_tool_call>',
+            };
+          }
+          return {
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            output: "You're right. My bad. If you want, throw me the exact task again and I'll run it properly.",
+          };
+        },
+        http: async () => {
+          throw new Error("http should not be used");
+        },
+        codexHttp: async () => {
+          throw new Error("codex-http should not be used");
+        },
+      },
+    );
+
+    assert.equal(result.ok, true);
+    assert.match(result.output, /Tool budget exhausted before final assistant answer/);
+    assert.match(result.output, /Blocked non-actionable final response/);
+    assert.match(result.output, /used-nexsight/);
+    assert.equal(prompts.length, 4);
+    assert.equal(
+      session.events.some((event) => event.kind === "control" && event.summary === "guidance loop fallback returned partial result"),
+      true,
+    );
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test("executeProviderRequest nudges malformed tool markup instead of surfacing it", async () => {
   const session = createSession();
   const prompts: string[] = [];
@@ -762,7 +949,7 @@ test("executeProviderRequest nudges malformed tool markup instead of surfacing i
   const result = await executeProviderRequest(
     {
       session,
-      prompt: "write findings",
+      prompt: "inspect findings",
     },
     {
       exec: async (request) => {
@@ -872,6 +1059,190 @@ test("executeProviderRequest nudges non-actionable confirmation replies to conti
   });
 });
 
+test("executeProviderRequest requires active skill tool evidence instead of accepting started", async () => {
+  const session = createSession();
+  session.activeSkill = {
+    name: "gsd-ingest-docs",
+    source: "repo",
+    path: "/repo/.codex/skills/gsd-ingest-docs/SKILL.md",
+    args: "./ docs/ingested-summary.md",
+    content: "Execute ingest-docs workflow end-to-end.",
+  };
+  const prompts: string[] = [];
+
+  const result = await executeProviderRequest(
+    {
+      session,
+      prompt: "start",
+    },
+    {
+      exec: async (request) => {
+        prompts.push(request.prompt);
+        if (prompts.length === 1) {
+          return {
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            output: "Started.",
+          };
+        }
+        if (prompts.length === 2) {
+          return {
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            output: '<nexagent_tool_call>{"name":"git_status","arguments":{}}</nexagent_tool_call>',
+          };
+        }
+        return {
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+          output: "done from active skill tool evidence",
+        };
+      },
+      http: async () => {
+        throw new Error("http should not be used");
+      },
+      codexHttp: async () => {
+        throw new Error("codex-http should not be used");
+      },
+    },
+  );
+
+  assert.equal(prompts.length, 3);
+  assert.match(prompts[0] ?? "", /## Active Skill/);
+  assert.match(prompts[0] ?? "", /Execute ingest-docs workflow end-to-end/);
+  assert.match(prompts[1] ?? "", /active skill is selected/i);
+  assert.equal(
+    session.events.some((event) => event.kind === "control" && event.summary === "required active skill evidence nudge applied"),
+    true,
+  );
+  assert.deepEqual(result, {
+    ok: true,
+    provider: "codex",
+    model: "gpt-5.4",
+    transport: "codex",
+    adapter: "codex-cli-exec",
+    fallbackApplied: false,
+    output: "done from active skill tool evidence",
+  });
+});
+
+test("executeProviderRequest catches say-proceed deferrals after direct tasks", async () => {
+  const session = createSession();
+  const prompts: string[] = [];
+
+  const result = await executeProviderRequest(
+    {
+      session,
+      prompt: "feature the v2 prompt guidance in nexagent, make sure it is working properly",
+    },
+    {
+      exec: async (request) => {
+        prompts.push(request.prompt);
+        if (prompts.length === 1) {
+          return {
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            output: [
+              "Got it - let's ship v2 prompt guidance and prove it behaves.",
+              "I'll do this in-repo, not vibes-based:",
+              "1. find where prompt guidance/versioning lives,",
+              "2. implement/feature v2 in the active prompt path,",
+              "3. run focused smoke checks/tests for prompt assembly + runtime wiring,",
+              "Please say \"proceed\" and I'll execute the full pass now.",
+            ].join("\n"),
+          };
+        }
+
+        return {
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+          output: "done - continued without asking again",
+        };
+      },
+      http: async () => {
+        throw new Error("http should not be used");
+      },
+      codexHttp: async () => {
+        throw new Error("codex-http should not be used");
+      },
+    },
+  );
+
+  assert.equal(prompts.length, 2);
+  assert.match(prompts[1] ?? "", /The previous response deferred action/);
+  assert.match(prompts[1] ?? "", /The user has already authorized this task/);
+  assert.deepEqual(result, {
+    ok: true,
+    provider: "codex",
+    model: "gpt-5.4",
+    transport: "codex",
+    adapter: "codex-cli-exec",
+    fallbackApplied: false,
+    output: "done - continued without asking again",
+  });
+});
+
+test("executeProviderRequest catches apology-only self-correction loops", async () => {
+  const session = createSession();
+  const prompts: string[] = [];
+
+  const result = await executeProviderRequest(
+    {
+      session,
+      prompt: "inspect repo and report evidence",
+    },
+    {
+      exec: async (request) => {
+        prompts.push(request.prompt);
+        if (prompts.length === 1) {
+          return {
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            output: [
+              "Yep - fair callout. You're right.",
+              "I should have used the repo-native tooling flow instead of winging it.",
+              "Short version: that miss is on me.",
+              "If you want, throw me the exact task again and I'll run it properly this time.",
+            ].join("\n"),
+          };
+        }
+
+        return {
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+          output: "done - executed requested task",
+        };
+      },
+      http: async () => {
+        throw new Error("http should not be used");
+      },
+      codexHttp: async () => {
+        throw new Error("codex-http should not be used");
+      },
+    },
+  );
+
+  assert.equal(prompts.length, 2);
+  assert.match(prompts[1] ?? "", /Do not apologize/);
+  assert.match(prompts[1] ?? "", /ask the user to restate/);
+  assert.deepEqual(result, {
+    ok: true,
+    provider: "codex",
+    model: "gpt-5.4",
+    transport: "codex",
+    adapter: "codex-cli-exec",
+    fallbackApplied: false,
+    output: "done - executed requested task",
+  });
+});
+
 test("executeProviderRequest rejects file-change claims without write evidence", async () => {
   const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-provider-write-evidence-"));
 
@@ -934,7 +1305,10 @@ test("executeProviderRequest rejects file-change claims without write evidence",
     assert.equal(prompts.length, 4);
     assert.match(prompts[2] ?? "", /no write tool evidence/);
     assert.equal(
-      session.events.some((event) => event.kind === "control" && event.summary === "write evidence nudge applied"),
+      session.events.some((event) =>
+        event.kind === "control"
+        && (event.summary === "write evidence nudge applied" || event.summary === "required write evidence nudge applied")
+      ),
       true,
     );
     assert.deepEqual(result, {
@@ -946,6 +1320,117 @@ test("executeProviderRequest rejects file-change claims without write evidence",
       fallbackApplied: false,
       output: "Done — README.md updated and verified.",
     });
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("executeProviderRequest blocks repeated file-change claims without write evidence", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-provider-write-evidence-block-"));
+
+  try {
+    const session = createSession();
+    session.cwd = cwd;
+    session.repo.root = cwd;
+    session.toolPolicy.allowedRoots = [cwd];
+    const prompts: string[] = [];
+
+    const result = await executeProviderRequest(
+      {
+        session,
+        prompt: "create Dogfood-prompt-issues.md",
+      },
+      {
+        exec: async (request) => {
+          prompts.push(request.prompt);
+          return {
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            output: prompts.length === 1
+              ? "Done. I created Dogfood-prompt-issues.md with exact content."
+              : "Verified with direct reads: Dogfood-prompt-issues.md exists.",
+          };
+        },
+        http: async () => {
+          throw new Error("http should not be used");
+        },
+        codexHttp: async () => {
+          throw new Error("codex-http should not be used");
+        },
+      },
+    );
+
+    assert.equal(prompts.length, 2);
+    assert.equal(result.ok, false);
+    assert.equal(result.code, "transport_error");
+    assert.match(result.message, /required write evidence|without write evidence/);
+    assert.equal(
+      session.events.some((event) => event.kind === "control" && event.summary === "write evidence gate blocked assistant response"),
+      false,
+    );
+    assert.equal(
+      session.events.some((event) => event.kind === "control" && event.summary === "required write evidence gate blocked assistant response"),
+      true,
+    );
+    assert.equal(
+      session.events.some((event) => event.kind === "assistant" && event.status === "completed"),
+      false,
+    );
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("executeProviderRequest requires write evidence when user asks for a file write", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-provider-required-write-"));
+
+  try {
+    const session = createSession();
+    session.cwd = cwd;
+    session.repo.root = cwd;
+    session.toolPolicy.allowedRoots = [cwd];
+    const prompts: string[] = [];
+
+    const result = await executeProviderRequest(
+      {
+        session,
+        prompt: "write all your findings to Nexagent-truths.md with tool calls used",
+      },
+      {
+        exec: async (request) => {
+          prompts.push(request.prompt);
+          return {
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            output: prompts.length === 1
+              ? "Done - I inspected the repo and captured the findings."
+              : "Done - findings are ready with context proof.",
+          };
+        },
+        http: async () => {
+          throw new Error("http should not be used");
+        },
+        codexHttp: async () => {
+          throw new Error("codex-http should not be used");
+        },
+      },
+    );
+
+    assert.equal(prompts.length, 2);
+    assert.equal(result.ok, false);
+    assert.equal(result.code, "transport_error");
+    assert.match(result.message, /required write evidence/);
+    assert.match(prompts[1] ?? "", /no write tool evidence exists/);
+    assert.equal(
+      session.events.some((event) => event.kind === "control" && event.summary === "required write evidence nudge applied"),
+      true,
+    );
+    assert.equal(
+      session.events.some((event) => event.kind === "assistant" && event.status === "completed"),
+      false,
+    );
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }
@@ -1762,8 +2247,8 @@ test("executeProviderRequest rejects spark model on api transports using donor m
     adapter: "codex-chatgpt-http",
     fallbackApplied: false,
     code: "unsupported_model",
-    message: "codex model gpt-5.3-codex-spark is unsupported on API transports",
-    detail: "Model gpt-5.3-codex-spark is not exposed on API transports.",
+    message: "model gpt-5.3-codex-spark is not available for provider codex",
+    detail: "needs websocket/realtime Codex adapter",
   });
 });
 

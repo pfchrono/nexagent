@@ -1,7 +1,17 @@
 import { CODEX_CHATGPT_HTTP_ADAPTER, invokeCodexChatGptHttpTransport } from "./provider/codex-chatgpt-http.js";
 import { CODEX_HTTP_ADAPTER, invokeCodexHttpTransport } from "./provider/codex-http.js";
 import { CODEX_EXEC_ADAPTER, invokeCodexExecTransport } from "./provider/codex-exec.js";
-import { getCodexModelDefinition, isCodexApiSupportedModel, normalizeCodexModel } from "./models.js";
+import { getCodexModelDefinition, normalizeCodexModel } from "./models.js";
+import { getProviderModelOptions } from "./provider/registry.js";
+import {
+  logSentryError,
+  logSentryInfo,
+  setSentrySpanAttributes,
+  shouldRecordSentryAiContent,
+  withSentryAiAgentSpan,
+  withSentryAiRequestSpan,
+  withSentryAiToolSpan,
+} from "./instrument.js";
 import { applyArchivistRetrieval } from "./runtime/archivist.js";
 import { assemblePrompt } from "./runtime/instructions.js";
 import { consumeOperatorSteer, estimateTokenCount, recordRuntimeEvent, setRuntimeAction } from "./runtime/session.js";
@@ -77,6 +87,8 @@ const CONTINUATION_NUDGE = [
   "Continue now with concrete tool use or complete the task.",
   "Do not provide shell snippets or manual commands for the user to run when an internal tool can do it.",
   "Do not ask for another confirmation unless a real approval gate or blocker prevents progress.",
+  "Do not apologize, explain what you should have done, or ask the user to restate a task already present in this turn.",
+  "If the exact target is ambiguous, infer a safe representative target from repo evidence and run a bounded inspection.",
   "If no file/tool action is needed, provide the final verified result.",
 ].join(" ");
 const WRITE_EVIDENCE_NUDGE = [
@@ -95,6 +107,22 @@ const NEXSIGHT_TOOL_NUDGE = [
   "Direct tools are fine only for a known small file/path, exact file content, or a narrower follow-up after Nexsight has routed the work.",
   "Retry with exactly one Nexsight tool call: nexsight_execute, nexsight_index, nexsight_batch, or nexsight_search.",
 ].join(" ");
+const REQUIRED_WRITE_EVIDENCE_NUDGE = [
+  "The user requested a file write/update in this turn, but no write tool evidence exists yet.",
+  "Use write_file, apply_patch, batch_edit, or a shell command that performs the edit, then verify it.",
+  "Do not answer as complete until current-turn write evidence exists or a write tool reports a real blocker.",
+].join(" ");
+const REQUIRED_NEXSIGHT_EVIDENCE_NUDGE = [
+  "The user explicitly requested Nexsight in this turn, but no Nexsight tool evidence exists yet.",
+  "Use nexsight_execute, nexsight_index, nexsight_batch, or nexsight_search now.",
+  "Do not answer from narrative, generic listing, or direct file tools until Nexsight has run or a Nexsight tool reports a real blocker.",
+].join(" ");
+const REQUIRED_ACTIVE_SKILL_EVIDENCE_NUDGE = [
+  "An active skill is selected and this turn asks to run or continue it, but no tool evidence exists yet.",
+  "Use the active skill instructions now with the available tools.",
+  "Do not answer with only activated, started, ready, or a request to restate the target.",
+  "Answer only after current-turn tool evidence exists or a real tool/approval blocker is recorded.",
+].join(" ");
 const FINAL_TOOL_STEP_NUDGE = [
   "Tool budget is almost exhausted.",
   "You have one provider step left after this transcript.",
@@ -102,6 +130,12 @@ const FINAL_TOOL_STEP_NUDGE = [
   "If another tool is still required, the harness may start one bounded continuation cycle with the tool count reset.",
   "After that continuation cycle, it will return a partial result instead of failing the turn.",
 ].join(" ");
+
+interface TurnObligations {
+  requiresWriteEvidence: boolean;
+  requiresNexsightEvidence: boolean;
+  requiresActiveSkillEvidence: boolean;
+}
 
 export async function executeProviderRequest(
   request: ProviderRequest,
@@ -125,9 +159,13 @@ export async function executeProviderRequest(
     };
   }
 
-  if (request.session.providerTransport.mode !== "cli-exec" && !isCodexApiSupportedModel(model)) {
-    const resolvedModel = normalizeCodexModel(model) ?? model;
-    const definition = getCodexModelDefinition(model);
+  const resolvedModel = normalizeCodexModel(model) ?? model;
+  const modelOption = resolvedModel
+    ? getProviderModelOptions(request.session.providerRegistry, provider, request.session.providerTransport.mode)
+      .find((option) => option.id === resolvedModel)
+    : null;
+  if (resolvedModel && (!modelOption || modelOption.disabledReason)) {
+    const definition = getCodexModelDefinition(resolvedModel);
     return {
       ok: false,
       provider,
@@ -136,10 +174,11 @@ export async function executeProviderRequest(
       adapter: transport.id,
       fallbackApplied: false,
       code: "unsupported_model",
-      message: resolvedModel ? `codex model ${resolvedModel} is unsupported on API transports` : "codex model is unsupported on API transports",
-      detail: definition?.upgrade
-        ? `Model ${resolvedModel} is not exposed on API transports. Suggested upgrade: ${definition.upgrade}.`
-        : `Model ${resolvedModel} is not exposed on API transports.`,
+      message: `model ${resolvedModel} is not available for provider ${provider}`,
+      detail: modelOption?.disabledReason
+        ?? (definition?.upgrade
+          ? `Model ${resolvedModel} is not exposed on this transport. Suggested upgrade: ${definition.upgrade}.`
+          : `Model ${resolvedModel} is not configured for provider ${provider}.`),
     };
   }
 
@@ -148,6 +187,16 @@ export async function executeProviderRequest(
     return attachmentFailure;
   }
 
+  return withSentryAiAgentSpan(
+    "nexagent provider turn",
+    {
+      "gen_ai.agent.name": "nexagent",
+      "gen_ai.request.model": model,
+      "nexagent.provider": provider,
+      "nexagent.transport": request.session.providerTransport.mode,
+      "nexagent.adapter": transport.id,
+    },
+    async (agentSpan) => {
   try {
     const turnEventStart = request.session.events.length;
     recordRuntimeEvent(request.session, {
@@ -167,9 +216,21 @@ export async function executeProviderRequest(
     const codexHttpInput = request.session.providerTransport.mode === "codex-http"
       ? buildNativeInputFromPrompt(request.prompt, request.attachments)
       : undefined;
-    let prompt = assembled.prompt;
+    const obligations = deriveTurnObligations(request.prompt, request.session);
     const toolTranscript: string[] = [];
+    if (obligations.requiresNexsightEvidence) {
+      const preflight = await runRequiredNexsightPreflight(request, request.prompt);
+      toolTranscript.push(formatInternalToolExchange(0, preflight.call, preflight.result));
+    }
+    let prompt = obligations.requiresNexsightEvidence && toolTranscript.length > 0
+      ? createRequiredNexsightPreflightPrompt(assembled.prompt, toolTranscript)
+      : assembled.prompt;
     let guidanceNudgeCount = 0;
+    let writeEvidenceNudgeCount = 0;
+    let requiredWriteNudgeCount = 0;
+    let requiredNexsightNudgeCount = 0;
+    let requiredNexsightFallbackCount = 0;
+    let requiredActiveSkillNudgeCount = 0;
 
     toolCycles:
     for (let cycle = 0; cycle < MAX_INTERNAL_TOOL_CYCLES; cycle += 1) {
@@ -188,14 +249,16 @@ export async function executeProviderRequest(
         });
         return createOperationFailure(request, model, transport.id, "operation canceled by operator");
       }
-      const invocation = await withAbortController(
-        request.session,
-        (signal) => invokeCodex(
-          request.session.providerTransport.mode === "codex-http"
-            ? { ...request, prompt: request.prompt, instructions: prompt, nativeInput: codexHttpInput, abortSignal: signal }
-            : { ...request, prompt, abortSignal: signal },
-          model,
-        ),
+      const invocation = await invokeProviderWithSentrySpan(
+        request,
+        invokeCodex,
+        model,
+        transport.id,
+        "provider step",
+        prompt,
+        (signal) => request.session.providerTransport.mode === "codex-http"
+          ? { ...request, prompt: request.prompt, instructions: prompt, nativeInput: codexHttpInput, abortSignal: signal }
+          : { ...request, prompt, abortSignal: signal },
       );
 
       if (invocation.exitCode !== 0) {
@@ -219,6 +282,7 @@ export async function executeProviderRequest(
             assembled.prompt,
             toolTranscript,
             guidanceNudgeCount,
+            turnEventStart,
             "malformed tool call",
           );
           if (earlyFinal) {
@@ -233,30 +297,77 @@ export async function executeProviderRequest(
           prompt = `${assembled.prompt}\n\n${toolTranscript.length > 0 ? `Internal tool transcript:\n${toolTranscript.join("\n\n")}\n\n` : ""}${MALFORMED_TOOL_CALL_NUDGE}`;
           continue;
         }
-        if (claimsFileMutation(output) && !hasWriteEvidence(request.session, turnEventStart) && step < MAX_INTERNAL_TOOL_STEPS - 1) {
-          guidanceNudgeCount += 1;
-          const earlyFinal = await maybeSynthesizeAfterRepeatedGuidance(
-            request,
-            invokeCodex,
-            model,
-            transport.id,
-            codexHttpInput,
-            assembled.prompt,
-            toolTranscript,
-            guidanceNudgeCount,
-            "missing write evidence",
-          );
-          if (earlyFinal) {
-            return earlyFinal;
+        if (obligations.requiresNexsightEvidence && !hasNexsightEvidence(request.session, turnEventStart, toolTranscript)) {
+          requiredNexsightNudgeCount += 1;
+          if (step < MAX_INTERNAL_TOOL_STEPS - 1 && requiredNexsightNudgeCount < MAX_GUIDANCE_NUDGES_BEFORE_SYNTHESIS) {
+            recordRuntimeEvent(request.session, {
+              kind: "control",
+              status: "queued",
+              summary: "required nexsight evidence nudge applied",
+              detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
+            });
+            prompt = createGuidedPrompt(assembled.prompt, toolTranscript, REQUIRED_NEXSIGHT_EVIDENCE_NUDGE);
+            continue;
           }
-          recordRuntimeEvent(request.session, {
-            kind: "control",
-            status: "queued",
-            summary: "write evidence nudge applied",
-            detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
-          });
-          prompt = `${assembled.prompt}\n\n${toolTranscript.length > 0 ? `Internal tool transcript:\n${toolTranscript.join("\n\n")}\n\n` : ""}${WRITE_EVIDENCE_NUDGE}`;
-          continue;
+          if (step < MAX_INTERNAL_TOOL_STEPS - 1 && requiredNexsightFallbackCount < 1) {
+            requiredNexsightFallbackCount += 1;
+            const fallback = await runRequiredNexsightFallback(request, request.prompt);
+            toolTranscript.push(formatInternalToolExchange(step + 1, fallback.call, fallback.result));
+            if (fallback.result.ok) {
+              return createRequiredNexsightFallbackSuccess(
+                request,
+                model,
+                transport.transport,
+                transport.id,
+                fallback.result,
+              );
+            }
+            prompt = createRequiredNexsightFallbackPrompt(assembled.prompt, toolTranscript);
+            continue;
+          }
+          return createMissingRequiredToolEvidenceFailure(request, model, transport.transport, transport.id, "Nexsight", output);
+        }
+        if (obligations.requiresWriteEvidence && !hasWriteEvidence(request.session, turnEventStart)) {
+          requiredWriteNudgeCount += 1;
+          if (step < MAX_INTERNAL_TOOL_STEPS - 1 && requiredWriteNudgeCount < MAX_GUIDANCE_NUDGES_BEFORE_SYNTHESIS) {
+            recordRuntimeEvent(request.session, {
+              kind: "control",
+              status: "queued",
+              summary: "required write evidence nudge applied",
+              detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
+            });
+            prompt = createGuidedPrompt(assembled.prompt, toolTranscript, REQUIRED_WRITE_EVIDENCE_NUDGE);
+            continue;
+          }
+          return createMissingRequiredToolEvidenceFailure(request, model, transport.transport, transport.id, "write", output);
+        }
+        if (obligations.requiresActiveSkillEvidence && !hasToolEvidence(request.session, turnEventStart, toolTranscript)) {
+          requiredActiveSkillNudgeCount += 1;
+          if (step < MAX_INTERNAL_TOOL_STEPS - 1 && requiredActiveSkillNudgeCount < MAX_GUIDANCE_NUDGES_BEFORE_SYNTHESIS) {
+            recordRuntimeEvent(request.session, {
+              kind: "control",
+              status: "queued",
+              summary: "required active skill evidence nudge applied",
+              detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
+            });
+            prompt = createGuidedPrompt(assembled.prompt, toolTranscript, REQUIRED_ACTIVE_SKILL_EVIDENCE_NUDGE);
+            continue;
+          }
+          return createMissingRequiredToolEvidenceFailure(request, model, transport.transport, transport.id, "active skill", output);
+        }
+        if (claimsUnsupportedWriteCompletion(output, writeEvidenceNudgeCount) && !hasWriteEvidence(request.session, turnEventStart)) {
+          writeEvidenceNudgeCount += 1;
+          if (step < MAX_INTERNAL_TOOL_STEPS - 1 && writeEvidenceNudgeCount < MAX_GUIDANCE_NUDGES_BEFORE_SYNTHESIS) {
+            recordRuntimeEvent(request.session, {
+              kind: "control",
+              status: "queued",
+              summary: "write evidence nudge applied",
+              detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
+            });
+            prompt = createGuidedPrompt(assembled.prompt, toolTranscript, WRITE_EVIDENCE_NUDGE);
+            continue;
+          }
+          return createMissingWriteEvidenceFailure(request, model, transport.transport, transport.id, output);
         }
         if (isNonActionableDeferral(output) && step < MAX_INTERNAL_TOOL_STEPS - 1) {
           guidanceNudgeCount += 1;
@@ -269,6 +380,7 @@ export async function executeProviderRequest(
             assembled.prompt,
             toolTranscript,
             guidanceNudgeCount,
+            turnEventStart,
             "non-actionable deferral",
           );
           if (earlyFinal) {
@@ -280,7 +392,7 @@ export async function executeProviderRequest(
             summary: "continuation nudge applied",
             detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
           });
-          prompt = `${assembled.prompt}\n\n${toolTranscript.length > 0 ? `Internal tool transcript:\n${toolTranscript.join("\n\n")}\n\n` : ""}${CONTINUATION_NUDGE}`;
+          prompt = createGuidedPrompt(assembled.prompt, toolTranscript, CONTINUATION_NUDGE);
           continue;
         }
         recordRuntimeEvent(request.session, {
@@ -289,12 +401,22 @@ export async function executeProviderRequest(
           summary: "assistant response completed",
           detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
         });
-        recordRuntimeEvent(request.session, {
-          kind: "provider",
-          status: "completed",
-          summary: `${provider} turn completed`,
-          detail: `transport=${request.session.providerTransport.mode}; output_chars=${String(output.length)}`,
-        });
+          recordRuntimeEvent(request.session, {
+            kind: "provider",
+            status: "completed",
+            summary: `${provider} turn completed`,
+            detail: `transport=${request.session.providerTransport.mode}; output_chars=${String(output.length)}`,
+          });
+          setSentrySpanAttributes(agentSpan, {
+            "gen_ai.response.output_chars": output.length,
+            "nexagent.turn.status": "completed",
+          });
+          logSentryInfo("provider turn completed", {
+            provider,
+            model: model ?? "default",
+            transport: request.session.providerTransport.mode,
+            output_chars: output.length,
+          });
         return {
           ok: true,
           provider,
@@ -324,20 +446,38 @@ export async function executeProviderRequest(
           detail: toolCall.name,
         });
         const finalPrompt = createToolBudgetFinalPrompt(assembled.prompt, toolTranscript, toolCall.name);
-        const finalInvocation = await withAbortController(
-          request.session,
-          (signal) => invokeCodex(
-            request.session.providerTransport.mode === "codex-http"
-              ? { ...request, prompt: request.prompt, instructions: finalPrompt, nativeInput: codexHttpInput, abortSignal: signal }
-              : { ...request, prompt: finalPrompt, abortSignal: signal },
-            model,
-          ),
+        const finalInvocation = await invokeProviderWithSentrySpan(
+          request,
+          invokeCodex,
+          model,
+          transport.id,
+          "final synthesis",
+          finalPrompt,
+          (signal) => request.session.providerTransport.mode === "codex-http"
+            ? { ...request, prompt: request.prompt, instructions: finalPrompt, nativeInput: codexHttpInput, abortSignal: signal }
+            : { ...request, prompt: finalPrompt, abortSignal: signal },
         );
         if (finalInvocation.exitCode !== 0) {
           return createCodexFailure(provider, model, finalInvocation.stderr, finalInvocation.stdout, transport.id);
         }
         const finalOutput = finalInvocation.output.trimEnd();
         if (finalOutput.length > 0 && !parseInternalToolCall(finalOutput) && !containsToolCallMarkup(finalOutput)) {
+          const missingObligation = createMissingRequiredEvidenceFailureIfAny(
+            request,
+            model,
+            transport.transport,
+            transport.id,
+            obligations,
+            turnEventStart,
+            toolTranscript,
+            finalOutput,
+          );
+          if (missingObligation) {
+            return missingObligation;
+          }
+          if (claimsFileMutation(finalOutput) && !hasWriteEvidence(request.session, turnEventStart)) {
+            return createMissingWriteEvidenceFailure(request, model, transport.transport, transport.id, finalOutput);
+          }
           recordRuntimeEvent(request.session, {
             kind: "assistant",
             status: "completed",
@@ -349,6 +489,16 @@ export async function executeProviderRequest(
             status: "completed",
             summary: `${provider} turn completed`,
             detail: `transport=${request.session.providerTransport.mode}; output_chars=${String(finalOutput.length)}`,
+          });
+          setSentrySpanAttributes(agentSpan, {
+            "gen_ai.response.output_chars": finalOutput.length,
+            "nexagent.turn.status": "completed",
+          });
+          logSentryInfo("provider turn completed", {
+            provider,
+            model: model ?? "default",
+            transport: request.session.providerTransport.mode,
+            output_chars: finalOutput.length,
           });
           return {
             ok: true,
@@ -387,6 +537,7 @@ export async function executeProviderRequest(
           assembled.prompt,
           toolTranscript,
           guidanceNudgeCount,
+          turnEventStart,
           "nexsight routing",
         );
         if (earlyFinal) {
@@ -402,7 +553,14 @@ export async function executeProviderRequest(
         continue;
       }
 
-      const toolResult = await executeToolWithRuntimeActivity(request.session, toolCall);
+      const toolResult = await withSentryAiToolSpan(toolCall.name, async (toolSpan) => {
+        const result = await executeToolWithRuntimeActivity(request.session, toolCall);
+        setSentrySpanAttributes(toolSpan, {
+          "gen_ai.tool.name": toolCall.name,
+          "nexagent.tool.status": result.ok ? "completed" : "failed",
+        });
+        return result;
+      });
       toolTranscript.push(formatInternalToolExchange(step + 1, toolCall, toolResult));
       const finalStepNudge = step === MAX_INTERNAL_TOOL_STEPS - 2 ? `\n\n${FINAL_TOOL_STEP_NUDGE}` : "";
       prompt = `${assembled.prompt}\n\nInternal tool transcript:\n${toolTranscript.join("\n\n")}\n\nContinue. Either answer user directly or request one more tool with one <nexagent_tool_call> block only.${finalStepNudge}`;
@@ -432,6 +590,16 @@ export async function executeProviderRequest(
       summary: `${provider} turn failed`,
       detail,
     });
+    setSentrySpanAttributes(agentSpan, {
+      "nexagent.turn.status": "failed",
+      "nexagent.error": detail,
+    });
+    logSentryError("provider turn failed", {
+      provider,
+      model: model ?? "default",
+      transport: request.session.providerTransport.mode,
+      error: detail,
+    });
     return {
       ok: false,
       provider,
@@ -444,6 +612,8 @@ export async function executeProviderRequest(
       detail,
     };
   }
+    },
+  );
 }
 
 function resolveModel(session: RuntimeSession): string | null {
@@ -533,6 +703,78 @@ function resolveTransport(session: RuntimeSession) {
       : CODEX_EXEC_ADAPTER;
 }
 
+async function invokeProviderWithSentrySpan(
+  request: ProviderRequest,
+  invoker: CodexInvoker,
+  model: string | null,
+  adapter: ProviderSuccess["adapter"],
+  phase: string,
+  promptForOptionalCapture: string,
+  createRequest: (signal: AbortSignal) => ProviderRequest,
+): Promise<CodexInvocation> {
+  return withSentryAiRequestSpan(
+    `LLM request ${model ?? "default"}`,
+    {
+      "gen_ai.request.model": model ?? "default",
+      "nexagent.provider": request.session.provider,
+      "nexagent.transport": request.session.providerTransport.mode,
+      "nexagent.adapter": adapter,
+      "nexagent.phase": phase,
+    },
+    async (span) => {
+      if (shouldRecordSentryAiContent()) {
+        setSentrySpanAttributes(span, {
+          "gen_ai.request.messages": promptForOptionalCapture.slice(0, 8000),
+        });
+      }
+
+      const invocation = await withAbortController(
+        request.session,
+        (signal) => invoker(createRequest(signal), model),
+      );
+
+      setSentrySpanAttributes(span, {
+        ...extractGenAiUsage(invocation.raw),
+        "gen_ai.response.output_chars": invocation.output.length,
+        "nexagent.exit_code": invocation.exitCode,
+      });
+      if (shouldRecordSentryAiContent()) {
+        setSentrySpanAttributes(span, {
+          "gen_ai.response.text": invocation.output.slice(0, 8000),
+        });
+      }
+      return invocation;
+    },
+  );
+}
+
+function extractGenAiUsage(raw: unknown): Record<string, number> {
+  const usage = isRecord(raw) ? raw.usage : undefined;
+  if (!isRecord(usage)) {
+    return {};
+  }
+
+  return {
+    "gen_ai.usage.input_tokens": readNumericUsage(usage, ["input_tokens", "prompt_tokens"]),
+    "gen_ai.usage.output_tokens": readNumericUsage(usage, ["output_tokens", "completion_tokens"]),
+    "gen_ai.usage.total_tokens": readNumericUsage(usage, ["total_tokens"]),
+  };
+}
+
+function readNumericUsage(record: Record<string, unknown>, keys: string[]): number {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return value;
+    }
+  }
+  return 0;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 async function executeOpenAiNativeToolLoop(
   request: ProviderRequest,
   assembledPrompt: string,
@@ -543,6 +785,18 @@ async function executeOpenAiNativeToolLoop(
   let previousResponseId: string | undefined;
   let nativeInput: unknown = buildNativeInputFromPrompt(request.prompt, request.attachments);
   const turnEventStart = request.session.events.length;
+  const obligations = deriveTurnObligations(request.prompt, request.session);
+  const toolTranscript: string[] = [];
+  if (obligations.requiresNexsightEvidence) {
+    const preflight = await runRequiredNexsightPreflight(request, request.prompt);
+    toolTranscript.push(formatInternalToolExchange(0, preflight.call, preflight.result));
+    nativeInput = [{ role: "user", content: createRequiredNexsightPreflightPrompt(assembledPrompt, toolTranscript) }];
+  }
+  let writeEvidenceNudgeCount = 0;
+  let requiredWriteNudgeCount = 0;
+  let requiredNexsightNudgeCount = 0;
+  let requiredNexsightFallbackCount = 0;
+  let requiredActiveSkillNudgeCount = 0;
 
   for (let step = 0; step < MAX_INTERNAL_TOOL_STEPS; step += 1) {
     if (request.session.operationControls.cancelRequested) {
@@ -555,20 +809,22 @@ async function executeOpenAiNativeToolLoop(
       });
       return createOperationFailure(request, model, transport.id, "operation canceled by operator");
     }
-    const invocation = await withAbortController(
-      request.session,
-      (signal) => invokeHttp(
-        {
-          ...request,
-          prompt: assembledPrompt,
-          instructions: assembledPrompt,
-          nativeInput,
-          previousResponseId,
-          nativeTools: true,
-          abortSignal: signal,
-        },
-        model,
-      ),
+    const invocation = await invokeProviderWithSentrySpan(
+      request,
+      invokeHttp,
+      model,
+      transport.id,
+      "native provider step",
+      assembledPrompt,
+      (signal) => ({
+        ...request,
+        prompt: assembledPrompt,
+        instructions: assembledPrompt,
+        nativeInput,
+        previousResponseId,
+        nativeTools: true,
+        abortSignal: signal,
+      }),
     );
 
     if (invocation.exitCode !== 0) {
@@ -591,15 +847,82 @@ async function executeOpenAiNativeToolLoop(
         nativeInput = [{ role: "user", content: MALFORMED_TOOL_CALL_NUDGE }];
         continue;
       }
-      if (claimsFileMutation(output) && !hasWriteEvidence(request.session, turnEventStart) && step < MAX_INTERNAL_TOOL_STEPS - 1) {
-        recordRuntimeEvent(request.session, {
-          kind: "control",
-          status: "queued",
-          summary: "write evidence nudge applied",
-          detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
-        });
-        nativeInput = [{ role: "user", content: WRITE_EVIDENCE_NUDGE }];
-        continue;
+      if (obligations.requiresNexsightEvidence && !hasNexsightEvidence(request.session, turnEventStart)) {
+        requiredNexsightNudgeCount += 1;
+        if (step < MAX_INTERNAL_TOOL_STEPS - 1 && requiredNexsightNudgeCount < MAX_GUIDANCE_NUDGES_BEFORE_SYNTHESIS) {
+          recordRuntimeEvent(request.session, {
+            kind: "control",
+            status: "queued",
+            summary: "required nexsight evidence nudge applied",
+            detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
+          });
+          nativeInput = [{ role: "user", content: REQUIRED_NEXSIGHT_EVIDENCE_NUDGE }];
+          continue;
+        }
+        if (step < MAX_INTERNAL_TOOL_STEPS - 1 && requiredNexsightFallbackCount < 1) {
+          requiredNexsightFallbackCount += 1;
+          const fallback = await runRequiredNexsightFallback(request, request.prompt);
+          if (fallback.result.ok) {
+            return createRequiredNexsightFallbackSuccess(
+              request,
+              model,
+              transport.transport,
+              transport.id,
+              fallback.result,
+            );
+          }
+          nativeInput = [{
+            role: "user",
+            content: createRequiredNexsightFallbackPrompt(
+              "Continue from this harness-owned evidence.",
+              [formatInternalToolExchange(step + 1, fallback.call, fallback.result)],
+            ),
+          }];
+          continue;
+        }
+        return createMissingRequiredToolEvidenceFailure(request, model, transport.transport, transport.id, "Nexsight", output);
+      }
+      if (obligations.requiresWriteEvidence && !hasWriteEvidence(request.session, turnEventStart)) {
+        requiredWriteNudgeCount += 1;
+        if (step < MAX_INTERNAL_TOOL_STEPS - 1 && requiredWriteNudgeCount < MAX_GUIDANCE_NUDGES_BEFORE_SYNTHESIS) {
+          recordRuntimeEvent(request.session, {
+            kind: "control",
+            status: "queued",
+            summary: "required write evidence nudge applied",
+            detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
+          });
+          nativeInput = [{ role: "user", content: REQUIRED_WRITE_EVIDENCE_NUDGE }];
+          continue;
+        }
+        return createMissingRequiredToolEvidenceFailure(request, model, transport.transport, transport.id, "write", output);
+      }
+      if (obligations.requiresActiveSkillEvidence && !hasToolEvidence(request.session, turnEventStart)) {
+        requiredActiveSkillNudgeCount += 1;
+        if (step < MAX_INTERNAL_TOOL_STEPS - 1 && requiredActiveSkillNudgeCount < MAX_GUIDANCE_NUDGES_BEFORE_SYNTHESIS) {
+          recordRuntimeEvent(request.session, {
+            kind: "control",
+            status: "queued",
+            summary: "required active skill evidence nudge applied",
+            detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
+          });
+          nativeInput = [{ role: "user", content: REQUIRED_ACTIVE_SKILL_EVIDENCE_NUDGE }];
+          continue;
+        }
+        return createMissingRequiredToolEvidenceFailure(request, model, transport.transport, transport.id, "active skill", output);
+      }
+      if (claimsUnsupportedWriteCompletion(output, writeEvidenceNudgeCount) && !hasWriteEvidence(request.session, turnEventStart)) {
+        writeEvidenceNudgeCount += 1;
+        if (step < MAX_INTERNAL_TOOL_STEPS - 1 && writeEvidenceNudgeCount < MAX_GUIDANCE_NUDGES_BEFORE_SYNTHESIS) {
+          recordRuntimeEvent(request.session, {
+            kind: "control",
+            status: "queued",
+            summary: "write evidence nudge applied",
+            detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
+          });
+          nativeInput = [{ role: "user", content: WRITE_EVIDENCE_NUDGE }];
+          continue;
+        }
+        return createMissingWriteEvidenceFailure(request, model, transport.transport, transport.id, output);
       }
       if (isNonActionableDeferral(output) && step < MAX_INTERNAL_TOOL_STEPS - 1) {
         recordRuntimeEvent(request.session, {
@@ -645,9 +968,16 @@ async function executeOpenAiNativeToolLoop(
       );
     }
 
-    const toolResult = await executeToolWithRuntimeActivity(request.session, {
-      name: toolCall.name,
-      arguments: toolCall.arguments,
+    const toolResult = await withSentryAiToolSpan(toolCall.name, async (toolSpan) => {
+      const result = await executeToolWithRuntimeActivity(request.session, {
+        name: toolCall.name,
+        arguments: toolCall.arguments,
+      });
+      setSentrySpanAttributes(toolSpan, {
+        "gen_ai.tool.name": toolCall.name,
+        "nexagent.tool.status": result.ok ? "completed" : "failed",
+      });
+      return result;
     });
     previousResponseId = toolCall.responseId;
     const steer = consumeOperatorSteer(request.session, `after tool ${toolCall.name}`);
@@ -673,6 +1003,112 @@ async function executeOpenAiNativeToolLoop(
     message: "native tool loop exceeded limit",
     detail: `Model requested more than ${String(MAX_INTERNAL_TOOL_STEPS)} native tool calls in one turn.`,
   };
+}
+
+function createMissingWriteEvidenceFailure(
+  request: ProviderRequest,
+  model: string | null,
+  transport: ProviderFailure["transport"],
+  adapter: ProviderFailure["adapter"],
+  output: string,
+): ProviderFailure {
+  const detail = output.length > 160 ? `${output.slice(0, 157)}...` : output;
+  recordRuntimeEvent(request.session, {
+    kind: "control",
+    status: "blocked",
+    summary: "write evidence gate blocked assistant response",
+    detail,
+  });
+  recordRuntimeEvent(request.session, {
+    kind: "provider",
+    status: "failed",
+    summary: `${request.session.provider} turn failed`,
+    detail: "assistant claimed file mutation without write evidence",
+  });
+  return {
+    ok: false,
+    provider: request.session.provider,
+    model,
+    transport,
+    adapter,
+    fallbackApplied: false,
+    code: "transport_error",
+    message: "assistant claimed file mutation without write evidence",
+    detail: [
+      "The assistant claimed files were written or updated, but this turn recorded no completed write_file, apply_patch, or shell_command write evidence.",
+      "Blocked unsupported completion so the chat cannot report fake file changes.",
+      "",
+      "Blocked assistant output:",
+      output.slice(0, 1200),
+    ].join("\n"),
+  };
+}
+
+function createMissingRequiredToolEvidenceFailure(
+  request: ProviderRequest,
+  model: string | null,
+  transport: ProviderFailure["transport"],
+  adapter: ProviderFailure["adapter"],
+  requiredTool: "write" | "Nexsight" | "active skill",
+  output: string,
+): ProviderFailure {
+  const detail = output.length > 160 ? `${output.slice(0, 157)}...` : output;
+  const summary = requiredTool === "write"
+    ? "required write evidence gate blocked assistant response"
+    : requiredTool === "Nexsight"
+      ? "required nexsight evidence gate blocked assistant response"
+      : "required active skill evidence gate blocked assistant response";
+  recordRuntimeEvent(request.session, {
+    kind: "control",
+    status: "blocked",
+    summary,
+    detail,
+  });
+  recordRuntimeEvent(request.session, {
+    kind: "provider",
+    status: "failed",
+    summary: `${request.session.provider} turn failed`,
+    detail: `assistant completed without required ${requiredTool} evidence`,
+  });
+  return {
+    ok: false,
+    provider: request.session.provider,
+    model,
+    transport,
+    adapter,
+    fallbackApplied: false,
+    code: "transport_error",
+    message: `assistant completed without required ${requiredTool} evidence`,
+    detail: [
+      `The user request requires current-turn ${requiredTool} tool evidence, but the turn recorded none before the assistant tried to finish.`,
+      "Blocked unsupported completion so the chat cannot report ungrounded task completion.",
+      "",
+      "Blocked assistant output:",
+      output.slice(0, 1200),
+    ].join("\n"),
+  };
+}
+
+function createMissingRequiredEvidenceFailureIfAny(
+  request: ProviderRequest,
+  model: string | null,
+  transport: ProviderFailure["transport"],
+  adapter: ProviderFailure["adapter"],
+  obligations: TurnObligations,
+  turnEventStart: number,
+  toolTranscript: string[],
+  output: string,
+): ProviderFailure | null {
+  if (obligations.requiresNexsightEvidence && !hasNexsightEvidence(request.session, turnEventStart, toolTranscript)) {
+    return createMissingRequiredToolEvidenceFailure(request, model, transport, adapter, "Nexsight", output);
+  }
+  if (obligations.requiresWriteEvidence && !hasWriteEvidence(request.session, turnEventStart)) {
+    return createMissingRequiredToolEvidenceFailure(request, model, transport, adapter, "write", output);
+  }
+  if (obligations.requiresActiveSkillEvidence && !hasToolEvidence(request.session, turnEventStart, toolTranscript)) {
+    return createMissingRequiredToolEvidenceFailure(request, model, transport, adapter, "active skill", output);
+  }
+  return null;
 }
 
 function validateAttachmentSupport(
@@ -962,6 +1398,44 @@ function containsToolCallMarkup(output: string): boolean {
   return TOOL_CALL_MARKUP_PATTERN.test(output);
 }
 
+function deriveTurnObligations(prompt: string, session?: RuntimeSession): TurnObligations {
+  return {
+    requiresWriteEvidence: promptRequiresWriteEvidence(prompt),
+    requiresNexsightEvidence: promptRequiresNexsightEvidence(prompt),
+    requiresActiveSkillEvidence: promptRequiresActiveSkillEvidence(prompt, session),
+  };
+}
+
+function promptRequiresWriteEvidence(prompt: string): boolean {
+  const lower = prompt.toLowerCase();
+  if (/\b(do not|don't|dont|no need to)\s+(write|create|edit|update|modify|patch|save|append|overwrite)\b/.test(lower)) {
+    return false;
+  }
+
+  const writeVerb = /\b(write|create|save|append|overwrite|edit|update|modify|patch|add|fix|implement|change)\b/.test(lower);
+  const fileTarget = /\b(readme|agents\.md|claude\.md|package\.json|tsconfig\.json|bun\.lock)\b/i.test(prompt)
+    || /(?:^|\s|["'`(])(?:\.{0,2}\/|~\/|\/)?[\w@./ -]+\.(?:md|ts|tsx|js|jsx|json|jsonc|toml|yaml|yml|css|scss|html|sh|py|rs|go|lock)\b/i.test(prompt);
+  const explicitFileWrite = /\b(write|create|save|append|overwrite)\b.*\b(file|artifact|report|findings|summary)\b/.test(lower)
+    || /\b(to|into|in)\s+(?:\.{0,2}\/|~\/|\/)?[\w@./ -]+\.[a-z0-9]+\b/i.test(prompt);
+
+  return writeVerb && (fileTarget || explicitFileWrite);
+}
+
+function promptRequiresNexsightEvidence(prompt: string): boolean {
+  return /\bnexsight\b/i.test(prompt) && !/\b(do not|don't|dont|avoid|skip)\s+nexsight\b/i.test(prompt);
+}
+
+function promptRequiresActiveSkillEvidence(prompt: string, session?: RuntimeSession): boolean {
+  if (!session?.activeSkill) {
+    return false;
+  }
+
+  const lower = prompt.trim().toLowerCase();
+  return lower.startsWith("execute active skill")
+    || lower.startsWith("/skill ")
+    || /^(start|go|run|execute|continue|proceed|do it|do that|same|ok|okay|yes)\b/.test(lower);
+}
+
 function needsNexsightToolOnly(prompt: string, call: InternalToolCall): boolean {
   if (!isGenericInspectionTool(call)) {
     return false;
@@ -1084,6 +1558,342 @@ function formatInternalToolExchange(step: number, call: InternalToolCall, result
   ].join("\n");
 }
 
+function createGuidedPrompt(basePrompt: string, toolTranscript: string[], nudge: string): string {
+  return `${basePrompt}\n\n${toolTranscript.length > 0 ? `Internal tool transcript:\n${toolTranscript.join("\n\n")}\n\n` : ""}${nudge}`;
+}
+
+async function runRequiredNexsightFallback(
+  request: ProviderRequest,
+  userPrompt: string,
+): Promise<{ call: InternalToolCall; result: InternalToolResult }> {
+  const call = createRequiredNexsightEvidenceCall(userPrompt, "fallback");
+  recordRuntimeEvent(request.session, {
+    kind: "control",
+    status: "queued",
+    summary: "required nexsight fallback started",
+    detail: "model ignored explicit Nexsight evidence requirement; harness running bounded inspection",
+  });
+  const result = await executeToolWithRuntimeActivity(request.session, call);
+  return { call, result };
+}
+
+async function runRequiredNexsightPreflight(
+  request: ProviderRequest,
+  userPrompt: string,
+): Promise<{ call: InternalToolCall; result: InternalToolResult }> {
+  const call = createRequiredNexsightEvidenceCall(userPrompt, "preflight");
+  recordRuntimeEvent(request.session, {
+    kind: "control",
+    status: "queued",
+    summary: "required nexsight preflight started",
+    detail: "user explicitly requested Nexsight; harness running bounded inspection before provider",
+  });
+  const result = await executeToolWithRuntimeActivity(request.session, call);
+  return { call, result };
+}
+
+function createRequiredNexsightPreflightPrompt(basePrompt: string, toolTranscript: string[]): string {
+  return [
+    basePrompt,
+    "",
+    "Required Nexsight preflight evidence:",
+    toolTranscript.slice(-3).join("\n\n"),
+    "",
+    "The harness already ran Nexsight because the user explicitly required it.",
+    "Answer from this evidence. If the evidence is insufficient, request one focused Nexsight tool call next.",
+    "Do not say Nexsight was not used.",
+  ].join("\n");
+}
+
+function createRequiredNexsightFallbackPrompt(basePrompt: string, toolTranscript: string[]): string {
+  return [
+    basePrompt,
+    "",
+    "Required Nexsight fallback evidence:",
+    toolTranscript.slice(-3).join("\n\n"),
+    "",
+    "The harness ran Nexsight because the user explicitly required it and prior output did not contain Nexsight tool evidence.",
+    "Answer from this evidence. Do not claim any additional inspection unless you request another valid tool call.",
+  ].join("\n");
+}
+
+function createRequiredNexsightFallbackSuccess(
+  request: ProviderRequest,
+  model: string | null,
+  transport: ProviderSuccess["transport"],
+  adapter: ProviderSuccess["adapter"],
+  result: InternalToolResult,
+): ProviderSuccess {
+  const output = summarizeRequiredNexsightFallbackOutput(result.output);
+  recordRuntimeEvent(request.session, {
+    kind: "assistant",
+    status: "completed",
+    summary: "assistant response completed",
+    detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
+  });
+  recordRuntimeEvent(request.session, {
+    kind: "provider",
+    status: "completed",
+    summary: `${request.session.provider} turn completed`,
+    detail: `transport=${request.session.providerTransport.mode}; output_chars=${String(output.length)}; harness_nexsight_fallback=true`,
+  });
+  return {
+    ok: true,
+    provider: request.session.provider,
+    model,
+    transport,
+    adapter,
+    fallbackApplied: false,
+    output,
+  };
+}
+
+function summarizeRequiredNexsightFallbackOutput(rawOutput: string): string {
+  const parsed = parseJsonObject(rawOutput);
+  if (!parsed) {
+    return [
+      "Nexsight fallback completed.",
+      "",
+      "Nexsight returned unstructured output:",
+      rawOutput.slice(0, 1600),
+    ].join("\n");
+  }
+  if (!isRequiredNexsightScanObject(parsed)) {
+    return [
+      "Nexsight fallback did not produce repo scan output.",
+      "",
+      "Returned payload looked like runtime/session metadata or another non-scan object, so it was not treated as repo evidence.",
+      "",
+      "Output preview:",
+      rawOutput.slice(0, 1600),
+    ].join("\n");
+  }
+
+  const root = typeof parsed.root === "string" ? parsed.root : "(unknown)";
+  const requested = typeof parsed.requested === "string" ? parsed.requested : ".";
+  const exists = parsed.exists === true;
+  const kind = typeof parsed.kind === "string" ? parsed.kind : "(unknown)";
+  const topLevel = summarizeNamedEntries(parsed.topLevel, 20);
+  const keyFiles = summarizeStringArray(parsed.keyFiles, 16);
+  const directories = summarizeStringArray(parsed.directories, 16);
+  const fileTypes = summarizeFileTypes(parsed.filesByExt, 12);
+  const sampleFiles = summarizeStringArray(parsed.sampleFiles, 16);
+
+  return [
+    "Nexsight fallback completed.",
+    "",
+    "What Nexsight inspected:",
+    `- requested: ${requested}`,
+    `- root: ${root}`,
+    `- exists: ${String(exists)}`,
+    `- kind: ${kind}`,
+    "",
+    "Repo shape:",
+    `- top-level entries: ${topLevel}`,
+    `- directories: ${directories}`,
+    `- key files: ${keyFiles}`,
+    `- file types: ${fileTypes}`,
+    `- sample files: ${sampleFiles}`,
+  ].join("\n");
+}
+
+function parseJsonObject(rawOutput: string): Record<string, unknown> | null {
+  try {
+    const parsed: unknown = JSON.parse(rawOutput);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null;
+  } catch {
+    const start = rawOutput.indexOf("{");
+    const end = rawOutput.lastIndexOf("}");
+    if (start < 0 || end <= start) {
+      return null;
+    }
+    try {
+      const parsed: unknown = JSON.parse(rawOutput.slice(start, end + 1));
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? parsed as Record<string, unknown>
+        : null;
+    } catch {
+      return null;
+    }
+  }
+}
+
+function isRequiredNexsightScanObject(value: Record<string, unknown>): boolean {
+  return (
+    typeof value.requested === "string" &&
+    typeof value.root === "string" &&
+    typeof value.exists === "boolean" &&
+    "kind" in value &&
+    Array.isArray(value.topLevel) &&
+    Array.isArray(value.keyFiles) &&
+    Array.isArray(value.directories) &&
+    value.filesByExt !== null &&
+    typeof value.filesByExt === "object" &&
+    !Array.isArray(value.filesByExt) &&
+    Array.isArray(value.sampleFiles)
+  );
+}
+
+function summarizeStringArray(value: unknown, limit: number): string {
+  if (!Array.isArray(value)) {
+    return "(none)";
+  }
+  const names = value
+    .filter((entry): entry is string => typeof entry === "string" && entry.length > 0)
+    .slice(0, limit);
+  if (names.length === 0) {
+    return "(none)";
+  }
+  const suffix = value.length > names.length ? `, +${String(value.length - names.length)} more` : "";
+  return `${names.join(", ")}${suffix}`;
+}
+
+function summarizeNamedEntries(value: unknown, limit: number): string {
+  if (!Array.isArray(value)) {
+    return "(none)";
+  }
+  const names = value
+    .map((entry) => {
+      if (typeof entry === "string" && entry.length > 0) {
+        return entry;
+      }
+      if (entry && typeof entry === "object" && "name" in entry && typeof entry.name === "string") {
+        return entry.name;
+      }
+      return null;
+    })
+    .filter((entry): entry is string => Boolean(entry))
+    .slice(0, limit);
+  if (names.length === 0) {
+    return "(none)";
+  }
+  const suffix = value.length > names.length ? `, +${String(value.length - names.length)} more` : "";
+  return `${names.join(", ")}${suffix}`;
+}
+
+function summarizeFileTypes(value: unknown, limit: number): string {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return "(none)";
+  }
+  const entries = Object.entries(value as Record<string, unknown>)
+    .filter((entry): entry is [string, number] => typeof entry[1] === "number")
+    .sort((left, right) => right[1] - left[1])
+    .slice(0, limit)
+    .map(([ext, count]) => `${ext} ${String(count)}`);
+  return entries.length > 0 ? entries.join(", ") : "(none)";
+}
+
+function createRequiredNexsightEvidenceCall(userPrompt: string, mode: "preflight" | "fallback"): InternalToolCall {
+  const target = extractLikelyNexsightTarget(userPrompt);
+  const code = `
+const fs = require("fs");
+const path = require("path");
+
+const requested = ${JSON.stringify(target)};
+const cwd = process.env.NEXAGENT_CWD || process.cwd();
+const home = process.env.HOME || cwd;
+const skip = new Set([".git", "node_modules", "dist", "build", "coverage", ".next", ".cache", ".bun", ".nexagent"]);
+const keyFileRe = /^(README|AGENTS|CLAUDE|package|tsconfig|bun|pnpm|yarn|Cargo|pyproject|go\\.mod|Makefile|Dockerfile)/i;
+const sourceExt = new Set([".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".py", ".rs", ".go", ".sh", ".md", ".json", ".toml", ".yml", ".yaml"]);
+
+function resolveTarget(input) {
+  if (!input || input === ".") return cwd;
+  if (input.startsWith("~/")) return path.resolve(home, input.slice(2));
+  if (path.isAbsolute(input)) return path.resolve(input);
+  return path.resolve(cwd, input);
+}
+
+function safeReadDir(dir) {
+  try {
+    return fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+}
+
+const root = resolveTarget(requested);
+const out = {
+  requested,
+  root,
+  exists: false,
+  kind: null,
+  topLevel: [],
+  keyFiles: [],
+  directories: [],
+  filesByExt: {},
+  sampleFiles: [],
+};
+
+try {
+  if (!fs.existsSync(root)) {
+    console.log(JSON.stringify(out));
+    process.exit(0);
+  }
+  const stat = fs.statSync(root);
+  out.exists = true;
+  out.kind = stat.isDirectory() ? "directory" : stat.isFile() ? "file" : "other";
+  if (!stat.isDirectory()) {
+    out.keyFiles.push(path.basename(root));
+    console.log(JSON.stringify(out));
+    process.exit(0);
+  }
+
+  const top = safeReadDir(root).slice(0, 120);
+  out.topLevel = top.map((entry) => \`\${entry.isDirectory() ? "dir" : "file"}:\${entry.name}\`).slice(0, 32);
+  out.directories = top.filter((entry) => entry.isDirectory()).map((entry) => entry.name).slice(0, 20);
+  out.keyFiles = top.filter((entry) => entry.isFile() && keyFileRe.test(entry.name)).map((entry) => entry.name).slice(0, 20);
+
+  function walk(dir, depth) {
+    if (depth > 3 || out.sampleFiles.length >= 40) return;
+    for (const entry of safeReadDir(dir)) {
+      if (skip.has(entry.name)) continue;
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(full, depth + 1);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      const ext = path.extname(entry.name) || "<none>";
+      out.filesByExt[ext] = (out.filesByExt[ext] || 0) + 1;
+      if (sourceExt.has(ext) || keyFileRe.test(entry.name)) {
+        out.sampleFiles.push(path.relative(root, full));
+      }
+    }
+  }
+
+  walk(root, 0);
+  console.log(JSON.stringify(out));
+} catch (error) {
+  console.log(JSON.stringify({ requested, root, error: error && error.message ? error.message : String(error) }));
+}
+`.trim();
+
+  return {
+    name: "nexsight_execute",
+    arguments: {
+      language: "javascript",
+      reason: mode === "preflight"
+        ? "required Nexsight preflight for explicit user request"
+        : "required Nexsight fallback after missing model-provided evidence",
+      code,
+      timeoutMs: 10_000,
+    },
+  };
+}
+
+function extractLikelyNexsightTarget(prompt: string): string {
+  const candidates = prompt.match(/(?:~\/|\/)[^\s"'`),;]+/g) ?? [];
+  for (const candidate of candidates) {
+    const cleaned = candidate.replace(/[.?!:]+$/, "");
+    if (cleaned && !/^\/(?:etc|dev|proc|sys|run)\b/.test(cleaned)) {
+      return cleaned;
+    }
+  }
+  return ".";
+}
+
 function createToolBudgetContinuationPrompt(basePrompt: string, toolTranscript: string[], pendingToolName: string, cycleNumber: number): string {
   const compactTranscript = toolTranscript.slice(-4).join("\n\n");
   return [
@@ -1108,6 +1918,7 @@ async function maybeSynthesizeAfterRepeatedGuidance(
   basePrompt: string,
   toolTranscript: string[],
   guidanceNudgeCount: number,
+  turnEventStart: number,
   reason: string,
 ): Promise<ProviderResult | null> {
   if (toolTranscript.length === 0 || guidanceNudgeCount < MAX_GUIDANCE_NUDGES_BEFORE_SYNTHESIS) {
@@ -1153,6 +1964,44 @@ async function maybeSynthesizeAfterRepeatedGuidance(
       toolTranscript,
       `Blocked another tool call after repeated harness guidance (${reason}).`,
     );
+  }
+  if (isNonActionableDeferral(finalOutput)) {
+    recordRuntimeEvent(request.session, {
+      kind: "control",
+      status: "completed",
+      summary: "guidance loop fallback returned partial result",
+      detail: `${reason}; final output deferred action`,
+    });
+    return createToolBudgetPartialResult(
+      request.session.provider,
+      model,
+      request.session.provider === "openai" ? "openai" : "codex",
+      adapter,
+      toolTranscript,
+      `Blocked non-actionable final response after repeated harness guidance (${reason}).`,
+    );
+  }
+  if (claimsFileMutation(finalOutput) && !hasWriteEvidence(request.session, turnEventStart)) {
+    return createMissingWriteEvidenceFailure(
+      request,
+      model,
+      request.session.provider === "openai" ? "openai" : "codex",
+      adapter,
+      finalOutput,
+    );
+  }
+  const missingObligation = createMissingRequiredEvidenceFailureIfAny(
+    request,
+    model,
+    request.session.provider === "openai" ? "openai" : "codex",
+    adapter,
+    deriveTurnObligations(request.prompt, request.session),
+    turnEventStart,
+    toolTranscript,
+    finalOutput,
+  );
+  if (missingObligation) {
+    return missingObligation;
   }
 
   recordRuntimeEvent(request.session, {
@@ -1247,11 +2096,14 @@ function isNonActionableDeferral(output: string): boolean {
   }
 
   const lower = text.toLowerCase();
+  const activationOnly = /^(started|starting|activated|all set|ready|on it|running now)[.!]?\s*$/i.test(text)
+    || /^(started|starting now|activated|all set|ready)\b/i.test(text);
   const asksForUserToContinue = [
     "if you want, i can",
     "if you'd like, i can",
     "i can proceed",
     "i can do that now",
+    "please say",
     "please run this",
     "run this and",
     "you can run",
@@ -1259,11 +2111,28 @@ function isNonActionableDeferral(output: string): boolean {
     "reply with",
     "say \"",
     "say '",
+    "say “",
+    "say ‘",
+    "send:",
     "tell me to",
     "want me to",
     "should i",
+    "your move",
   ].some((phrase) => lower.includes(phrase));
   const admitsNoAction = [
+    "i'll do",
+    "i will do",
+    "i'll execute",
+    "i will execute",
+    "i'm ready to execute",
+    "i am ready to execute",
+    "i need one concrete",
+    "i need the exact target",
+    "i need exact target",
+    "need the exact target",
+    "give me the exact task",
+    "throw me the exact task",
+    "paste the last concrete request",
     "i need to actually",
     "i need to apply",
     "i need to edit",
@@ -1274,6 +2143,18 @@ function isNonActionableDeferral(output: string): boolean {
     "i did not",
     "i don't have tool execution",
     "no file-change evidence",
+  ].some((phrase) => lower.includes(phrase));
+  const selfCorrectionOnly = [
+    "you're right",
+    "you are right",
+    "fair callout",
+    "my bad",
+    "that miss is on me",
+    "i should have",
+    "i should've",
+    "i'll follow",
+    "i will follow",
+    "going forward",
   ].some((phrase) => lower.includes(phrase));
   const concreteCompletionEvidence = [
     "tests pass",
@@ -1286,7 +2167,7 @@ function isNonActionableDeferral(output: string): boolean {
     "committed ",
   ].some((phrase) => lower.includes(phrase));
 
-  return (asksForUserToContinue || admitsNoAction) && !concreteCompletionEvidence;
+  return (activationOnly || asksForUserToContinue || admitsNoAction || selfCorrectionOnly) && !concreteCompletionEvidence;
 }
 
 function claimsFileMutation(output: string): boolean {
@@ -1310,12 +2191,64 @@ function claimsFileMutation(output: string): boolean {
   return mutationClaim && fileMention;
 }
 
+function claimsUnsupportedWriteCompletion(output: string, priorWriteEvidenceNudges: number): boolean {
+  if (claimsFileMutation(output)) {
+    return true;
+  }
+  if (priorWriteEvidenceNudges <= 0) {
+    return false;
+  }
+
+  const lower = output.toLowerCase();
+  const fileMention = /\b(readme|\.md|\.ts|\.tsx|\.json|file|files)\b/i.test(output);
+  const verificationClaim = [
+    "exists",
+    "verified",
+    "direct read",
+    "direct reads",
+    "showed contents",
+    "content is",
+    "current exact content",
+  ].some((phrase) => lower.includes(phrase));
+  const correctionOrBlocker = [
+    "no file change",
+    "no file was",
+    "did not write",
+    "didn't write",
+    "not written",
+    "not created",
+    "was not created",
+    "blocked",
+    "cannot",
+    "can't",
+  ].some((phrase) => lower.includes(phrase));
+
+  return fileMention && verificationClaim && !correctionOrBlocker;
+}
+
 function hasWriteEvidence(session: RuntimeSession, sinceIndex: number): boolean {
   return session.events.slice(sinceIndex).some((event) =>
     event.kind === "tool"
     && event.status === "completed"
     && /tool\s+(write_file|apply_patch|shell_command)\s+completed/i.test(event.summary),
   );
+}
+
+function hasNexsightEvidence(session: RuntimeSession, sinceIndex: number, toolTranscript: string[] = []): boolean {
+  return toolTranscript.some((entry) => /"name"\s*:\s*"nexsight_(execute|index|batch|search)"/i.test(entry))
+    || session.events.slice(sinceIndex).some((event) =>
+    event.kind === "tool"
+    && (event.status === "completed" || event.status === "failed" || event.status === "blocked")
+    && /tool\s+nexsight_(execute|index|batch|search)\s+(completed|failed|not executed)/i.test(event.summary),
+    );
+}
+
+function hasToolEvidence(session: RuntimeSession, sinceIndex: number, toolTranscript: string[] = []): boolean {
+  return toolTranscript.some((entry) => /Tool call:/i.test(entry))
+    || session.events.slice(sinceIndex).some((event) =>
+      event.kind === "tool"
+      && (event.status === "completed" || event.status === "failed" || event.status === "blocked")
+    );
 }
 
 function parseNativeToolCall(payload: unknown): { responseId: string | undefined; callId: string; name: InternalToolCall["name"]; arguments: Record<string, unknown> } | null {
