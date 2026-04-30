@@ -75,6 +75,27 @@ Compile platform binaries:
 bun run compile
 ```
 
+Compile one platform binary:
+
+```bash
+bun run compile:linux
+bun run compile:macos
+bun run compile:windows
+```
+
+Development target aliases are supported for Linux builds:
+
+```bash
+bun run compile:dev:linux
+bun compile dev:linux
+```
+
+Runtime flags are passed when launching the built binary:
+
+```bash
+./dist/nexagent-linux-x64 --opentui
+```
+
 ## CLI Usage
 
 Inspect runtime:

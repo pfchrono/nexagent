@@ -236,6 +236,17 @@ test("package dev script uses Bun for OpenTUI asset imports", async () => {
   assert.equal(packageJson.scripts?.dev, "bun run src/cli.ts");
 });
 
+test("package compile script routes platform targets through compile helper", async () => {
+  const packageJson = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")) as {
+    scripts?: Record<string, string>;
+  };
+
+  assert.equal(packageJson.scripts?.compile, "bun run scripts/compile.ts");
+  assert.equal(packageJson.scripts?.["compile:linux"], "bun run scripts/compile.ts linux");
+  assert.equal(packageJson.scripts?.["compile:dev:linux"], "bun run scripts/compile.ts dev:linux");
+  assert.equal(packageJson.scripts?.["compile:linux:dev"], "bun run scripts/compile.ts linux:dev");
+});
+
 function createSession(provider = "codex"): RuntimeSession {
   return {
     id: "session_test",
