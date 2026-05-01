@@ -14,6 +14,13 @@ export interface RuntimeDebugOptions {
   debugFile: string | null;
 }
 
+export class RuntimeConfigurationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RuntimeConfigurationError";
+  }
+}
+
 export function createRuntimeDebugState(): RuntimeDebugState {
   return {
     enabled: false,
@@ -56,16 +63,17 @@ export function writeDebugLog(
 export function resolveDebugLogPath(input: string | null, now = new Date()): string {
   if (!input) {
     const stamp = now.toISOString().replace(/[:.]/g, "-");
-    return path.join(tmpdir(), `nexagent-debug-${stamp}.log`);
+    const defaultTempRoot = process.platform === "win32" ? tmpdir() : "/tmp";
+    return path.join(defaultTempRoot, `nexagent-debug-${stamp}.log`);
   }
 
   const safeBase = path.join(homedir(), ".nexagent", "debug");
   const rawPath = path.isAbsolute(input) ? path.resolve(input) : path.resolve(safeBase, input);
   if (!isPathInside(rawPath, homedir()) && !isPathInside(rawPath, tmpdir())) {
-    throw new Error(`debug file must be under ${homedir()} or ${tmpdir()}`);
+    throw new RuntimeConfigurationError(`debug file must be under ${homedir()} or ${tmpdir()}`);
   }
   if (!rawPath.endsWith(".log")) {
-    throw new Error("debug file must end with .log");
+    throw new RuntimeConfigurationError("debug file must end with .log");
   }
   return rawPath;
 }

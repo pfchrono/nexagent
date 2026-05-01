@@ -876,7 +876,7 @@ async function executeOpenAiNativeToolLoop(
   let requiredNexsightFallbackCount = 0;
   let requiredActiveSkillNudgeCount = 0;
 
-  for (let step = 0; step < MAX_INTERNAL_TOOL_STEPS; step += 1) {
+  const loopResult = await turnRun.runToolLoop<ProviderResult>(1, MAX_INTERNAL_TOOL_STEPS, async ({ step, finalStep }) => {
     if (request.session.operationControls.cancelRequested) {
       request.session.operationControls.cancelRequested = false;
       recordRuntimeEvent(request.session, {
@@ -933,7 +933,7 @@ async function executeOpenAiNativeToolLoop(
           detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
         });
         nativeInput = [{ role: "user", content: MALFORMED_TOOL_CALL_NUDGE }];
-        continue;
+        return null;
       }
       if (obligations.requiresNexsightEvidence && !hasNexsightEvidence(request.session, turnEventStart)) {
         requiredNexsightNudgeCount += 1;
@@ -945,7 +945,7 @@ async function executeOpenAiNativeToolLoop(
             detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
           });
           nativeInput = [{ role: "user", content: REQUIRED_NEXSIGHT_EVIDENCE_NUDGE }];
-          continue;
+          return null;
         }
         if (step < MAX_INTERNAL_TOOL_STEPS - 1 && requiredNexsightFallbackCount < 1) {
           requiredNexsightFallbackCount += 1;
@@ -966,7 +966,7 @@ async function executeOpenAiNativeToolLoop(
               [formatInternalToolExchange(step + 1, fallback.call, fallback.result)],
             ),
           }];
-          continue;
+          return null;
         }
         return createMissingRequiredToolEvidenceFailure(request, model, transport.transport, transport.id, "Nexsight", output);
       }
@@ -980,7 +980,7 @@ async function executeOpenAiNativeToolLoop(
             detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
           });
           nativeInput = [{ role: "user", content: REQUIRED_WRITE_EVIDENCE_NUDGE }];
-          continue;
+          return null;
         }
         return createMissingRequiredToolEvidenceFailure(request, model, transport.transport, transport.id, "write", output);
       }
@@ -994,7 +994,7 @@ async function executeOpenAiNativeToolLoop(
             detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
           });
           nativeInput = [{ role: "user", content: REQUIRED_ACTIVE_SKILL_EVIDENCE_NUDGE }];
-          continue;
+          return null;
         }
         return createMissingRequiredToolEvidenceFailure(request, model, transport.transport, transport.id, "active skill", output);
       }
@@ -1008,7 +1008,7 @@ async function executeOpenAiNativeToolLoop(
             detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
           });
           nativeInput = [{ role: "user", content: WRITE_EVIDENCE_NUDGE }];
-          continue;
+          return null;
         }
         return createMissingWriteEvidenceFailure(request, model, transport.transport, transport.id, output);
       }
@@ -1022,7 +1022,7 @@ async function executeOpenAiNativeToolLoop(
             detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
           });
           nativeInput = [{ role: "user", content: REQUIRED_CLAIM_EVIDENCE_NUDGE }];
-          continue;
+          return null;
         }
         return createMissingRequiredToolEvidenceFailure(request, model, transport.transport, transport.id, missingClaimEvidence, output);
       }
@@ -1034,7 +1034,7 @@ async function executeOpenAiNativeToolLoop(
           detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
         });
         nativeInput = [{ role: "user", content: CONTINUATION_NUDGE }];
-        continue;
+          return null;
       }
       recordRuntimeEvent(request.session, {
         kind: "assistant",
@@ -1053,7 +1053,7 @@ async function executeOpenAiNativeToolLoop(
       };
     }
 
-    if (step === MAX_INTERNAL_TOOL_STEPS - 1) {
+    if (finalStep) {
       recordRuntimeEvent(request.session, {
         kind: "control",
         status: "completed",
@@ -1094,6 +1094,11 @@ async function executeOpenAiNativeToolLoop(
       ...(steer ? [{ role: "user", content: `Operator steer: ${steer}` }] : []),
       ...(step === MAX_INTERNAL_TOOL_STEPS - 2 ? [{ role: "user", content: FINAL_TOOL_STEP_NUDGE }] : []),
     ];
+    return null;
+  });
+
+  if (loopResult) {
+    return loopResult;
   }
 
   return {
@@ -1443,7 +1448,7 @@ function parseToolCallJson(value: string): InternalToolCall | null {
     try {
       const parsed = JSON.parse(candidate) as InternalToolCall;
       if (!parsed || typeof parsed !== "object") {
-        continue;
+        return null;
       }
       return parsed;
     } catch {

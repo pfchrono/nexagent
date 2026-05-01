@@ -19,6 +19,13 @@ export interface TurnRunTransition {
   reason: string;
 }
 
+export interface TurnRunLoopStep {
+  cycle: number;
+  step: number;
+  finalStep: boolean;
+  finalCycle: boolean;
+}
+
 export class TurnRun {
   private state: TurnRunState = "initializing";
   private readonly transitions: TurnRunTransition[] = [];
@@ -82,6 +89,27 @@ export class TurnRun {
   async runProviderLoop(executor: () => Promise<ProviderResult>): Promise<ProviderResult> {
     this.transition("provider_loop", "TurnRun owned provider/tool loop started");
     return executor();
+  }
+
+  async runToolLoop<T>(
+    maxCycles: number,
+    maxSteps: number,
+    onStep: (step: TurnRunLoopStep) => Promise<T | null>,
+  ): Promise<T | null> {
+    for (let cycle = 0; cycle < maxCycles; cycle += 1) {
+      for (let step = 0; step < maxSteps; step += 1) {
+        const result = await onStep({
+          cycle,
+          step,
+          finalStep: step === maxSteps - 1,
+          finalCycle: cycle === maxCycles - 1,
+        });
+        if (result !== null) {
+          return result;
+        }
+      }
+    }
+    return null;
   }
 
   onProviderStep(step: number): void {
