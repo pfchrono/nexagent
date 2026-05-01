@@ -79,6 +79,29 @@ export class TurnRun {
     return null;
   }
 
+  async runProviderLoop(executor: () => Promise<ProviderResult>): Promise<ProviderResult> {
+    this.transition("provider_loop", "TurnRun owned provider/tool loop started");
+    return executor();
+  }
+
+  onProviderStep(step: number): void {
+    recordRuntimeEvent(this.context.session, {
+      kind: "control",
+      status: "started",
+      summary: "turn run provider step",
+      detail: `step=${String(step)}`,
+    });
+  }
+
+  onToolStep(toolName: string): void {
+    recordRuntimeEvent(this.context.session, {
+      kind: "control",
+      status: "started",
+      summary: "turn run tool step",
+      detail: toolName,
+    });
+  }
+
   async run(executor: () => Promise<ProviderResult>): Promise<ProviderResult> {
     setRuntimeAction(this.context.session, "running", "turn run active");
     recordRuntimeEvent(this.context.session, {
@@ -87,9 +110,7 @@ export class TurnRun {
       summary: "turn run started",
       detail: this.context.prompt.slice(0, 160),
     });
-    this.transition("provider_loop", "provider orchestration delegated");
-
-    const result = await executor();
+    const result = await this.runProviderLoop(executor);
 
     this.transition("finalizing", "provider returned");
     if (result.ok) {

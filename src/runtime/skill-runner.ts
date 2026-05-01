@@ -14,6 +14,23 @@ function shouldTriggerSkillRun(prompt: string): boolean {
     || /^(start|go|run|execute|continue|proceed|do it|do that|same|ok|okay|yes)\b/.test(lower);
 }
 
+function extractRequiredArtifacts(skillBody: string): string[] {
+  const artifacts = new Set<string>();
+  const outputMatch = skillBody.match(/\*\*Output:\*\*\s*`?([^`\n]+)`?/i);
+  if (outputMatch?.[1]) {
+    artifacts.add(outputMatch[1].trim());
+  }
+  for (const match of skillBody.matchAll(/[`"]([^`"]+\.(?:md|json|txt|yaml|yml|toml))[`"]/gi)) {
+    artifacts.add(match[1].trim());
+  }
+  return [...artifacts].filter((artifact) => artifact.length > 0).slice(0, 12);
+}
+
+function artifactSatisfied(artifact: string, evidence: string[], finalOutput: string): boolean {
+  const needle = artifact.replace(/^\.\//, "");
+  return evidence.some((entry) => entry.includes(needle)) || finalOutput.includes(needle);
+}
+
 export function beginSkillRun(session: RuntimeSession, prompt: string): SkillRunRecord | null {
   const activeSkill = session.activeSkill;
   if (!activeSkill || !shouldTriggerSkillRun(prompt)) {
@@ -27,7 +44,9 @@ export function beginSkillRun(session: RuntimeSession, prompt: string): SkillRun
     sourcePath: activeSkill.path,
     args: activeSkill.args,
     requestedBy: prompt,
-    requiredArtifacts: [],
+    skillBody: activeSkill.content,
+    requiredArtifacts: extractRequiredArtifacts(activeSkill.content),
+    artifactEvidence: [],
     workflowStage: "executing",
     workflowStages: ["loaded", "initialized", "executing"],
     status: "running",
@@ -63,6 +82,7 @@ export function recordSkillToolResult(
   }
   const contract = getToolContract(call.name);
   if (contract.writes) {
+    run.artifactEvidence.push(result.output);
     pushStage(run, "artifact_written");
   } else {
     pushStage(run, "executing");
@@ -76,6 +96,13 @@ export function completeSkillRun(run: SkillRunRecord | null, finalOutput: string
   }
   run.updatedAt = new Date().toISOString();
   if (run.status !== "blocked") {
+    const missingArtifacts = run.requiredArtifacts.filter((artifact) => !artifactSatisfied(artifact, run.artifactEvidence, finalOutput));
+    if (missingArtifacts.length > 0) {
+      run.status = "blocked";
+      pushStage(run, "blocked");
+      run.blocker = `skill workflow missing required artifact evidence: ${missingArtifacts.join(", ")}`;
+      return run;
+    }
     pushStage(run, "verified");
     run.status = "completed";
     pushStage(run, "completed");

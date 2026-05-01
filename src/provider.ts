@@ -307,6 +307,7 @@ async function executeProviderRequestImpl(
           exitCode: invocation.exitCode,
         }, { verboseOnly: true });
       }
+      turnRun.onProviderStep(step + 1);
 
       if (invocation.exitCode !== 0) {
         return createCodexFailure(provider, model, invocation.stderr, invocation.stdout, transport.id);
@@ -627,6 +628,7 @@ async function executeProviderRequestImpl(
       }
 
       const toolResult = await withSentryAiToolSpan(toolCall.name, async (toolSpan) => {
+        turnRun.onToolStep(toolCall.name);
         const result = await executeToolWithRuntimeActivity(request.session, toolCall);
         setSentrySpanAttributes(toolSpan, {
           "gen_ai.tool.name": toolCall.name,
@@ -911,6 +913,7 @@ async function executeOpenAiNativeToolLoop(
         exitCode: invocation.exitCode,
       }, { verboseOnly: true });
     }
+    turnRun.onProviderStep(step + 1);
 
     if (invocation.exitCode !== 0) {
       return createCodexFailure(request.session.provider, model, invocation.stderr, invocation.stdout, transport.id);
@@ -1068,6 +1071,7 @@ async function executeOpenAiNativeToolLoop(
     }
 
     const toolResult = await withSentryAiToolSpan(toolCall.name, async (toolSpan) => {
+      turnRun.onToolStep(toolCall.name);
       const result = await executeToolWithRuntimeActivity(request.session, {
         name: toolCall.name,
         arguments: toolCall.arguments,

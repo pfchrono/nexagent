@@ -71,6 +71,35 @@ test("turn run reaches blocked state on provider failure", async () => {
   assert.equal(session.action.status, "error");
 });
 
+test("turn run records provider and tool loop ownership events", async () => {
+  const session = createSession();
+  const run = new TurnRun({ session, prompt: "inspect repo" });
+
+  await run.run(async () => {
+    run.onProviderStep(1);
+    run.onToolStep("read_file");
+    return {
+      ok: true,
+      provider: "codex",
+      model: "gpt-5.4",
+      transport: "codex",
+      adapter: "codex-cli-exec",
+      fallbackApplied: false,
+      output: "done",
+    };
+  });
+
+  assert.ok(session.events.some((event) => event.summary === "turn run provider step"));
+  assert.ok(session.events.some((event) => event.summary === "turn run tool step"));
+  assert.match(run.getTransitions()[0]?.reason ?? "", /owned provider\/tool loop/);
+});
+
+test("turn run exposes derived obligations", () => {
+  const session = createSession();
+  const run = new TurnRun({ session, prompt: "write docs.md" });
+  assert.equal(run.getObligations().requiresWriteEvidence, true);
+});
+
 test("turn run owns final evidence checks for claimed tests and Nexsight work", () => {
   const session = createSession();
   const run = new TurnRun({ session, prompt: "summarize validation" });

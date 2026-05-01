@@ -94,6 +94,44 @@ test("skill runner records artifact workflow stage for write tools", () => {
   assert.ok(withArtifact?.workflowStages.includes("artifact_written"));
 });
 
+test("skill runner resolves required artifacts from SKILL body and enforces them", () => {
+  const run = beginSkillRun(
+    createSession({
+      name: "reporter",
+      source: "repo",
+      path: "/repo/.codex/skills/reporter/SKILL.md",
+      args: "(none)",
+      content: "**Output:** `REPORT.md`\nWrite the report.",
+    }),
+    "run",
+  );
+  assert.ok(run);
+  assert.deepEqual(run?.requiredArtifacts, ["REPORT.md"]);
+
+  const blocked = completeSkillRun(run, "done without artifact");
+  assert.equal(blocked?.status, "blocked");
+  assert.match(blocked?.blocker ?? "", /REPORT\.md/);
+});
+
+test("skill runner completes when required artifact evidence exists", () => {
+  const run = beginSkillRun(
+    createSession({
+      name: "reporter",
+      source: "repo",
+      path: "/repo/.codex/skills/reporter/SKILL.md",
+      args: "(none)",
+      content: "**Output:** `REPORT.md`\nWrite the report.",
+    }),
+    "run",
+  );
+  assert.ok(run);
+
+  const withArtifact = recordSkillToolResult(run, { name: "write_file" }, { ok: true, tool: "write_file", output: "wrote REPORT.md" });
+  const completed = completeSkillRun(withArtifact, "done");
+  assert.equal(completed?.status, "completed");
+  assert.equal(completed?.workflowStage, "completed");
+});
+
 test("skill runner marks blocker from failed tool", () => {
   const run = beginSkillRun(
     createSession({

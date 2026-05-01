@@ -7,7 +7,9 @@ export interface SkillRunRecord {
   sourcePath: string;
   args: string;
   requestedBy: string;
+  skillBody: string;
   requiredArtifacts: string[];
+  artifactEvidence: string[];
   workflowStage: SkillWorkflowStage;
   workflowStages: SkillWorkflowStage[];
   status: SkillRunStatus;
