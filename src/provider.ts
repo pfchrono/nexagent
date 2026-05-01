@@ -17,15 +17,13 @@ import { writeDebugLog } from "./runtime/debug.js";
 import { hasNexsightEvidence, hasToolEvidence, hasWriteEvidence } from "./runtime/evidence.js";
 import { assemblePrompt } from "./runtime/instructions.js";
 import {
-  deriveTurnObligations,
   isNexsightToolCall,
   shouldRouteToNexsightOnly,
-  type TurnObligations,
 } from "./runtime/nexsight-router.js";
 import { consumeOperatorSteer, estimateTokenCount, recordRuntimeEvent, setRuntimeAction } from "./runtime/session.js";
 import type { RuntimeApprovalRequest, RuntimeSession } from "./runtime/session.js";
 import { beginSkillRun, completeSkillRun, recordSkillToolResult } from "./runtime/skill-runner.js";
-import { TurnRun } from "./runtime/turn-run.js";
+import { TurnRun, type MissingTurnEvidence } from "./runtime/turn-run.js";
 import { classifyInternalToolRisk, executeInternalToolAsync, type InternalToolCall, type InternalToolResult } from "./runtime/tools.js";
 
 export interface ProviderRequest {
@@ -133,6 +131,11 @@ const REQUIRED_ACTIVE_SKILL_EVIDENCE_NUDGE = [
   "Do not answer with only activated, started, ready, or a request to restate the target.",
   "Answer only after current-turn tool evidence exists or a real tool/approval blocker is recorded.",
 ].join(" ");
+const REQUIRED_CLAIM_EVIDENCE_NUDGE = [
+  "The previous response claimed test or Nexsight work without matching current-turn evidence.",
+  "Run the matching tool now, or correct the answer and explicitly state that the work was not run.",
+  "Do not claim tests, validation, or Nexsight work unless current-turn evidence exists.",
+].join(" ");
 const FINAL_TOOL_STEP_NUDGE = [
   "Tool budget is almost exhausted.",
   "You have one provider step left after this transcript.",
@@ -151,7 +154,7 @@ export async function executeProviderRequest(
   });
   let skillRun = beginSkillRun(request.session, request.prompt);
   return turnRun.run(async () => {
-    const result = await executeProviderRequestImpl(request, invokers, (call, toolResult) => {
+    const result = await executeProviderRequestImpl(request, invokers, turnRun, (call, toolResult) => {
       skillRun = recordSkillToolResult(skillRun, call, toolResult);
     });
     if (result.ok) {
@@ -164,6 +167,7 @@ export async function executeProviderRequest(
 async function executeProviderRequestImpl(
   request: ProviderRequest,
   invokers: CodexInvokers = { exec: invokeCodexExecTransport, http: invokeCodexHttpTransport, codexHttp: invokeCodexChatGptHttpTransport },
+  turnRun: TurnRun,
   onToolResult?: (call: InternalToolCall, result: InternalToolResult) => void,
 ): Promise<ProviderResult> {
   const provider = request.session.provider;
@@ -241,7 +245,7 @@ async function executeProviderRequestImpl(
       }, { verboseOnly: true });
     }
     if (request.session.providerTransport.mode === "http-responses") {
-      return executeOpenAiNativeToolLoop(request, assembled.prompt, model, transport, invokers.http, onToolResult);
+      return executeOpenAiNativeToolLoop(request, assembled.prompt, model, transport, invokers.http, turnRun, onToolResult);
     }
     const invokeCodex = request.session.providerTransport.mode === "codex-http"
       ? invokers.codexHttp
@@ -249,7 +253,7 @@ async function executeProviderRequestImpl(
     const codexHttpInput = request.session.providerTransport.mode === "codex-http"
       ? buildNativeInputFromPrompt(request.prompt, request.attachments)
       : undefined;
-    const obligations = deriveTurnObligations(request.prompt, request.session);
+    const obligations = turnRun.getObligations();
     const toolTranscript: string[] = [];
     if (obligations.requiresNexsightEvidence) {
       const preflight = await runRequiredNexsightPreflight(request, request.prompt);
@@ -326,6 +330,7 @@ async function executeProviderRequestImpl(
             toolTranscript,
             guidanceNudgeCount,
             turnEventStart,
+            turnRun,
             "malformed tool call",
           );
           if (earlyFinal) {
@@ -412,6 +417,21 @@ async function executeProviderRequestImpl(
           }
           return createMissingWriteEvidenceFailure(request, model, transport.transport, transport.id, output);
         }
+        const missingClaimEvidence = turnRun.evaluateFinalEvidence(turnEventStart, toolTranscript, output);
+        if (missingClaimEvidence) {
+          guidanceNudgeCount += 1;
+          if (step < MAX_INTERNAL_TOOL_STEPS - 1 && guidanceNudgeCount < MAX_GUIDANCE_NUDGES_BEFORE_SYNTHESIS) {
+            recordRuntimeEvent(request.session, {
+              kind: "control",
+              status: "queued",
+              summary: "claim evidence nudge applied",
+              detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
+            });
+            prompt = createGuidedPrompt(assembled.prompt, toolTranscript, REQUIRED_CLAIM_EVIDENCE_NUDGE);
+            continue;
+          }
+          return createMissingRequiredToolEvidenceFailure(request, model, transport.transport, transport.id, missingClaimEvidence, output);
+        }
         if (isNonActionableDeferral(output) && step < MAX_INTERNAL_TOOL_STEPS - 1) {
           guidanceNudgeCount += 1;
           const earlyFinal = await maybeSynthesizeAfterRepeatedGuidance(
@@ -424,6 +444,7 @@ async function executeProviderRequestImpl(
             toolTranscript,
             guidanceNudgeCount,
             turnEventStart,
+            turnRun,
             "non-actionable deferral",
           );
           if (earlyFinal) {
@@ -518,7 +539,7 @@ async function executeProviderRequestImpl(
             model,
             transport.transport,
             transport.id,
-            obligations,
+            turnRun,
             turnEventStart,
             toolTranscript,
             finalOutput,
@@ -589,6 +610,7 @@ async function executeProviderRequestImpl(
           toolTranscript,
           guidanceNudgeCount,
           turnEventStart,
+          turnRun,
           "nexsight routing",
         );
         if (earlyFinal) {
@@ -833,12 +855,13 @@ async function executeOpenAiNativeToolLoop(
   model: string | null,
   transport: ReturnType<typeof resolveTransport>,
   invokeHttp: CodexInvoker,
+  turnRun: TurnRun,
   onToolResult?: (call: InternalToolCall, result: InternalToolResult) => void,
 ): Promise<ProviderResult> {
   let previousResponseId: string | undefined;
   let nativeInput: unknown = buildNativeInputFromPrompt(request.prompt, request.attachments);
   const turnEventStart = request.session.events.length;
-  const obligations = deriveTurnObligations(request.prompt, request.session);
+  const obligations = turnRun.getObligations();
   const toolTranscript: string[] = [];
   if (obligations.requiresNexsightEvidence) {
     const preflight = await runRequiredNexsightPreflight(request, request.prompt);
@@ -986,6 +1009,20 @@ async function executeOpenAiNativeToolLoop(
         }
         return createMissingWriteEvidenceFailure(request, model, transport.transport, transport.id, output);
       }
+      const missingClaimEvidence = turnRun.evaluateFinalEvidence(turnEventStart, toolTranscript, output);
+      if (missingClaimEvidence) {
+        if (step < MAX_INTERNAL_TOOL_STEPS - 1) {
+          recordRuntimeEvent(request.session, {
+            kind: "control",
+            status: "queued",
+            summary: "claim evidence nudge applied",
+            detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
+          });
+          nativeInput = [{ role: "user", content: REQUIRED_CLAIM_EVIDENCE_NUDGE }];
+          continue;
+        }
+        return createMissingRequiredToolEvidenceFailure(request, model, transport.transport, transport.id, missingClaimEvidence, output);
+      }
       if (isNonActionableDeferral(output) && step < MAX_INTERNAL_TOOL_STEPS - 1) {
         recordRuntimeEvent(request.session, {
           kind: "control",
@@ -1112,7 +1149,7 @@ function createMissingRequiredToolEvidenceFailure(
   model: string | null,
   transport: ProviderFailure["transport"],
   adapter: ProviderFailure["adapter"],
-  requiredTool: "write" | "Nexsight" | "active skill",
+  requiredTool: MissingTurnEvidence,
   output: string,
 ): ProviderFailure {
   const detail = output.length > 160 ? `${output.slice(0, 157)}...` : output;
@@ -1120,7 +1157,9 @@ function createMissingRequiredToolEvidenceFailure(
     ? "required write evidence gate blocked assistant response"
     : requiredTool === "Nexsight"
       ? "required nexsight evidence gate blocked assistant response"
-      : "required active skill evidence gate blocked assistant response";
+      : requiredTool === "active skill"
+        ? "required active skill evidence gate blocked assistant response"
+        : "required test evidence gate blocked assistant response";
   recordRuntimeEvent(request.session, {
     kind: "control",
     status: "blocked",
@@ -1157,21 +1196,13 @@ function createMissingRequiredEvidenceFailureIfAny(
   model: string | null,
   transport: ProviderFailure["transport"],
   adapter: ProviderFailure["adapter"],
-  obligations: TurnObligations,
+  turnRun: TurnRun,
   turnEventStart: number,
   toolTranscript: string[],
   output: string,
 ): ProviderFailure | null {
-  if (obligations.requiresNexsightEvidence && !hasNexsightEvidence(request.session, turnEventStart, toolTranscript)) {
-    return createMissingRequiredToolEvidenceFailure(request, model, transport, adapter, "Nexsight", output);
-  }
-  if (obligations.requiresWriteEvidence && !hasWriteEvidence(request.session, turnEventStart)) {
-    return createMissingRequiredToolEvidenceFailure(request, model, transport, adapter, "write", output);
-  }
-  if (obligations.requiresActiveSkillEvidence && !hasToolEvidence(request.session, turnEventStart, toolTranscript)) {
-    return createMissingRequiredToolEvidenceFailure(request, model, transport, adapter, "active skill", output);
-  }
-  return null;
+  const missing = turnRun.evaluateFinalEvidence(turnEventStart, toolTranscript, output);
+  return missing ? createMissingRequiredToolEvidenceFailure(request, model, transport, adapter, missing, output) : null;
 }
 
 function validateAttachmentSupport(
@@ -1911,6 +1942,7 @@ async function maybeSynthesizeAfterRepeatedGuidance(
   toolTranscript: string[],
   guidanceNudgeCount: number,
   turnEventStart: number,
+  turnRun: TurnRun,
   reason: string,
 ): Promise<ProviderResult | null> {
   if (toolTranscript.length === 0 || guidanceNudgeCount < MAX_GUIDANCE_NUDGES_BEFORE_SYNTHESIS) {
@@ -1987,7 +2019,7 @@ async function maybeSynthesizeAfterRepeatedGuidance(
     model,
     request.session.provider === "openai" ? "openai" : "codex",
     adapter,
-    deriveTurnObligations(request.prompt, request.session),
+    turnRun,
     turnEventStart,
     toolTranscript,
     finalOutput,

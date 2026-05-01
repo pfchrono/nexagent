@@ -6,6 +6,15 @@ export type ProviderTransportMode = "cli-exec" | "http-responses" | "codex-http"
 export type ProviderAdapterId = "codex-cli-exec" | "openai-http-responses" | "codex-chatgpt-http";
 export type ProviderExecutor = "codex" | "fetch";
 
+export interface ProviderCapabilityHooks {
+  nativeTools: boolean;
+  streaming: boolean;
+  caching: boolean;
+  providerRecovery: boolean;
+  malformedToolRecovery: boolean;
+  retry: boolean;
+}
+
 export interface ProviderModelOption extends CodexModelDefinition {
   disabledReason?: string;
 }
@@ -19,6 +28,7 @@ export interface ProviderDefinition {
   defaultTransportMode: ProviderTransportMode;
   adapter: ProviderAdapterId;
   executor: ProviderExecutor;
+  capabilities: ProviderCapabilityHooks;
   supportsWebsockets: boolean;
   modelIds: string[];
   warnings: string[];
@@ -51,6 +61,14 @@ export function createDefaultProviderRegistry(): ProviderRegistry {
         defaultTransportMode: "codex-http",
         adapter: "codex-chatgpt-http",
         executor: "fetch",
+        capabilities: {
+          nativeTools: true,
+          streaming: false,
+          caching: true,
+          providerRecovery: true,
+          malformedToolRecovery: true,
+          retry: true,
+        },
         supportsWebsockets: true,
         modelIds: CODEX_MODEL_CATALOG.map((model) => model.id),
         warnings: [],
@@ -65,6 +83,14 @@ export function createDefaultProviderRegistry(): ProviderRegistry {
         defaultTransportMode: "http-responses",
         adapter: "openai-http-responses",
         executor: "fetch",
+        capabilities: {
+          nativeTools: true,
+          streaming: false,
+          caching: false,
+          providerRecovery: true,
+          malformedToolRecovery: true,
+          retry: true,
+        },
         supportsWebsockets: false,
         modelIds: CODEX_MODEL_CATALOG.filter((model) => model.supportedInApi).map((model) => model.id),
         warnings: [],
@@ -107,6 +133,14 @@ export function getTransportProviderDefinition(
     defaultTransportMode: "cli-exec",
     adapter: "codex-cli-exec",
     executor: "codex",
+    capabilities: {
+      nativeTools: false,
+      streaming: false,
+      caching: false,
+      providerRecovery: true,
+      malformedToolRecovery: true,
+      retry: true,
+    },
     supportsWebsockets: false,
     modelIds: CODEX_MODEL_CATALOG.map((model) => model.id),
     warnings: [],
@@ -192,6 +226,7 @@ function parseProviderDefinition(
     "wire_api",
     "supportsWebsockets",
     "supports_websockets",
+    "capabilities",
     "models",
   ]);
   for (const key of Object.keys(record)) {
@@ -206,6 +241,7 @@ function parseProviderDefinition(
   assignOptionalAuthSource(record.authSource ?? record.auth_source, provider, warnings, id);
   assignOptionalWireApi(record.wireApi ?? record.wire_api, provider, warnings, id);
   assignOptionalBoolean(record.supportsWebsockets ?? record.supports_websockets, "supportsWebsockets", provider, warnings, id);
+  assignOptionalCapabilities(record.capabilities, provider, warnings, id);
   assignOptionalModels(record.models, provider, warnings, id);
 
   if (provider.wireApi === "responses_websocket" && provider.supportsWebsockets === false) {
@@ -300,6 +336,48 @@ function assignOptionalModels(
   provider.modelIds = value.map((entry) => entry.trim());
 }
 
+function assignOptionalCapabilities(
+  value: unknown,
+  provider: Partial<ProviderDefinition>,
+  warnings: string[],
+  providerId: string,
+): void {
+  if (value === undefined) {
+    return;
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    warnings.push(`modelProviders.${providerId}.capabilities: expected object`);
+    return;
+  }
+  const existing = provider.capabilities ?? createDefaultProviderCapabilities();
+  const record = value as Record<string, unknown>;
+  const next = { ...existing };
+  for (const key of Object.keys(record)) {
+    if (!(key in next)) {
+      warnings.push(`modelProviders.${providerId}.capabilities.${key}: unknown capability`);
+      continue;
+    }
+    const capability = record[key];
+    if (typeof capability !== "boolean") {
+      warnings.push(`modelProviders.${providerId}.capabilities.${key}: expected boolean`);
+      continue;
+    }
+    next[key as keyof ProviderCapabilityHooks] = capability;
+  }
+  provider.capabilities = next;
+}
+
+function createDefaultProviderCapabilities(): ProviderCapabilityHooks {
+  return {
+    nativeTools: false,
+    streaming: false,
+    caching: false,
+    providerRecovery: false,
+    malformedToolRecovery: false,
+    retry: false,
+  };
+}
+
 function getModelDisabledReason(
   model: CodexModelDefinition,
   provider: ProviderDefinition,
@@ -341,6 +419,7 @@ function createFallbackProvider(id: string): ProviderDefinition {
     defaultTransportMode: "http-responses",
     adapter: "openai-http-responses",
     executor: "fetch",
+    capabilities: createDefaultProviderCapabilities(),
     supportsWebsockets: false,
     modelIds: [],
     warnings: [],
@@ -351,7 +430,15 @@ function createFallbackProvider(id: string): ProviderDefinition {
 function cloneProviderRegistry(registry: ProviderRegistry): ProviderRegistry {
   return {
     providers: Object.fromEntries(
-      Object.entries(registry.providers).map(([id, provider]) => [id, { ...provider, modelIds: [...provider.modelIds], warnings: [...provider.warnings] }]),
+      Object.entries(registry.providers).map(([id, provider]) => [
+        id,
+        {
+          ...provider,
+          capabilities: { ...provider.capabilities },
+          modelIds: [...provider.modelIds],
+          warnings: [...provider.warnings],
+        },
+      ]),
     ),
     warnings: [...registry.warnings],
   };

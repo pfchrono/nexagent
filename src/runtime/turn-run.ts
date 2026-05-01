@@ -1,8 +1,11 @@
 import type { ProviderResult } from "../provider.js";
+import { collectTurnEvidence, type TurnEvidenceSummary } from "./evidence.js";
+import { deriveTurnObligations, type TurnObligations } from "./nexsight-router.js";
 import type { RuntimeSession } from "./session.js";
 import { recordRuntimeEvent, setRuntimeAction } from "./session.js";
 
 export type TurnRunState = "initializing" | "provider_loop" | "finalizing" | "completed" | "blocked";
+export type MissingTurnEvidence = "write" | "Nexsight" | "active skill" | "test";
 
 export interface TurnRunContext {
   session: RuntimeSession;
@@ -19,8 +22,11 @@ export interface TurnRunTransition {
 export class TurnRun {
   private state: TurnRunState = "initializing";
   private readonly transitions: TurnRunTransition[] = [];
+  private readonly obligations: TurnObligations;
 
-  constructor(private readonly context: TurnRunContext) {}
+  constructor(private readonly context: TurnRunContext) {
+    this.obligations = deriveTurnObligations(context.prompt, context.session);
+  }
 
   private transition(next: TurnRunState, reason: string): void {
     const now = new Date().toISOString();
@@ -39,6 +45,38 @@ export class TurnRun {
 
   getTransitions(): readonly TurnRunTransition[] {
     return this.transitions;
+  }
+
+  getObligations(): TurnObligations {
+    return this.obligations;
+  }
+
+  collectEvidence(sinceIndex: number, toolTranscript: string[] = []): TurnEvidenceSummary {
+    return collectTurnEvidence(this.context.session, sinceIndex, toolTranscript);
+  }
+
+  evaluateFinalEvidence(
+    sinceIndex: number,
+    toolTranscript: string[],
+    output: string,
+  ): MissingTurnEvidence | null {
+    const evidence = this.collectEvidence(sinceIndex, toolTranscript);
+    if (this.obligations.requiresNexsightEvidence && !evidence.hasNexsightEvidence) {
+      return "Nexsight";
+    }
+    if (this.obligations.requiresWriteEvidence && !evidence.hasWriteEvidence) {
+      return "write";
+    }
+    if (this.obligations.requiresActiveSkillEvidence && !evidence.hasAnyToolEvidence) {
+      return "active skill";
+    }
+    if (claimsNexsightWork(output) && !evidence.hasNexsightEvidence) {
+      return "Nexsight";
+    }
+    if (claimsTestExecution(output) && !evidence.hasTestEvidence) {
+      return "test";
+    }
+    return null;
   }
 
   async run(executor: () => Promise<ProviderResult>): Promise<ProviderResult> {
@@ -74,4 +112,15 @@ export class TurnRun {
     });
     return result;
   }
+}
+
+function claimsNexsightWork(output: string): boolean {
+  return /\bnexsight\b/i.test(output)
+    && /\b(ran|run|used|use|executed|searched|indexed|scanned|queried|inspected|analy[sz]ed)\b/i.test(output);
+}
+
+function claimsTestExecution(output: string): boolean {
+  return /\b(?:ran|executed)\s+(?:the\s+)?(?:tests?|validation|build|tsc)\b/i.test(output)
+    || /\b(?:tests?|validation|build|tsc)\s+(?:pass(?:ed|es)?|succeed(?:ed)?|green)\b/i.test(output)
+    || /\b0 fail\b|\bno failures?\b/i.test(output);
 }

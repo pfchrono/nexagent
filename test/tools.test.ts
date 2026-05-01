@@ -584,6 +584,31 @@ test("executeInternalTool blocks writes outside repo roots and ambiguous patches
   }
 });
 
+test("executeInternalTool permits normal writes inside configured readable home root", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-tools-home-write-repo-"));
+  const homeRoot = await mkdtemp(path.join(tmpdir(), "nexagent-tools-home-write-home-"));
+
+  try {
+    const session = createSession(cwd);
+    session.toolPolicy.readRoots = [homeRoot, cwd];
+    const targetPath = path.join(homeRoot, "notes.txt");
+
+    const result = executeInternalTool(session, {
+      name: "write_file",
+      arguments: {
+        path: targetPath,
+        content: "home write\n",
+      },
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(await readFile(targetPath, "utf8"), "home write\n");
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+    await rm(homeRoot, { recursive: true, force: true });
+  }
+});
+
 test("executeInternalTool lets yolo write outside repo roots but not protected paths", async () => {
   const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-tools-yolo-write-"));
   const referenceRoot = await mkdtemp(path.join(tmpdir(), "nexagent-tools-yolo-reference-"));

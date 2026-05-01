@@ -255,6 +255,11 @@ test("loadHarnessConfig merges global and repo provider registry JSON", async ()
           local: {
             baseUrl: "http://localhost:5678/v1",
             models: ["repo-model"],
+            capabilities: {
+              nativeTools: true,
+              providerRecovery: true,
+              malformedToolRecovery: true,
+            },
           },
           bad: {
             wireApi: "banana",
@@ -272,6 +277,10 @@ test("loadHarnessConfig merges global and repo provider registry JSON", async ()
     assert.equal(registry?.providers.local.name, "Local");
     assert.equal(registry?.providers.local.baseUrl, "http://localhost:5678/v1");
     assert.deepEqual(registry?.providers.local.modelIds, ["repo-model"]);
+    assert.equal(registry?.providers.local.capabilities.nativeTools, true);
+    assert.equal(registry?.providers.local.capabilities.providerRecovery, true);
+    assert.equal(registry?.providers.local.capabilities.malformedToolRecovery, true);
+    assert.equal(registry?.providers.local.capabilities.streaming, false);
     assert.equal(registry?.providers.bad.disabledReason, "invalid wireApi");
     assert.ok(registry?.warnings.includes("modelProviders.local: unknown field extraField"));
     assert.ok(registry?.warnings.includes("modelProviders.bad.wireApi: expected cli-exec, responses, or responses_websocket"));

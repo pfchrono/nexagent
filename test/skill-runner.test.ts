@@ -68,9 +68,30 @@ test("skill runner records tool evidence and completion", () => {
 
   const withTool = recordSkillToolResult(run, { name: "read_file" }, { ok: true, tool: "read_file", output: "ok" });
   assert.equal(withTool?.completionEvidence.length, 1);
+  assert.equal(withTool?.workflowStage, "executing");
 
   const completed = completeSkillRun(withTool, "done");
   assert.equal(completed?.status, "completed");
+  assert.equal(completed?.workflowStage, "completed");
+  assert.deepEqual(completed?.workflowStages, ["loaded", "initialized", "executing", "verified", "completed"]);
+});
+
+test("skill runner records artifact workflow stage for write tools", () => {
+  const run = beginSkillRun(
+    createSession({
+      name: "gsd-docs-update",
+      source: "repo",
+      path: "/repo/.codex/skills/gsd-docs-update/SKILL.md",
+      args: "(none)",
+      content: "skill content",
+    }),
+    "run",
+  );
+  assert.ok(run);
+
+  const withArtifact = recordSkillToolResult(run, { name: "write_file" }, { ok: true, tool: "write_file", output: "wrote docs.md" });
+  assert.equal(withArtifact?.workflowStage, "artifact_written");
+  assert.ok(withArtifact?.workflowStages.includes("artifact_written"));
 });
 
 test("skill runner marks blocker from failed tool", () => {

@@ -13,6 +13,7 @@ export interface TurnEvidenceSummary {
   hasAnyToolEvidence: boolean;
   hasWriteEvidence: boolean;
   hasNexsightEvidence: boolean;
+  hasTestEvidence: boolean;
   snapshots: ToolEvidenceSnapshot[];
 }
 
@@ -33,6 +34,10 @@ export function collectTurnEvidence(session: RuntimeSession, sinceIndex: number,
   const snapshots: ToolEvidenceSnapshot[] = [];
   let hasWriteEvidence = false;
   let hasNexsightEvidence = toolTranscript.some((entry) => /"name"\s*:\s*"nexsight_(execute|index|batch|search)"/i.test(entry));
+  let hasTestEvidence = toolTranscript.some((entry) => {
+    const hasShell = /"name"\s*:\s*"shell_command"/i.test(entry);
+    return hasShell && /\b(bun|npm|pnpm|yarn|pytest|go|cargo)\s+(run\s+)?test\b|\btsc\b|\btest\b/i.test(entry);
+  });
 
   for (const event of scoped) {
     if (event.kind !== "tool" || !isEvidenceStatus(event.status)) {
@@ -50,6 +55,9 @@ export function collectTurnEvidence(session: RuntimeSession, sinceIndex: number,
     if (contract.nexsight) {
       hasNexsightEvidence = true;
     }
+    if (toolName === "shell_command" && /\b(test|tsc|build)\b/i.test(event.detail ?? "")) {
+      hasTestEvidence = true;
+    }
     snapshots.push({ toolName, summary: event.summary, status: event.status });
   }
 
@@ -60,6 +68,7 @@ export function collectTurnEvidence(session: RuntimeSession, sinceIndex: number,
     hasAnyToolEvidence,
     hasWriteEvidence,
     hasNexsightEvidence,
+    hasTestEvidence,
     snapshots,
   };
 }
@@ -74,4 +83,8 @@ export function hasNexsightEvidence(session: RuntimeSession, sinceIndex: number,
 
 export function hasToolEvidence(session: RuntimeSession, sinceIndex: number, toolTranscript: string[] = []): boolean {
   return collectTurnEvidence(session, sinceIndex, toolTranscript).hasAnyToolEvidence;
+}
+
+export function hasTestEvidence(session: RuntimeSession, sinceIndex: number, toolTranscript: string[] = []): boolean {
+  return collectTurnEvidence(session, sinceIndex, toolTranscript).hasTestEvidence;
 }

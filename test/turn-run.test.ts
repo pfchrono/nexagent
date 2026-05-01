@@ -70,3 +70,17 @@ test("turn run reaches blocked state on provider failure", async () => {
   assert.equal(run.getState(), "blocked");
   assert.equal(session.action.status, "error");
 });
+
+test("turn run owns final evidence checks for claimed tests and Nexsight work", () => {
+  const session = createSession();
+  const run = new TurnRun({ session, prompt: "summarize validation" });
+
+  assert.equal(
+    run.evaluateFinalEvidence(0, [], "I ran the tests and they passed."),
+    "test",
+  );
+  assert.equal(
+    run.evaluateFinalEvidence(0, [], "I used Nexsight to inspect the repo."),
+    "Nexsight",
+  );
+});

@@ -62,6 +62,11 @@ export function validateWriteToolPath(session: RuntimeSession, targetPath: strin
     return null;
   }
 
+  const readableWriteRoots = session.toolPolicy.readRoots ?? [];
+  if (readableWriteRoots.length > 0 && readableWriteRoots.some((root) => isWithinRoot(resolvedPath, root))) {
+    return null;
+  }
+
   if (session.operationControls.yoloMode) {
     const writeRoots = session.toolPolicy.readRoots ?? [];
     if (writeRoots.length === 0 || writeRoots.some((root) => isWithinRoot(resolvedPath, root))) {
