@@ -1,0 +1,72 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import type { ProviderResult } from "../src/provider.js";
+import { TurnRun } from "../src/runtime/turn-run.js";
+import type { RuntimeSession } from "../src/runtime/session.js";
+
+function createSession(): RuntimeSession {
+  return {
+    action: {
+      status: "ready",
+      detail: "runtime baseline",
+      pending: false,
+      lastActivity: null,
+    },
+    events: [],
+    operationControls: {
+      requireApprovalForGuarded: false,
+      yoloMode: false,
+      pendingApproval: null,
+      lastDecision: null,
+      cancelRequested: false,
+      activeAbortController: null,
+      steerMessage: null,
+      steerState: null,
+      lastAppliedSteer: null,
+      steerHistory: [],
+    },
+  } as RuntimeSession;
+}
+
+test("turn run reaches completed state on successful provider result", async () => {
+  const session = createSession();
+  const run = new TurnRun({ session, prompt: "fix bug" });
+
+  const result = await run.run(async () => ({
+    ok: true,
+    provider: "codex",
+    model: "gpt-5.4",
+    transport: "codex",
+    adapter: "codex-cli-exec",
+    fallbackApplied: false,
+    output: "done",
+  }));
+
+  assert.equal(result.ok, true);
+  assert.equal(run.getState(), "completed");
+  const states = run.getTransitions().map((entry) => entry.to);
+  assert.deepEqual(states, ["provider_loop", "finalizing", "completed"]);
+});
+
+test("turn run reaches blocked state on provider failure", async () => {
+  const session = createSession();
+  const run = new TurnRun({ session, prompt: "fix bug" });
+
+  const failure: ProviderResult = {
+    ok: false,
+    provider: "codex",
+    model: "gpt-5.4",
+    transport: "codex",
+    adapter: "codex-cli-exec",
+    fallbackApplied: false,
+    code: "transport_error",
+    message: "failed",
+    detail: "stderr",
+  };
+
+  const result = await run.run(async () => failure);
+  assert.equal(result.ok, false);
+  assert.equal(run.getState(), "blocked");
+  assert.equal(session.action.status, "error");
+});
