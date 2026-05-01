@@ -1,6 +1,7 @@
 import type { RepoInstructionSource } from "./config.js";
 import { buildPromptLayers, serializePromptLayers, type PromptLayers } from "./prompt-legacy.js";
 import { buildPromptV2, type PromptV2Result } from "./prompt-v2.js";
+import { buildPromptV3 } from "./prompt-v3.js";
 
 export interface InstructionContext {
   provider: string;
@@ -84,11 +85,11 @@ export interface AssembledPrompt {
 export async function assemblePrompt(request: { session: InstructionContext; prompt: string }): Promise<AssembledPrompt> {
   const useV2 = request.session.prompt?.assembly !== "legacy";
   if (useV2) {
-    const v2 = buildPromptV2({ session: request.session, prompt: request.prompt });
+    const v3 = buildPromptV3({ session: request.session, prompt: request.prompt });
     return {
       layers: null,
-      v2,
-      prompt: v2.prompt,
+      v2: v3.v2,
+      prompt: v3.prompt,
     };
   }
 

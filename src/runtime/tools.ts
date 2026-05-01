@@ -7,6 +7,12 @@ import path from "node:path";
 import { checkpointArchivistSession, saveArchivistMemory } from "./archivist.js";
 import { buildPatchPreview, searchFilesWithIgnore } from "./core-helpers.js";
 import { batchIndexNexsight, executeNexsight, indexNexsight, indexNexsightFile, searchNexsight } from "./nexsight.js";
+import {
+  findBlockedShellPattern,
+  validateReadToolPath as validateReadPathPolicy,
+  validateRepoToolPath as validateRepoPathPolicy,
+  validateWriteToolPath as validateWritePathPolicy,
+} from "./policy.js";
 import type { RuntimeSession } from "./session.js";
 
 export type InternalToolName =
@@ -54,27 +60,6 @@ const DIFF_MAX_LINES = 400;
 const DIFF_MAX_CHARS = 20_000;
 const WEB_TIMEOUT_MS = 8_000;
 const WEB_MAX_CHARS = 12_000;
-const BLOCKED_SHELL_PATTERNS = [
-  /\brm\s+-rf\b/i,
-  /\brm\s+-r\b/i,
-  /\bmv\b\s+.+\s+\/(?:etc|usr|bin|sbin|var|opt|lib|boot|dev|proc|sys|run)(?:\/|$)/i,
-  /\bchmod\b/i,
-  /\bchown\b/i,
-  /\bsudo\b/i,
-  /\bsu\b/i,
-  /\bshutdown\b/i,
-  /\breboot\b/i,
-  /\bmkfs\b/i,
-  /\bdd\b/i,
-  /\bgit\s+push\b/i,
-  /\bgit\s+reset\s+--hard\b/i,
-  /\bgit\s+clean\b/i,
-  /\bfind\b[\s\S]*\b-delete\b/i,
-  />\s*\/(?:etc|usr|bin|sbin|var|opt|lib|boot|dev|proc|sys|run)(?:\/|$)/,
-  /\|\s*sh\b/i,
-  /\|\s*bash\b/i,
-] as const;
-
 export function getInternalToolDefinitions(): readonly InternalToolDefinition[] {
   return [
     {
@@ -470,48 +455,15 @@ function expandHomePath(inputPath: string): string {
 }
 
 export function validateRepoToolPath(session: RuntimeSession, targetPath: string): string | null {
-  return validateWriteToolPath(session, targetPath);
+  return validateRepoPathPolicy(session, targetPath);
 }
 
 export function validateReadToolPath(session: RuntimeSession, targetPath: string): string | null {
-  const resolvedPath = path.resolve(targetPath);
-
-  for (const protectedRoot of session.toolPolicy.protectedRoots) {
-    if (isWithinRoot(resolvedPath, protectedRoot)) {
-      return `tool policy blocked ${resolvedPath}; protected path`;
-    }
-  }
-
-  const readRoots = session.toolPolicy.readRoots ?? [];
-  if (readRoots.length === 0 || readRoots.some((root) => isWithinRoot(resolvedPath, root))) {
-    return null;
-  }
-
-  return `tool policy blocked ${resolvedPath}; outside readable workspace roots`;
+  return validateReadPathPolicy(session, targetPath);
 }
 
 export function validateWriteToolPath(session: RuntimeSession, targetPath: string): string | null {
-  const resolvedPath = path.resolve(targetPath);
-
-  for (const protectedRoot of session.toolPolicy.protectedRoots) {
-    if (isWithinRoot(resolvedPath, protectedRoot)) {
-      return `tool policy blocked ${resolvedPath}; protected path`;
-    }
-  }
-
-  if (session.toolPolicy.allowedRoots.some((root) => isWithinRoot(resolvedPath, root))) {
-    return null;
-  }
-
-  if (session.operationControls.yoloMode) {
-    const writeRoots = session.toolPolicy.readRoots ?? [];
-    if (writeRoots.length === 0 || writeRoots.some((root) => isWithinRoot(resolvedPath, root))) {
-      return null;
-    }
-    return `tool policy blocked ${resolvedPath}; outside yolo workspace roots`;
-  }
-
-  return `tool policy blocked ${resolvedPath}; outside repo-local roots`;
+  return validateWritePathPolicy(session, targetPath);
 }
 
 function executeReadFileTool(session: RuntimeSession, inputPath: string): InternalToolResult {
@@ -932,7 +884,7 @@ function executeShellCommandTool(session: RuntimeSession, command: string): Inte
     return fail("shell_command", "command required");
   }
 
-  const blockedPattern = BLOCKED_SHELL_PATTERNS.find((pattern) => pattern.test(normalized));
+  const blockedPattern = findBlockedShellPattern(normalized);
   if (blockedPattern) {
     return fail("shell_command", `shell policy blocked command; destructive pattern matched: ${blockedPattern.source}`);
   }
@@ -1481,14 +1433,4 @@ function formatMatchPath(rootPath: string, filePath: string): string {
     return filePath;
   }
   return relativePath.split(path.sep).join("/");
-}
-
-function isWithinRoot(targetPath: string, rootPath: string): boolean {
-  const resolvedRoot = path.resolve(rootPath);
-  if (targetPath === resolvedRoot) {
-    return true;
-  }
-
-  const relativePath = path.relative(resolvedRoot, targetPath);
-  return relativePath.length > 0 && !relativePath.startsWith("..") && !path.isAbsolute(relativePath);
 }

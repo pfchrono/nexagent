@@ -14,9 +14,18 @@ import {
 } from "./instrument.js";
 import { applyArchivistRetrieval } from "./runtime/archivist.js";
 import { writeDebugLog } from "./runtime/debug.js";
+import { hasNexsightEvidence, hasToolEvidence, hasWriteEvidence } from "./runtime/evidence.js";
 import { assemblePrompt } from "./runtime/instructions.js";
+import {
+  deriveTurnObligations,
+  isNexsightToolCall,
+  shouldRouteToNexsightOnly,
+  type TurnObligations,
+} from "./runtime/nexsight-router.js";
 import { consumeOperatorSteer, estimateTokenCount, recordRuntimeEvent, setRuntimeAction } from "./runtime/session.js";
 import type { RuntimeApprovalRequest, RuntimeSession } from "./runtime/session.js";
+import { beginSkillRun, completeSkillRun, recordSkillToolResult } from "./runtime/skill-runner.js";
+import { TurnRun } from "./runtime/turn-run.js";
 import { classifyInternalToolRisk, executeInternalToolAsync, type InternalToolCall, type InternalToolResult } from "./runtime/tools.js";
 
 export interface ProviderRequest {
@@ -132,15 +141,30 @@ const FINAL_TOOL_STEP_NUDGE = [
   "After that continuation cycle, it will return a partial result instead of failing the turn.",
 ].join(" ");
 
-interface TurnObligations {
-  requiresWriteEvidence: boolean;
-  requiresNexsightEvidence: boolean;
-  requiresActiveSkillEvidence: boolean;
-}
-
 export async function executeProviderRequest(
   request: ProviderRequest,
   invokers: CodexInvokers = { exec: invokeCodexExecTransport, http: invokeCodexHttpTransport, codexHttp: invokeCodexChatGptHttpTransport },
+): Promise<ProviderResult> {
+  const turnRun = new TurnRun({
+    session: request.session,
+    prompt: request.prompt,
+  });
+  let skillRun = beginSkillRun(request.session, request.prompt);
+  return turnRun.run(async () => {
+    const result = await executeProviderRequestImpl(request, invokers, (call, toolResult) => {
+      skillRun = recordSkillToolResult(skillRun, call, toolResult);
+    });
+    if (result.ok) {
+      completeSkillRun(skillRun, result.output);
+    }
+    return result;
+  });
+}
+
+async function executeProviderRequestImpl(
+  request: ProviderRequest,
+  invokers: CodexInvokers = { exec: invokeCodexExecTransport, http: invokeCodexHttpTransport, codexHttp: invokeCodexChatGptHttpTransport },
+  onToolResult?: (call: InternalToolCall, result: InternalToolResult) => void,
 ): Promise<ProviderResult> {
   const provider = request.session.provider;
   const model = resolveModel(request.session);
@@ -217,7 +241,7 @@ export async function executeProviderRequest(
       }, { verboseOnly: true });
     }
     if (request.session.providerTransport.mode === "http-responses") {
-      return executeOpenAiNativeToolLoop(request, assembled.prompt, model, transport, invokers.http);
+      return executeOpenAiNativeToolLoop(request, assembled.prompt, model, transport, invokers.http, onToolResult);
     }
     const invokeCodex = request.session.providerTransport.mode === "codex-http"
       ? invokers.codexHttp
@@ -553,7 +577,7 @@ export async function executeProviderRequest(
         );
       }
 
-      if (needsNexsightToolOnly(request.prompt, toolCall) && !isNexsightToolCall(toolCall) && step < MAX_INTERNAL_TOOL_STEPS - 1) {
+      if (shouldRouteToNexsightOnly(request.prompt, toolCall) && !isNexsightToolCall(toolCall) && step < MAX_INTERNAL_TOOL_STEPS - 1) {
         guidanceNudgeCount += 1;
         const earlyFinal = await maybeSynthesizeAfterRepeatedGuidance(
           request,
@@ -589,6 +613,7 @@ export async function executeProviderRequest(
         return result;
       });
       toolTranscript.push(formatInternalToolExchange(step + 1, toolCall, toolResult));
+      onToolResult?.(toolCall, toolResult);
       const finalStepNudge = step === MAX_INTERNAL_TOOL_STEPS - 2 ? `\n\n${FINAL_TOOL_STEP_NUDGE}` : "";
       prompt = `${assembled.prompt}\n\nInternal tool transcript:\n${toolTranscript.join("\n\n")}\n\nContinue. Either answer user directly or request one more tool with one <nexagent_tool_call> block only.${finalStepNudge}`;
       }
@@ -808,6 +833,7 @@ async function executeOpenAiNativeToolLoop(
   model: string | null,
   transport: ReturnType<typeof resolveTransport>,
   invokeHttp: CodexInvoker,
+  onToolResult?: (call: InternalToolCall, result: InternalToolResult) => void,
 ): Promise<ProviderResult> {
   let previousResponseId: string | undefined;
   let nativeInput: unknown = buildNativeInputFromPrompt(request.prompt, request.attachments);
@@ -1015,6 +1041,7 @@ async function executeOpenAiNativeToolLoop(
       });
       return result;
     });
+    onToolResult?.(toolCall, toolResult);
     previousResponseId = toolCall.responseId;
     const steer = consumeOperatorSteer(request.session, `after tool ${toolCall.name}`);
     nativeInput = [
@@ -1432,77 +1459,6 @@ function escapeControlCharsInJsonStrings(value: string): string {
 
 function containsToolCallMarkup(output: string): boolean {
   return TOOL_CALL_MARKUP_PATTERN.test(output);
-}
-
-function deriveTurnObligations(prompt: string, session?: RuntimeSession): TurnObligations {
-  return {
-    requiresWriteEvidence: promptRequiresWriteEvidence(prompt),
-    requiresNexsightEvidence: promptRequiresNexsightEvidence(prompt),
-    requiresActiveSkillEvidence: promptRequiresActiveSkillEvidence(prompt, session),
-  };
-}
-
-function promptRequiresWriteEvidence(prompt: string): boolean {
-  const lower = prompt.toLowerCase();
-  if (/\b(do not|don't|dont|no need to)\s+(write|create|edit|update|modify|patch|save|append|overwrite)\b/.test(lower)) {
-    return false;
-  }
-
-  const writeVerb = /\b(write|create|save|append|overwrite|edit|update|modify|patch|add|fix|implement|change)\b/.test(lower);
-  const fileTarget = /\b(readme|agents\.md|claude\.md|package\.json|tsconfig\.json|bun\.lock)\b/i.test(prompt)
-    || /(?:^|\s|["'`(])(?:\.{0,2}\/|~\/|\/)?[\w@./ -]+\.(?:md|ts|tsx|js|jsx|json|jsonc|toml|yaml|yml|css|scss|html|sh|py|rs|go|lock)\b/i.test(prompt);
-  const explicitFileWrite = /\b(write|create|save|append|overwrite)\b.*\b(file|artifact|report|findings|summary)\b/.test(lower)
-    || /\b(to|into|in)\s+(?:\.{0,2}\/|~\/|\/)?[\w@./ -]+\.[a-z0-9]+\b/i.test(prompt);
-
-  return writeVerb && (fileTarget || explicitFileWrite);
-}
-
-function promptRequiresNexsightEvidence(prompt: string): boolean {
-  return /\bnexsight\b/i.test(prompt) && !/\b(do not|don't|dont|avoid|skip)\s+nexsight\b/i.test(prompt);
-}
-
-function promptRequiresActiveSkillEvidence(prompt: string, session?: RuntimeSession): boolean {
-  if (!session?.activeSkill) {
-    return false;
-  }
-
-  const lower = prompt.trim().toLowerCase();
-  return lower.startsWith("execute active skill")
-    || lower.startsWith("/skill ")
-    || /^(start|go|run|execute|continue|proceed|do it|do that|same|ok|okay|yes)\b/.test(lower);
-}
-
-function needsNexsightToolOnly(prompt: string, call: InternalToolCall): boolean {
-  if (!isGenericInspectionTool(call)) {
-    return false;
-  }
-  if (/\bnexsight\b/i.test(prompt)) {
-    return true;
-  }
-
-  const lower = prompt.toLowerCase();
-  const asksForBroadInspection = /\b(inspect|explore|examine|analy[sz]e|summari[sz]e|scan|map|inventory|count|find|search)\b/.test(lower);
-  const broadTarget = /\b(repo|codebase|project|workspace|directory|tree|files|structure|architecture|layout|dependencies|tests?)\b/.test(lower)
-    || /~\/|\/home\/|\.\/|\.\b/.test(lower);
-  const exactFileRequest = /\b(read|open|show|cat)\b/.test(lower) && /\b[\w.-]+\.[a-z0-9]+\b/i.test(prompt);
-  return asksForBroadInspection && broadTarget && !exactFileRequest;
-}
-
-function isNexsightToolCall(call: InternalToolCall): boolean {
-  return call.name === "nexsight_execute"
-    || call.name === "nexsight_index"
-    || call.name === "nexsight_batch"
-    || call.name === "nexsight_search";
-}
-
-function isGenericInspectionTool(call: InternalToolCall): boolean {
-  return call.name === "read_file"
-    || call.name === "list_dir"
-    || call.name === "search_content"
-    || call.name === "search_files"
-    || call.name === "apply_patch"
-    || call.name === "write_file"
-    || call.name === "shell_command";
 }
 
 function parseAttributeStyleToolCall(output: string): InternalToolCall | null {
@@ -2260,31 +2216,6 @@ function claimsUnsupportedWriteCompletion(output: string, priorWriteEvidenceNudg
   ].some((phrase) => lower.includes(phrase));
 
   return fileMention && verificationClaim && !correctionOrBlocker;
-}
-
-function hasWriteEvidence(session: RuntimeSession, sinceIndex: number): boolean {
-  return session.events.slice(sinceIndex).some((event) =>
-    event.kind === "tool"
-    && event.status === "completed"
-    && /tool\s+(write_file|apply_patch|shell_command)\s+completed/i.test(event.summary),
-  );
-}
-
-function hasNexsightEvidence(session: RuntimeSession, sinceIndex: number, toolTranscript: string[] = []): boolean {
-  return toolTranscript.some((entry) => /"name"\s*:\s*"nexsight_(execute|index|batch|search)"/i.test(entry))
-    || session.events.slice(sinceIndex).some((event) =>
-    event.kind === "tool"
-    && (event.status === "completed" || event.status === "failed" || event.status === "blocked")
-    && /tool\s+nexsight_(execute|index|batch|search)\s+(completed|failed|not executed)/i.test(event.summary),
-    );
-}
-
-function hasToolEvidence(session: RuntimeSession, sinceIndex: number, toolTranscript: string[] = []): boolean {
-  return toolTranscript.some((entry) => /Tool call:/i.test(entry))
-    || session.events.slice(sinceIndex).some((event) =>
-      event.kind === "tool"
-      && (event.status === "completed" || event.status === "failed" || event.status === "blocked")
-    );
 }
 
 function parseNativeToolCall(payload: unknown): { responseId: string | undefined; callId: string; name: InternalToolCall["name"]; arguments: Record<string, unknown> } | null {
