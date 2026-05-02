@@ -1,4 +1,4 @@
-import type { ProviderResult } from "../provider.js";
+import type { CodexInvocationMetrics, ProviderResult } from "../provider.js";
 import { collectTurnEvidence, type TurnEvidenceSummary } from "./evidence.js";
 import { deriveTurnObligations, type TurnObligations } from "./nexsight-router.js";
 import type { RuntimeSession } from "./session.js";
@@ -112,12 +112,15 @@ export class TurnRun {
     return null;
   }
 
-  onProviderStep(step: number): void {
+  onProviderStep(step: number, metrics?: CodexInvocationMetrics): void {
+    const detail = metrics
+      ? `step=${String(step)}; duration=${formatRuntimeDuration(metrics.durationMs)}; in~${String(metrics.inputTokens)}; out~${String(metrics.outputTokens)}`
+      : `step=${String(step)}`;
     recordRuntimeEvent(this.context.session, {
       kind: "control",
       status: "started",
       summary: "turn run provider step",
-      detail: `step=${String(step)}`,
+      detail,
     });
   }
 
@@ -143,10 +146,12 @@ export class TurnRun {
     this.transition("finalizing", "provider returned");
     if (result.ok) {
       this.transition("completed", "turn finished");
+      const turnMetrics = collectTurnRunTokenMetrics(this.context.session);
       recordRuntimeEvent(this.context.session, {
         kind: "control",
         status: "completed",
         summary: "turn run completed",
+        detail: `turn_in~${String(turnMetrics.inputTokens)}; turn_out~${String(turnMetrics.outputTokens)}`,
       });
       return result;
     }
@@ -164,8 +169,30 @@ export class TurnRun {
 }
 
 function claimsNexsightWork(output: string): boolean {
-  return /\bnexsight\b/i.test(output)
-    && /\b(ran|run|used|use|executed|searched|indexed|scanned|queried|inspected|analy[sz]ed)\b/i.test(output);
+  return output
+    .split(/[\n.!?;]+/)
+    .some((segment) => /\bnexsight\b/i.test(segment)
+      && /\b(ran|used|executed|searched|indexed|scanned|queried|inspected|analy[sz]ed)\b/i.test(segment));
+}
+
+function collectTurnRunTokenMetrics(session: RuntimeSession): { inputTokens: number; outputTokens: number } {
+  const promptIndex = [...session.events].map((event) => event.kind).lastIndexOf("prompt");
+  const events = promptIndex >= 0 ? session.events.slice(promptIndex) : session.events;
+  return events.reduce((metrics, event) => {
+    const detail = event.detail ?? "";
+    metrics.inputTokens += readTurnRunTokenMetric(detail, "in");
+    metrics.outputTokens += readTurnRunTokenMetric(detail, "out");
+    return metrics;
+  }, { inputTokens: 0, outputTokens: 0 });
+}
+
+function readTurnRunTokenMetric(detail: string, key: "in" | "out"): number {
+  const match = new RegExp(`(?:^|[;\\s])${key}~(\\d+)`).exec(detail);
+  return match ? Number.parseInt(match[1] ?? "0", 10) : 0;
+}
+
+function formatRuntimeDuration(durationMs: number): string {
+  return `${(Math.max(0, durationMs) / 1000).toFixed(2)}s`;
 }
 
 function claimsTestExecution(output: string): boolean {

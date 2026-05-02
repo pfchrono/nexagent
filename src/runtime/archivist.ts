@@ -1,4 +1,5 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import type { RuntimeSession } from "./session.js";
@@ -24,6 +25,17 @@ interface ArchivistRecallResult {
   preview: string | null;
 }
 
+export interface ArchivistMaintenanceResult {
+  storagePath: string;
+  totalBefore: number;
+  totalAfter: number;
+  removedDuplicates: number;
+  duplicateSuspects: number;
+  stale: number;
+  noisy: number;
+  persisted: boolean;
+}
+
 const ARCHIVIST_STORE_VERSION = "1.0.0";
 const ARCHIVIST_MAX_ENTRIES = 200;
 const ARCHIVIST_MAX_SUMMARY = 240;
@@ -40,6 +52,7 @@ export async function applyArchivistRetrieval(session: RuntimeSession, prompt: s
 
   const entries = await loadArchivistEntries(session.archivist.storagePath);
   session.archivist.retrieval = selectRelevantArchivistEntries(entries, session, prompt);
+  updateArchivistDiagnostics(session, entries);
 }
 
 export async function saveArchivistMemory(
@@ -79,6 +92,7 @@ export async function saveArchivistMemory(
     entryCount: store.entries.length,
     preview: `- [${type}] ${summary}`,
   };
+  updateArchivistDiagnostics(session, store.entries);
 
   return {
     entryCount: store.entries.length,
@@ -116,10 +130,37 @@ export async function checkpointArchivistSession(
     entryCount: store.entries.length,
     preview: `- [checkpoint] ${snapshot.summary}`,
   };
+  updateArchivistDiagnostics(session, store.entries);
 
   return {
     entryCount: store.entries.length,
     preview: session.archivist.writes.preview ?? `- [checkpoint] ${snapshot.summary}`,
+  };
+}
+
+export function maintainArchivistMemorySync(session: RuntimeSession): ArchivistMaintenanceResult {
+  const storagePath = getWritableArchivistPath(session);
+  const store = loadArchivistStoreSync(storagePath);
+  const totalBefore = store.entries.length;
+  const deduped = dedupeArchivistEntries(store.entries);
+  store.entries = deduped.entries;
+
+  if (deduped.removedDuplicates > 0) {
+    persistArchivistStoreSync(storagePath, store);
+    session.archivist.storageExists = true;
+  }
+
+  updateArchivistDiagnostics(session, store.entries);
+
+  return {
+    storagePath,
+    totalBefore,
+    totalAfter: store.entries.length,
+    removedDuplicates: deduped.removedDuplicates,
+    duplicateSuspects: countDuplicateSuspectSummaries(store.entries),
+    stale: store.entries.filter((entry) => isStaleArchivistEntry(entry.createdAt)).length,
+    noisy: store.entries.filter((entry) => tokenize(entry.summary ?? entry.content).length < 3).length,
+    persisted: deduped.removedDuplicates > 0,
   };
 }
 
@@ -135,6 +176,42 @@ function resetArchivistRetrieval(session: RuntimeSession): void {
   session.archivist.retrieval.sourceCategory = null;
   session.archivist.retrieval.matchCount = 0;
   session.archivist.retrieval.preview = null;
+  updateArchivistDiagnostics(session, []);
+}
+
+function updateArchivistDiagnostics(session: RuntimeSession, entries: ArchivistEntry[]): void {
+  session.archivist.diagnostics = {
+    retrievalMatchCount: session.archivist.retrieval.matchCount,
+    retrievalSourceCategory: session.archivist.retrieval.sourceCategory,
+    saveCount: entries.filter((entry) => (entry.type ?? "memory") !== "checkpoint").length,
+    checkpointCount: entries.filter((entry) => (entry.type ?? "memory") === "checkpoint").length,
+    duplicateSuspectCount: countDuplicateSuspectSummaries(entries),
+    staleSignalCount: entries.filter((entry) => isStaleArchivistEntry(entry.createdAt)).length,
+    noisySignalCount: entries.filter((entry) => tokenize(entry.summary ?? entry.content).length < 3).length,
+  };
+}
+
+function countDuplicateSuspectSummaries(entries: ArchivistEntry[]): number {
+  const seen = new Map<string, number>();
+  for (const entry of entries) {
+    const normalized = normalizeText(entry.summary ?? entry.content).toLowerCase();
+    if (!normalized) {
+      continue;
+    }
+    seen.set(normalized, (seen.get(normalized) ?? 0) + 1);
+  }
+  return [...seen.values()].reduce((count, duplicates) => count + Math.max(0, duplicates - 1), 0);
+}
+
+function isStaleArchivistEntry(createdAt?: string): boolean {
+  if (!createdAt) {
+    return false;
+  }
+  const createdAtMs = Date.parse(createdAt);
+  if (!Number.isFinite(createdAtMs)) {
+    return false;
+  }
+  return (Date.now() - createdAtMs) / (1000 * 60 * 60 * 24) > 90;
 }
 
 async function loadArchivistEntries(storagePath: string): Promise<ArchivistEntry[]> {
@@ -154,9 +231,66 @@ async function loadArchivistStore(storagePath: string): Promise<ArchivistStore> 
   }
 }
 
+function loadArchivistStoreSync(storagePath: string): ArchivistStore {
+  try {
+    const raw = readFileSync(storagePath, "utf8");
+    return normalizeArchivistStore(JSON.parse(raw) as unknown);
+  } catch {
+    return {
+      version: ARCHIVIST_STORE_VERSION,
+      entries: [],
+    };
+  }
+}
+
 async function persistArchivistStore(storagePath: string, store: ArchivistStore): Promise<void> {
   await mkdir(path.dirname(storagePath), { recursive: true });
   await writeFile(storagePath, `${JSON.stringify(store, null, 2)}\n`, "utf8");
+}
+
+function persistArchivistStoreSync(storagePath: string, store: ArchivistStore): void {
+  mkdirSync(path.dirname(storagePath), { recursive: true });
+  writeFileSync(storagePath, `${JSON.stringify(store, null, 2)}\n`, "utf8");
+}
+
+function dedupeArchivistEntries(entries: ArchivistEntry[]): { entries: ArchivistEntry[]; removedDuplicates: number } {
+  const selected = new Map<string, { entry: ArchivistEntry; index: number }>();
+  let removedDuplicates = 0;
+
+  entries.forEach((entry, index) => {
+    const key = createArchivistDedupKey(entry);
+    const existing = selected.get(key);
+    if (!existing) {
+      selected.set(key, { entry, index });
+      return;
+    }
+
+    removedDuplicates += 1;
+    if (compareArchivistRecency(entry.createdAt, existing.entry.createdAt) > 0) {
+      selected.set(key, { entry, index });
+    }
+  });
+
+  return {
+    entries: [...selected.values()]
+      .sort((left, right) => left.index - right.index)
+      .map(({ entry }) => entry),
+    removedDuplicates,
+  };
+}
+
+function createArchivistDedupKey(entry: ArchivistEntry): string {
+  const tags = (entry.tags ?? [])
+    .map((tag) => normalizeText(tag).toLowerCase())
+    .sort()
+    .join(",");
+  return [
+    normalizeText(entry.type ?? "memory").toLowerCase(),
+    normalizeText(entry.summary ?? entry.content).toLowerCase(),
+    normalizeText(entry.content).toLowerCase(),
+    normalizeText(entry.projectPath ?? "").toLowerCase(),
+    tags,
+  ].join("\u0000");
 }
 
 function normalizeArchivistStore(value: unknown): ArchivistStore {

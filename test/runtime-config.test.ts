@@ -8,7 +8,18 @@ import { createDefaultProviderRegistry } from "../src/provider/registry.js";
 import { createRuntimeState } from "../src/runtime/bootstrap.js";
 import { loadHarnessConfig } from "../src/runtime/config.js";
 import { loadPersistedRuntimeState, savePersistedRuntimeState } from "../src/runtime/persistence.js";
-import { applyProviderSelection, applyTransportMode, createRuntimeSession, recordRuntimeEvent, setRuntimeAction, syncRuntimeSession } from "../src/runtime/session.js";
+import {
+  applyProviderSelection,
+  applyTransportMode,
+  createRuntimeSession,
+  getRuntimeSessionRevision,
+  recordConversationTurn,
+  recordRuntimeEvent,
+  recordTurnTelemetry,
+  setRuntimeAction,
+  subscribeRuntimeSession,
+  syncRuntimeSession,
+} from "../src/runtime/session.js";
 
 const AUTH_STATE = {
   provider: "codex" as const,
@@ -219,6 +230,42 @@ test("loadHarnessConfig lets repo nexagent settings override global settings", a
   } finally {
     await rm(cwd, { recursive: true, force: true });
     await rm(nexagentHome, { recursive: true, force: true });
+  }
+});
+
+test("loadHarnessConfig resolves compaction settings with safe defaults and overrides", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-compaction-config-"));
+
+  try {
+    await mkdir(path.join(cwd, ".nexagent"));
+    await writeFile(
+      path.join(cwd, ".nexagent", "settings.json"),
+      JSON.stringify({
+        compaction: {
+          enabled: false,
+          thresholdPercent: 0.65,
+          preserveTurns: 8,
+          modelThresholdOverrides: {
+            "gpt-5.4": 0.7,
+            "bad-model": 2,
+          },
+        },
+      }),
+      "utf8",
+    );
+
+    const config = await loadHarnessConfig(cwd);
+
+    assert.deepEqual(config.compaction, {
+      enabled: false,
+      thresholdPercent: 0.65,
+      preserveTurns: 8,
+      modelThresholdOverrides: {
+        "gpt-5.4": 0.7,
+      },
+    });
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
   }
 });
 
@@ -1047,6 +1094,80 @@ test("setRuntimeAction centralizes runtime progress state", () => {
     pending: false,
     lastActivity: "2026-04-25T12:00:01.000Z",
   });
+});
+
+test("runtime session notifies subscribers for live UI refresh", () => {
+  const session = createRuntimeSession({
+    config: {
+      cwd: "/repo",
+      productName: "nexagent",
+      provider: "codex",
+      providerRouting: {
+        fallback: {
+          policy: "require-open-spec",
+          silentProviderSwitch: false,
+        },
+        modelSelection: {
+          activeProvider: "codex",
+          configuredModels: { codex: "gpt-5.4" },
+        },
+        transport: {},
+      },
+      mcpConfigPath: "/repo/.mcp.json",
+      enabledMcpServers: [],
+      imports: { claude: null },
+      instructionSources: [],
+      archivist: {
+        enabled: false,
+        boundary: "disabled",
+        storagePath: null,
+        storageExists: false,
+        retrieval: {
+          used: false,
+          sourceCategory: null,
+          matchCount: 0,
+          preview: null,
+        },
+        writes: {
+          used: false,
+          action: null,
+          sourceCategory: null,
+          savedAt: null,
+          entryCount: 0,
+          preview: null,
+        },
+      },
+      repo: {
+        root: "/repo",
+        name: "repo",
+        vcs: "git",
+        branch: "main",
+        freshness: DEFAULT_GIT_FRESHNESS,
+      },
+      toolPolicy: DEFAULT_TOOL_POLICY,
+    },
+    mcp: {
+      path: "/repo/.mcp.json",
+      serverNames: [],
+    },
+    auth: AUTH_STATE,
+  });
+
+  let notifications = 0;
+  const unsubscribe = subscribeRuntimeSession(session, () => {
+    notifications += 1;
+  });
+
+  const beforeRevision = getRuntimeSessionRevision(session);
+  setRuntimeAction(session, "running", "provider request");
+  recordRuntimeEvent(session, { kind: "provider", status: "started", summary: "codex turn started" });
+  recordConversationTurn(session, "assistant", "hello");
+  recordTurnTelemetry(session, "hi", "hello");
+  unsubscribe();
+  setRuntimeAction(session, "ready", "done");
+
+  assert.equal(notifications, 4);
+  assert.equal(getRuntimeSessionRevision(session), beforeRevision + 5);
 });
 
 test("runtime session keeps bounded shared event log", () => {

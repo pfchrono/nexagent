@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { captureCliException } from "./instrument.js";
+import { captureCliException, captureSentryDiagnostic, getSentryDiagnosticsStatus, runSentryDiagnosticsSelfTest } from "./instrument.js";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import process from "node:process";
@@ -9,12 +9,13 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { executeProviderRequest, type ImageAttachment } from "./provider.js";
 import { launchCodexLogin, probeCodexAuthStateSync } from "./runtime/auth.js";
-import { checkpointArchivistSession, saveArchivistMemory } from "./runtime/archivist.js";
+import { checkpointArchivistSession, maintainArchivistMemorySync, saveArchivistMemory } from "./runtime/archivist.js";
 import { bootstrapRuntime } from "./runtime/bootstrap.js";
 import { initializeRuntimeDebug, writeDebugLog, type RuntimeDebugOptions } from "./runtime/debug.js";
 import { buildPromptV2, summarizePromptV2 } from "./runtime/prompt-v2.js";
 import { checkpointNexsightSession, getNexsightStats, purgeNexsight, searchNexsight } from "./runtime/nexsight.js";
-import { loadPersistedPromptHistory, savePersistedPromptHistory, savePersistedRuntimeState } from "./runtime/persistence.js";
+import { toDiagnosticRuntimeEvent } from "./runtime/diagnostics.js";
+import { savePersistedRuntimeState } from "./runtime/persistence.js";
 import { executeInternalTool, getInternalToolDefinitions } from "./runtime/tools.js";
 import { DEFAULT_CODEX_MODEL, getCodexModelDefinition, normalizeCodexModel } from "./models.js";
 import { getProviderDefinition, getProviderModelOptions, type ProviderModelOption } from "./provider/registry.js";
@@ -425,12 +426,8 @@ async function main(): Promise<void> {
     stopStartup();
     stopStartup = undefined;
     process.removeListener("SIGINT", onStartupSigint);
-    if (command.openTui) {
-      const { runOpenTuiRuntime } = await import("./opentui/entry.js");
-      await runOpenTuiRuntime(session);
-      return;
-    }
-    await runRuntimeTui(session);
+    const { runOpenTuiRuntime } = await import("./opentui/entry.js");
+    await runOpenTuiRuntime(session);
   } finally {
     process.removeListener("SIGINT", onStartupSigint);
     stopStartup?.();
@@ -442,14 +439,12 @@ interface RunCommand {
   kind: "run";
   prompt: string | null;
   yolo: boolean;
-  openTui?: boolean;
   debug: RuntimeDebugOptions;
 }
 
 interface InspectCommand {
   kind: "inspect";
   yolo: boolean;
-  openTui?: boolean;
   debug: RuntimeDebugOptions;
 }
 
@@ -461,7 +456,6 @@ type CliCommand = RunCommand | InspectCommand | HelpCommand;
 
 export const LAUNCH_SWITCHES = [
   { flag: "--help", alias: "-h", description: "show this help and exit" },
-  { flag: "--opentui", description: "start OpenTUI terminal interface instead of classic TUI" },
   { flag: "--yolo", description: "bypass guarded approval prompts while preserving destructive-command blocks" },
   { flag: "--debug", description: "write diagnostic log to /tmp/nexagent-debug-<timestamp>.log" },
   { flag: "--debugfile", description: "write diagnostic log to a .log path under home or /tmp" },
@@ -494,12 +488,11 @@ export function parseCommand(argv: string[]): CliCommand {
     return { kind: "help" };
   }
   const yolo = argv.includes("--yolo");
-  const openTui = argv.includes("--opentui");
   const debug = parseDebugOptions(argv);
   const normalizedArgv = stripLaunchSwitches(argv);
 
   if (normalizedArgv[0] !== "run") {
-    return openTui ? { kind: "inspect", yolo, openTui, debug } : { kind: "inspect", yolo, debug };
+    return { kind: "inspect", yolo, debug };
   }
 
   const prompt = normalizedArgv.slice(1).join(" ").trim();
@@ -509,9 +502,6 @@ export function parseCommand(argv: string[]): CliCommand {
     yolo,
     debug,
   };
-  if (openTui) {
-    command.openTui = true;
-  }
   return command;
 }
 
@@ -563,8 +553,8 @@ export function formatLaunchHelp(): string {
     "nexagent",
     "",
     "Usage:",
-    "  nexagent [--opentui] [--yolo]",
-    "  nexagent run [--opentui] [--yolo] <prompt>",
+    "  nexagent [--yolo]",
+    "  nexagent run [--yolo] <prompt>",
     "  nexagent --help",
     "",
     "Launch switches:",
@@ -996,6 +986,22 @@ export async function runPromptCommand(session: RuntimeSession, prompt: string):
 }
 
 export function runRuntimeCommand(session: RuntimeSession, input: string): RuntimeCommandResult | null {
+  const result = dispatchRuntimeCommand(session, input);
+  if (result && !result.ok) {
+    const command = input.trim().startsWith("!") ? "!" : input.trim().split(/\s+/)[0] ?? "unknown";
+    const diagnostic = captureSentryDiagnostic({
+      class: "command.failed",
+      attributes: {
+        command_name: command,
+        failure_class: result.activity,
+      },
+    }, { sendEvent: true });
+    recordRuntimeEvent(session, toDiagnosticRuntimeEvent(diagnostic));
+  }
+  return result;
+}
+
+function dispatchRuntimeCommand(session: RuntimeSession, input: string): RuntimeCommandResult | null {
   const prompt = input.trim();
   if (prompt.startsWith("!")) {
     return handleBangShellCommand(session, prompt);
@@ -1234,7 +1240,7 @@ function handleSkillCommand(session: RuntimeSession, args: string[]): RuntimeCom
   };
 }
 
-function buildActiveSkillExecutionPrompt(session: RuntimeSession, originalCommand: string): string {
+export function buildActiveSkillExecutionPrompt(session: RuntimeSession, originalCommand: string): string {
   const skill = session.activeSkill;
   if (!skill) {
     return originalCommand;
@@ -1426,10 +1432,26 @@ function handleCodexCommand(session: RuntimeSession, args: string[]): RuntimeCom
 
 function handleMemoryCommand(session: RuntimeSession, args: string[]): RuntimeCommandResult {
   const { detailMode, args: normalizedArgs } = splitVerboseArg(args);
+  if (normalizedArgs.length === 1 && isMemoryMaintenanceArg(normalizedArgs[0] ?? "")) {
+    try {
+      return {
+        ok: true,
+        output: formatMemoryMaintenanceStatus(maintainArchivistMemorySync(session)),
+        activity: "memory maintenance",
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        message: error instanceof Error ? error.message : String(error),
+        activity: "command failed · /memory maintenance",
+      };
+    }
+  }
+
   if (normalizedArgs.length !== 0) {
     return {
       ok: false,
-      message: "usage: /memory [--verbose] | /memory save <text> | /memory checkpoint [reason] | /memory session [focus]",
+      message: "usage: /memory [--verbose|--maintenance] | /memory save <text> | /memory checkpoint [reason] | /memory session [focus]",
       activity: "command failed · /memory usage",
     };
   }
@@ -1441,12 +1463,41 @@ function handleMemoryCommand(session: RuntimeSession, args: string[]): RuntimeCo
   };
 }
 
+function isMemoryMaintenanceArg(arg: string): boolean {
+  return arg === "--maintenance" || arg === "--maintance" || arg === "maintenance" || arg === "maintance";
+}
+
 function handleStatusCommand(session: RuntimeSession, args: string[]): RuntimeCommandResult {
-  const { detailMode, args: normalizedArgs } = splitVerboseArg(args);
-  if (normalizedArgs.length !== 0) {
+  const { detailMode, args: statusArgs } = splitVerboseArg(args);
+  const hasSentryStatus = statusArgs.includes("--sentry");
+  const sendSentryTestEvent = statusArgs.includes("--send-test-event");
+  if (sendSentryTestEvent && !hasSentryStatus) {
     return {
       ok: false,
-      message: "usage: /status [--verbose]",
+      message: "usage: /status [--verbose|--sentry [--send-test-event]]",
+      activity: "command failed · /status usage",
+    };
+  }
+  if (hasSentryStatus) {
+    const normalizedArgs = statusArgs.filter((arg) => arg !== "--sentry" && arg !== "--send-test-event");
+    if (normalizedArgs.length !== 0) {
+      return {
+        ok: false,
+        message: "usage: /status [--verbose|--sentry [--send-test-event]]",
+        activity: "command failed · /status usage",
+      };
+    }
+    const output = formatSentryStatus(sendSentryTestEvent);
+    return {
+      ok: true,
+      output,
+      activity: sendSentryTestEvent ? "sentry status · test event" : "sentry status",
+    };
+  }
+  if (statusArgs.length !== 0) {
+    return {
+      ok: false,
+      message: "usage: /status [--verbose|--sentry [--send-test-event]]",
       activity: "command failed · /status usage",
     };
   }
@@ -1456,6 +1507,22 @@ function handleStatusCommand(session: RuntimeSession, args: string[]): RuntimeCo
     output: formatRuntimeStatus(session, detailMode),
     activity: "status",
   };
+}
+
+function formatSentryStatus(sendTestEvent: boolean): string {
+  const status = getSentryDiagnosticsStatus();
+  const selfTest = runSentryDiagnosticsSelfTest({ sendEvent: sendTestEvent });
+  return formatDiagnosticSection("sentry", "compact", [
+    ["enabled", String(status.enabled)],
+    ["initialized", String(status.initialized)],
+    ["dsn", status.dsnConfigured ? "configured" : "missing"],
+    ["environment", status.environment],
+    ["release", status.release],
+    ["platform", status.platform],
+    ["runtime", status.runtime],
+    ["redaction", status.redactionMode],
+    ["self-test", selfTest.sent ? "event requested" : "dry-run"],
+  ]).join("\n");
 }
 
 function handleContinueCommand(session: RuntimeSession, args: string[]): RuntimeCommandResult {
@@ -2167,11 +2234,21 @@ function formatHooksStatus(session: RuntimeSession): string {
 }
 
 function formatMemoryStatus(session: RuntimeSession, detailMode: DetailMode = "compact"): string {
+  const diagnostics = session.archivist.diagnostics ?? {
+    retrievalMatchCount: session.archivist.retrieval.matchCount,
+    retrievalSourceCategory: session.archivist.retrieval.sourceCategory,
+    saveCount: 0,
+    checkpointCount: 0,
+    duplicateSuspectCount: 0,
+    staleSignalCount: 0,
+    noisySignalCount: 0,
+  };
   return formatDiagnosticSection("memory", detailMode, [
     ["enabled", String(session.archivist.enabled)],
     ["boundary", session.archivist.boundary],
     ["storage", session.archivist.storagePath ?? "disabled"],
     ["persisted", String(session.archivist.storageExists)],
+    ["signal", formatArchivistDiagnostics(diagnostics)],
     ["preview", session.archivist.writes.preview ?? "none"],
   ], [
     ["enabled", String(session.archivist.enabled)],
@@ -2181,8 +2258,34 @@ function formatMemoryStatus(session: RuntimeSession, detailMode: DetailMode = "c
     ["retrieval", formatArchivistRetrieval(session.archivist.retrieval)],
     ["retrievalPreview", session.archivist.retrieval.preview ?? "none"],
     ["writes", formatArchivistWrite(session.archivist.writes)],
+    ["diagnostics", formatArchivistDiagnostics(diagnostics)],
     ["writePreview", session.archivist.writes.preview ?? "none"],
   ]).join("\n");
+}
+
+function formatMemoryMaintenanceStatus(result: ReturnType<typeof maintainArchivistMemorySync>): string {
+  return [
+    "memory maintenance",
+    `storage: ${result.storagePath}`,
+    `entries: ${String(result.totalBefore)} -> ${String(result.totalAfter)}`,
+    `removedDuplicates: ${String(result.removedDuplicates)}`,
+    `remainingDuplicateSuspects: ${String(result.duplicateSuspects)}`,
+    `stale: ${String(result.stale)}`,
+    `noisy: ${String(result.noisy)}`,
+    `persisted: ${String(result.persisted)}`,
+  ].join("\n");
+}
+
+function formatArchivistDiagnostics(diagnostics: NonNullable<RuntimeSession["archivist"]["diagnostics"]>): string {
+  return [
+    `matches=${String(diagnostics.retrievalMatchCount)}`,
+    `source=${diagnostics.retrievalSourceCategory ?? "none"}`,
+    `saves=${String(diagnostics.saveCount)}`,
+    `checkpoints=${String(diagnostics.checkpointCount)}`,
+    `duplicates=${String(diagnostics.duplicateSuspectCount)}`,
+    `stale=${String(diagnostics.staleSignalCount)}`,
+    `noisy=${String(diagnostics.noisySignalCount)}`,
+  ].join(" · ");
 }
 
 function formatOperationControlsStatus(session: RuntimeSession): string {
@@ -2238,11 +2341,13 @@ function formatToolPolicyStatus(session: RuntimeSession, detailMode: DetailMode 
 
 function formatCompactionStatus(session: RuntimeSession): string {
   return [
+    `enabled: ${String(session.compaction.enabled ?? true)}`,
     `status: ${session.compaction.status}`,
     `threshold: ${Math.round(session.compaction.thresholdPercent * 100)}%`,
     `thresholdTokens: ${String(getCompactionThresholdTokens(session))}`,
     `remainingTokens: ${String(getRemainingContextTokens(session))}`,
     `conversationTokens: ${String(estimateConversationTokens(session))}`,
+    `preserveTurns: ${String(session.compaction.preserveTurns ?? 4)}`,
     `queued: ${session.compaction.queuedUserMessage ?? "none"}`,
     `summary: ${session.compaction.summary ? "present" : "none"}`,
     `compacts: ${String(session.compaction.compactCount)}`,
@@ -2704,1031 +2809,6 @@ function resolveFallbackProvider(session: RuntimeSession): string | null {
   }
 
   return session.provider !== "codex" ? session.provider : null;
-}
-
-async function runRuntimeTui(session: RuntimeSession): Promise<void> {
-  await new Promise<void>((resolve, reject) => {
-    const stdin = process.stdin;
-    const state = createDefaultRuntimeTuiState(createRuntimeTuiView(session));
-    state.promptHistory = loadPersistedPromptHistory(session.cwd);
-    state.action = session.action;
-    let finished = false;
-    let rawModeChanged = false;
-    let periodicMemoryInFlight = false;
-    let lastFrame = "";
-    let nextPeriodicMemoryAt = scheduleNextPeriodicMemoryAutosave(Date.now());
-    const priorRawMode = stdin.isRaw;
-    const priorEncoding = stdin.readableEncoding;
-
-    const render = () => {
-      if (state.copyStatus && Date.now() >= state.copyStatusExpiresAt) {
-        state.copyStatus = null;
-      }
-      syncTuiEventBuffers(session, state);
-      state.view = createRuntimeTuiView(session);
-      const frame = renderRuntimeTuiState(state);
-      if (frame === lastFrame) {
-        return;
-      }
-      lastFrame = frame;
-      process.stdout.write(frame);
-    };
-
-    const pushActivity = (message: string) => {
-      state.activity = [formatActivityLine(message), ...state.activity].slice(0, 6);
-    };
-
-    const resetHistoryNavigation = () => {
-      state.promptHistoryIndex = -1;
-      state.promptDraft = null;
-    };
-
-    const resetCompletionNavigation = () => {
-      state.completionIndex = 0;
-    };
-
-    const closeHistoryPopup = () => {
-      state.historyPopupOpen = false;
-      state.historyPopupIndex = 0;
-    };
-
-    const closeModelPicker = () => {
-      state.modelPickerOpen = false;
-      state.modelPickerIndex = 0;
-      state.modelPickerQuery = "";
-    };
-
-    const clampChatScroll = () => {
-      const metrics = measureMiddleScroll(state, resolveTerminalSize());
-      state.chatScrollOffset = Math.max(0, Math.min(metrics.maxScroll, state.chatScrollOffset));
-      return metrics;
-    };
-
-    const scrollChatBy = (delta: number) => {
-      const metrics = clampChatScroll();
-      state.chatScrollOffset = Math.max(0, Math.min(metrics.maxScroll, state.chatScrollOffset + delta));
-      render();
-    };
-
-    const openHistoryPopup = () => {
-      if (state.promptHistory.length === 0) {
-        return;
-      }
-      closeModelPicker();
-      state.historyPopupOpen = true;
-      state.historyPopupIndex = 0;
-      render();
-    };
-
-    const openModelPicker = () => {
-      if (getAvailableModelsForProvider(session, session.providerTransport.activeProvider).length === 0) {
-        return;
-      }
-      closeHistoryPopup();
-      state.modelPickerOpen = true;
-      const availableModels = getAvailableModelsForProvider(session, session.providerTransport.activeProvider);
-      const currentModel = getCurrentProviderModel(session);
-      const currentIndex = availableModels.findIndex((entry) => entry.id === currentModel);
-      state.modelPickerIndex = currentIndex >= 0 ? currentIndex : 0;
-      state.modelPickerQuery = "";
-      render();
-    };
-
-    const toggleTraceExpanded = () => {
-      if (state.latestTurnTrace.length === 0 && state.currentTurnActivity.length === 0) {
-        return;
-      }
-      state.traceExpanded = !state.traceExpanded;
-      render();
-    };
-
-    const commitPromptHistory = (prompt: string) => {
-      if (!prompt.trim()) {
-        return;
-      }
-      if (state.promptHistory[state.promptHistory.length - 1] !== prompt) {
-        state.promptHistory.push(prompt);
-        if (state.promptHistory.length > 50) {
-          state.promptHistory.shift();
-        }
-        savePersistedPromptHistory(session.cwd, state.promptHistory);
-      }
-      state.chatScrollOffset = 0;
-      resetHistoryNavigation();
-      closeHistoryPopup();
-    };
-
-    const navigatePromptHistory = (direction: -1 | 1) => {
-      if (state.promptHistory.length === 0) {
-        return;
-      }
-
-      if (direction === -1) {
-        if (state.promptHistoryIndex === -1) {
-          state.promptDraft = state.promptBuffer;
-          state.promptHistoryIndex = state.promptHistory.length - 1;
-        } else if (state.promptHistoryIndex > 0) {
-          state.promptHistoryIndex -= 1;
-        }
-      } else {
-        if (state.promptHistoryIndex === -1) {
-          return;
-        }
-        if (state.promptHistoryIndex < state.promptHistory.length - 1) {
-          state.promptHistoryIndex += 1;
-        } else {
-          state.promptHistoryIndex = -1;
-          state.promptBuffer = state.promptDraft ?? "";
-          state.promptCursor = state.promptBuffer.length;
-          state.promptDraft = null;
-          render();
-          return;
-        }
-      }
-
-      state.promptBuffer = state.promptHistory[state.promptHistoryIndex] ?? "";
-      state.promptCursor = state.promptBuffer.length;
-      render();
-    };
-
-    const navigateHistoryPopup = (direction: -1 | 1) => {
-      if (!state.historyPopupOpen || state.promptHistory.length === 0) {
-        return;
-      }
-      const maxIndex = state.promptHistory.length - 1;
-      state.historyPopupIndex = Math.max(0, Math.min(maxIndex, state.historyPopupIndex + (direction === -1 ? 1 : -1)));
-      render();
-    };
-
-    const navigateModelPicker = (direction: -1 | 1) => {
-      if (!state.modelPickerOpen) {
-        return;
-      }
-      const availableModels = getFilteredModelPickerEntries(state);
-      if (availableModels.length === 0) {
-        return;
-      }
-      const maxIndex = availableModels.length - 1;
-      state.modelPickerIndex = Math.max(0, Math.min(maxIndex, state.modelPickerIndex + (direction === -1 ? -1 : 1)));
-      render();
-    };
-
-    const navigatePromptCompletion = (direction: -1 | 1) => {
-      const completion = autocompletePromptBuffer(session, state.promptBuffer, state.completionIndex);
-      if (completion.suggestions.length <= 1) {
-        return false;
-      }
-      state.completionIndex = clampIndex(state.completionIndex + direction, completion.suggestions.length);
-      render();
-      return true;
-    };
-
-    const commitHistoryPopupSelection = () => {
-      if (!state.historyPopupOpen || state.promptHistory.length === 0) {
-        return false;
-      }
-      const selected = [...state.promptHistory].reverse()[state.historyPopupIndex];
-      state.promptBuffer = selected ?? "";
-      state.promptCursor = state.promptBuffer.length;
-      resetHistoryNavigation();
-      closeHistoryPopup();
-      render();
-      return true;
-    };
-
-    const commitModelPickerSelection = () => {
-      if (!state.modelPickerOpen) {
-        return false;
-      }
-      const provider = session.providerTransport.activeProvider;
-      const availableModels = getFilteredModelPickerEntries(state);
-      const selected = availableModels[state.modelPickerIndex];
-      if (!selected) {
-        return false;
-      }
-      const configuredModels = session.providerRouting.modelSelection.configuredModels as Record<string, string | undefined>;
-      if (selected.disabledReason) {
-        closeModelPicker();
-        setRuntimeAction(session, "error", `model unavailable · ${selected.id}`);
-        recordRuntimeEvent(session, {
-          kind: "command",
-          status: "blocked",
-          summary: "model picker rejected unavailable model",
-          detail: `${selected.id}: ${selected.disabledReason}`,
-        });
-        state.action = session.action;
-        pushActivity(`model unavailable · ${selected.id}`);
-        render();
-        return true;
-      }
-      configuredModels[provider] = selected.id;
-      refreshInstructionState(session);
-      savePersistedRuntimeState(session);
-      closeModelPicker();
-      setRuntimeAction(session, "ready", "model picker complete");
-      recordRuntimeEvent(session, {
-        kind: "command",
-        status: "completed",
-        summary: "model picker applied",
-        detail: `${provider}=${selected.id}`,
-      });
-      state.action = session.action;
-      pushActivity(`model set · ${selected.id}`);
-      render();
-      return true;
-    };
-
-    const cleanup = () => {
-      clearInterval(animationInterval);
-      clearInterval(periodicMemoryInterval);
-      process.removeListener("SIGINT", onSigint);
-      stdin.removeListener("data", onData);
-      if (rawModeChanged) {
-        stdin.setRawMode?.(priorRawMode);
-      }
-      stdin.setEncoding(priorEncoding ?? undefined);
-      stdin.pause();
-    };
-
-    const finish = () => {
-      if (finished) {
-        return;
-      }
-
-      finished = true;
-      cleanup();
-      resolve();
-    };
-
-    const fail = (error: unknown) => {
-      if (finished) {
-        return;
-      }
-
-      finished = true;
-      cleanup();
-      reject(error);
-    };
-
-    const cycleSection = (direction: 1 | -1) => {
-      const currentIndex = TUI_SECTIONS.indexOf(state.selectedSection);
-      const nextIndex = (currentIndex + direction + TUI_SECTIONS.length) % TUI_SECTIONS.length;
-      state.selectedSection = TUI_SECTIONS[nextIndex];
-      setRuntimeAction(session, "ready", `showing ${state.selectedSection} panel`);
-      recordRuntimeEvent(session, {
-        kind: "command",
-        status: "completed",
-        summary: `showing ${state.selectedSection} panel`,
-      });
-      state.action = session.action;
-      render();
-    };
-
-    const reloadRuntime = async () => {
-      setRuntimeAction(session, "running", "refreshing runtime state");
-      recordRuntimeEvent(session, {
-        kind: "command",
-        status: "started",
-        summary: "reload command started",
-      });
-      state.action = session.action;
-      pushActivity("refresh started");
-      render();
-
-      try {
-        const runtime = await bootstrapRuntime(session.cwd);
-        syncRuntimeSession(session, runtime);
-        setRuntimeAction(session, "ready", "runtime baseline");
-        recordRuntimeEvent(session, {
-          kind: "command",
-          status: "completed",
-          summary: "reload command completed",
-          detail: `provider ${session.provider}`,
-        });
-        state.action = session.action;
-        pushActivity(`refresh ok · provider ${session.provider}`);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        setRuntimeAction(session, "error", message);
-        recordRuntimeEvent(session, {
-          kind: "command",
-          status: "failed",
-          summary: "reload command failed",
-          detail: message,
-        });
-        state.action = session.action;
-        pushActivity(`refresh failed · ${message}`);
-      }
-
-      render();
-    };
-
-    const submitPrompt = async () => {
-      const prompt = state.promptBuffer.trim();
-      if (prompt.length === 0) {
-        return;
-      }
-      let effectivePrompt = toSkillCommandFromShorthand(prompt) ?? prompt;
-
-      const memoryMutation = parseMemoryMutationCommand(effectivePrompt);
-      if (memoryMutation) {
-        state.promptBuffer = "";
-        state.promptCursor = 0;
-        resetHistoryNavigation();
-        closeHistoryPopup();
-        closeModelPicker();
-        try {
-          const output = await applyMemoryMutationCommand(session, memoryMutation);
-          setRuntimeAction(session, "ready", "command complete");
-          recordRuntimeEvent(session, {
-            kind: "command",
-            status: "completed",
-            summary: "memory command completed",
-            detail: output,
-          });
-          state.action = session.action;
-          pushActivity(memoryMutation.kind === "save" ? "memory saved" : "memory checkpoint saved");
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          setRuntimeAction(session, "error", message);
-          recordRuntimeEvent(session, {
-            kind: "command",
-            status: "failed",
-            summary: "memory command failed",
-            detail: message,
-          });
-          state.action = session.action;
-          pushActivity(`memory command failed · ${message}`);
-        }
-        render();
-        return;
-      }
-
-      const attachmentMutation = parseAttachmentMutationCommand(effectivePrompt);
-      if (attachmentMutation) {
-        state.promptBuffer = "";
-        state.promptCursor = 0;
-        resetHistoryNavigation();
-        closeHistoryPopup();
-        closeModelPicker();
-        try {
-          const applied = applyAttachmentMutationCommand(session, attachmentMutation);
-          state.pendingImageAttachment = applied.attachment;
-          setRuntimeAction(session, "ready", "attachment updated");
-          recordRuntimeEvent(session, {
-            kind: "command",
-            status: "completed",
-            summary: "attachment command completed",
-            detail: applied.output,
-          });
-          state.action = session.action;
-          pushActivity(applied.attachment ? "image attached" : "image detached");
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          setRuntimeAction(session, "error", message);
-          recordRuntimeEvent(session, {
-            kind: "command",
-            status: "failed",
-            summary: "attachment command failed",
-            detail: message,
-          });
-          state.action = session.action;
-          pushActivity(`attachment failed · ${message}`);
-        }
-        render();
-        return;
-      }
-
-      if (effectivePrompt === "/model") {
-        state.promptBuffer = "";
-        state.promptCursor = 0;
-        resetHistoryNavigation();
-        openModelPicker();
-        return;
-      }
-
-      commitPromptHistory(prompt);
-
-      const commandResult = runRuntimeCommand(session, effectivePrompt);
-      if (commandResult) {
-        if (effectivePrompt === "/reload") {
-          state.promptBuffer = "";
-          state.promptCursor = 0;
-          void reloadRuntime();
-          return;
-        }
-
-        if (effectivePrompt === "/quit") {
-          const quitMemoryNote = await maybePersistSessionMemoryOnQuit(session, "quit command");
-          state.promptBuffer = "";
-          state.promptCursor = 0;
-          recordRuntimeEvent(session, {
-            kind: "command",
-            status: "completed",
-            summary: "quit command requested",
-            detail: quitMemoryNote ?? "no pre-quit memory save",
-          });
-          if (quitMemoryNote) {
-            pushActivity("memory session saved · quit");
-          }
-          pushActivity("quit requested");
-          render();
-          finish();
-          return;
-        }
-
-        // Skill commands with autoInvokeAfterSkill fall through to model invocation
-        if (commandResult.ok && commandResult.autoInvokeAfterSkill) {
-          process.stdout.write(`${commandResult.output}\n`);
-          effectivePrompt = buildActiveSkillExecutionPrompt(session, effectivePrompt);
-          state.promptBuffer = "";
-          state.promptCursor = 0;
-          // fall through to provider request below
-        } else {
-          state.promptBuffer = "";
-          state.promptCursor = 0;
-          setRuntimeAction(session, commandResult.ok ? "ready" : "error", commandResult.ok ? "command complete" : commandResult.message);
-          recordRuntimeEvent(session, {
-            kind: "command",
-            status: commandResult.ok ? "completed" : "failed",
-            summary: `command ${effectivePrompt.split(/\s+/)[0]} ${commandResult.ok ? "completed" : "failed"}`,
-            detail: commandResult.ok ? commandResult.output : commandResult.message,
-          });
-          await maybeArchiveAgedChatHistory(session);
-          state.action = session.action;
-          pushActivity(commandResult.activity);
-          render();
-          return;
-        }
-      }
-
-      if (state.action.pending) {
-        return;
-      }
-
-      state.promptBuffer = "";
-      state.promptCursor = 0;
-
-      recordRuntimeEvent(session, {
-        kind: "prompt",
-        status: "queued",
-        summary: "user prompt accepted",
-        detail: formatPromptEventDetail(effectivePrompt),
-      });
-      setRuntimeAction(session, "running", "provider request");
-      state.action = session.action;
-      pushActivity("request started");
-      render();
-
-      try {
-        await maybeAutoPersistMemory(session, effectivePrompt);
-        const autoCompact = maybeCompactConversation(session, effectivePrompt);
-        if (autoCompact.compacted) {
-          setRuntimeAction(session, "running", `auto compact · ${autoCompact.beforeTokens} -> ${autoCompact.afterTokens}`);
-          state.action = session.action;
-          pushActivity(`auto compact · ${autoCompact.beforeTokens} -> ${autoCompact.afterTokens}`);
-          await maybePersistCompactionMemory(session, effectivePrompt, autoCompact.beforeTokens, autoCompact.afterTokens);
-          render();
-        }
-        const queuedAttachment = state.pendingImageAttachment;
-        const result = await executeProviderRequest({
-          session,
-          prompt: effectivePrompt,
-          ...(queuedAttachment ? { attachments: [queuedAttachment] } : {}),
-        });
-        if (result.ok) {
-          const userTurn = queuedAttachment
-            ? `${effectivePrompt}\n[attachment] name=${queuedAttachment.name}; mime=${queuedAttachment.mimeType}; bytes=${String(queuedAttachment.bytes)}`
-            : effectivePrompt;
-          recordConversationTurn(session, "user", userTurn);
-          setRuntimeAction(session, "running", `streaming reply · ${result.provider}`);
-          state.action = session.action;
-          pushActivity(`streaming reply · ${result.provider}`);
-          await renderPacedAssistantReply(state, result.output, render);
-          recordConversationTurn(session, "assistant", result.output);
-          state.liveAssistantReply = null;
-          recordTurnTelemetry(session, effectivePrompt, result.output);
-          checkpointNexsightSession(session, "turn");
-          setRuntimeAction(session, "ready", `response received · ${result.provider}`);
-          await maybeArchiveAgedChatHistory(session);
-          state.action = session.action;
-          pushActivity(`request ok · ${result.provider}`);
-          if (queuedAttachment) {
-            state.pendingImageAttachment = null;
-            pushActivity(`image sent · ${queuedAttachment.name}`);
-          }
-        } else {
-          setRuntimeAction(session, "error", result.message);
-          recordRuntimeEvent(session, {
-            kind: "provider",
-            status: "failed",
-            summary: `${result.provider} response failed`,
-            detail: result.detail,
-          });
-          state.action = session.action;
-          pushActivity(`request failed · ${result.code}`);
-        }
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        setRuntimeAction(session, "error", message);
-        recordRuntimeEvent(session, {
-          kind: "provider",
-          status: "failed",
-          summary: "provider request failed",
-          detail: message,
-        });
-        state.action = session.action;
-        pushActivity(`request failed · ${message}`);
-      } finally {
-        state.action = session.action;
-        render();
-      }
-    };
-
-    const onSigint = () => finish();
-
-    const onData = (input: Buffer | string) => {
-      const key = input.toString();
-
-      if (key === "\u0003") {
-        const now = Date.now();
-        if (now - state.lastCtrlCAt <= 700) {
-          finish();
-          return;
-        }
-
-        const copyPayload = buildCopyPayload(state);
-        if (copyPayload) {
-          const copied = copyTextToClipboard(copyPayload.text);
-          const count = copyPayload.text.length;
-          const status = copied
-            ? `copied ${count} chars (${copyPayload.label})`
-            : `copy unavailable (${count} chars ready)`;
-          state.copyStatus = status;
-          state.copyStatusExpiresAt = now + 4000;
-          pushActivity(`${status} · Ctrl+C again exit`);
-        } else {
-          const status = "nothing to copy";
-          state.copyStatus = status;
-          state.copyStatusExpiresAt = now + 3000;
-          pushActivity(`${status} · Ctrl+C again exit`);
-        }
-        state.lastCtrlCAt = now;
-        render();
-        return;
-      }
-
-      if (key === "\u001b") {
-        if (state.historyPopupOpen) {
-          closeHistoryPopup();
-          render();
-          return;
-        }
-
-        if (state.modelPickerOpen) {
-          closeModelPicker();
-          render();
-          return;
-        }
-
-        if (state.action.pending) {
-          session.operationControls.cancelRequested = true;
-          session.operationControls.activeAbortController?.abort();
-          if (session.operationControls.pendingApproval) {
-            session.operationControls.pendingApproval = null;
-            session.operationControls.lastDecision = "canceled";
-          }
-          setRuntimeAction(session, "running", "cancel requested");
-          recordRuntimeEvent(session, {
-            kind: "control",
-            status: "canceled",
-            summary: "operator cancel requested",
-            detail: "escape key",
-          });
-          state.action = session.action;
-          pushActivity("cancel requested · esc");
-          render();
-          return;
-        }
-
-        if (state.promptBuffer.length > 0) {
-          state.promptBuffer = "";
-          state.promptCursor = 0;
-          resetHistoryNavigation();
-          render();
-        }
-        return;
-      }
-
-      if (key === "\r" || key === "\n") {
-        if (commitModelPickerSelection()) {
-          return;
-        }
-        if (commitHistoryPopupSelection()) {
-          return;
-        }
-        void submitPrompt();
-        return;
-      }
-
-      if (key === "\u0012") {
-        openHistoryPopup();
-        return;
-      }
-
-      if (key === "\u0014") {
-        toggleTraceExpanded();
-        return;
-      }
-
-      if (key === "\u000c") {
-        state.composerFocusMode = !state.composerFocusMode;
-        pushActivity(`composer focus ${state.composerFocusMode ? "on" : "off"} · Ctrl+L`);
-        render();
-        return;
-      }
-
-      if (key === "\u000f") {
-        const current = getConfiguredMouseMode(session);
-        session.commandModes.mouseMode = current === "auto" ? "scroll" : current === "scroll" ? "select" : "auto";
-        savePersistedRuntimeState(session);
-        writeTerminalMouseMode(session);
-        const effective = getEffectiveMouseMode(session);
-        if (effective.warning) {
-          recordRuntimeEvent(session, {
-            kind: "control",
-            status: "blocked",
-            summary: "mouse mode fallback active",
-            detail: effective.warning,
-          });
-          pushActivity(`mouse ${getConfiguredMouseMode(session)} -> ${effective.mode} · ${effective.warning}`);
-        } else {
-          pushActivity(`mouse mode ${getConfiguredMouseMode(session)} · Ctrl+O`);
-        }
-        render();
-        return;
-      }
-
-      if (key === "\u0019") {
-        if (state.pendingApprovalTool) {
-          const commandResult = runRuntimeCommand(session, "/approval approve");
-          if (commandResult?.ok) {
-            setRuntimeAction(session, "ready", "approval granted");
-            recordRuntimeEvent(session, {
-              kind: "control",
-              status: "applied",
-              summary: "approval granted",
-              detail: commandResult.output,
-            });
-            state.action = session.action;
-            pushActivity("approval granted · Ctrl+Y");
-            render();
-          }
-        }
-        return;
-      }
-
-      if (key === "\u000e") {
-        if (state.pendingApprovalTool) {
-          const commandResult = runRuntimeCommand(session, "/approval reject");
-          if (commandResult?.ok) {
-            setRuntimeAction(session, "ready", "approval rejected");
-            recordRuntimeEvent(session, {
-              kind: "control",
-              status: "blocked",
-              summary: "approval rejected",
-              detail: commandResult.output,
-            });
-            state.action = session.action;
-            pushActivity("approval rejected · Ctrl+N");
-            render();
-          }
-        }
-        return;
-      }
-
-      if (key === "\u001b\u0016" || key === "\u001bv" || key === "\u001bV") {
-        closeHistoryPopup();
-        closeModelPicker();
-        try {
-          const pasted = extractClipboardImageToTempFile();
-          const applied = applyAttachmentMutationCommand(session, {
-            kind: "attach",
-            rawPath: pasted.path,
-          });
-          state.pendingImageAttachment = applied.attachment;
-          setRuntimeAction(session, "ready", "clipboard image attached");
-          recordRuntimeEvent(session, {
-            kind: "command",
-            status: "completed",
-            summary: "clipboard image paste completed",
-            detail: `${applied.output}; source=${pasted.source}`,
-          });
-          state.action = session.action;
-          pushActivity(`image pasted · ${applied.attachment?.name ?? "clipboard"} · ${pasted.source}`);
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          setRuntimeAction(session, "error", message);
-          recordRuntimeEvent(session, {
-            kind: "command",
-            status: "failed",
-            summary: "clipboard image paste failed",
-            detail: message,
-          });
-          state.action = session.action;
-          pushActivity(`paste-image failed · ${message}`);
-        }
-        render();
-        return;
-      }
-
-      if (key === "\t") {
-        const completion = autocompletePromptBuffer(session, state.promptBuffer, state.completionIndex);
-        if (completion.value !== state.promptBuffer) {
-          state.promptBuffer = completion.value;
-          state.promptCursor = state.promptBuffer.length;
-          resetHistoryNavigation();
-          resetCompletionNavigation();
-          render();
-        }
-        return;
-      }
-
-      if (key === "\u007f") {
-        if (state.modelPickerOpen) {
-          if (state.modelPickerQuery.length > 0) {
-            state.modelPickerQuery = state.modelPickerQuery.slice(0, -1);
-            state.modelPickerIndex = 0;
-            render();
-          }
-          return;
-        }
-        if (state.promptCursor > 0) {
-          state.promptBuffer = `${state.promptBuffer.slice(0, state.promptCursor - 1)}${state.promptBuffer.slice(state.promptCursor)}`;
-          state.promptCursor -= 1;
-          resetHistoryNavigation();
-          resetCompletionNavigation();
-          render();
-        }
-        return;
-      }
-
-      if (key === "\u001b[C") {
-        if (state.promptCursor < state.promptBuffer.length) {
-          state.promptCursor += 1;
-          render();
-        }
-        return;
-      }
-
-      if (key === "\u001b[D") {
-        if (state.promptCursor > 0) {
-          state.promptCursor -= 1;
-          render();
-        }
-        return;
-      }
-
-      if (key === "\u001b[A") {
-        if (state.modelPickerOpen) {
-          navigateModelPicker(-1);
-          return;
-        }
-        if (state.historyPopupOpen) {
-          navigateHistoryPopup(-1);
-          return;
-        }
-        if (state.promptBuffer.length > 0 && navigatePromptCompletion(-1)) {
-          return;
-        }
-        if (getConfiguredMouseMode(session) === "auto" && state.promptBuffer.length === 0) {
-          scrollChatBy(3);
-          return;
-        }
-        navigatePromptHistory(-1);
-        return;
-      }
-
-      if (key === "\u001b[B") {
-        if (state.modelPickerOpen) {
-          navigateModelPicker(1);
-          return;
-        }
-        if (state.historyPopupOpen) {
-          navigateHistoryPopup(1);
-          return;
-        }
-        if (state.promptBuffer.length > 0 && navigatePromptCompletion(1)) {
-          return;
-        }
-        if (getConfiguredMouseMode(session) === "auto" && state.promptBuffer.length === 0) {
-          scrollChatBy(-3);
-          return;
-        }
-        navigatePromptHistory(1);
-        return;
-      }
-
-      if (key === "\u001b[5~") {
-        if (state.modelPickerOpen) {
-          for (let index = 0; index < 5; index += 1) {
-            navigateModelPicker(-1);
-          }
-          return;
-        }
-        if (state.historyPopupOpen) {
-          for (let index = 0; index < 5; index += 1) {
-            navigateHistoryPopup(-1);
-          }
-          return;
-        }
-        const metrics = clampChatScroll();
-        state.chatScrollOffset = Math.min(metrics.maxScroll, state.chatScrollOffset + metrics.step);
-        render();
-        return;
-      }
-
-      if (key === "\u001b[6~") {
-        if (state.modelPickerOpen) {
-          for (let index = 0; index < 5; index += 1) {
-            navigateModelPicker(1);
-          }
-          return;
-        }
-        if (state.historyPopupOpen) {
-          for (let index = 0; index < 5; index += 1) {
-            navigateHistoryPopup(1);
-          }
-          return;
-        }
-        const metrics = clampChatScroll();
-        state.chatScrollOffset = Math.max(0, state.chatScrollOffset - metrics.step);
-        render();
-        return;
-      }
-
-      if (key === "\u001b[H" || key === "\u001b[1~" || key === "\u001bOH") {
-        if (state.modelPickerOpen) {
-          state.modelPickerIndex = 0;
-          render();
-          return;
-        }
-        if (state.historyPopupOpen) {
-          state.historyPopupIndex = 0;
-          render();
-          return;
-        }
-        const metrics = clampChatScroll();
-        state.chatScrollOffset = metrics.maxScroll;
-        render();
-        return;
-      }
-
-      if (key === "\u001b[F" || key === "\u001b[4~" || key === "\u001bOF") {
-        if (state.modelPickerOpen) {
-          state.modelPickerIndex = Math.max(0, getFilteredModelPickerEntries(state).length - 1);
-          render();
-          return;
-        }
-        if (state.historyPopupOpen) {
-          state.historyPopupIndex = Math.max(0, state.promptHistory.length - 1);
-          render();
-          return;
-        }
-        state.chatScrollOffset = 0;
-        render();
-        return;
-      }
-
-      const wheelMatch = key.match(/^\u001b\[<(\d+);(\d+);(\d+)([mM])$/);
-      if (wheelMatch) {
-        const effectiveMouse = getEffectiveMouseMode(session);
-        if (effectiveMouse.mode === "select") {
-          if (effectiveMouse.warning) {
-            recordRuntimeEvent(session, {
-              kind: "control",
-              status: "blocked",
-              summary: "mouse wheel ignored",
-              detail: effectiveMouse.warning,
-            });
-            pushActivity(`mouse wheel ignored · ${effectiveMouse.warning}`);
-            render();
-          }
-          return;
-        }
-        const button = Number(wheelMatch[1]);
-        if (state.modelPickerOpen) {
-          if (button === 64) {
-            navigateModelPicker(-1);
-            return;
-          }
-          if (button === 65) {
-            navigateModelPicker(1);
-            return;
-          }
-        }
-        if (state.historyPopupOpen) {
-          if (button === 64) {
-            navigateHistoryPopup(-1);
-            return;
-          }
-          if (button === 65) {
-            navigateHistoryPopup(1);
-            return;
-          }
-        }
-        const metrics = clampChatScroll();
-        if (button === 64) {
-          state.chatScrollOffset = Math.min(metrics.maxScroll, state.chatScrollOffset + 3);
-          render();
-          return;
-        }
-        if (button === 65) {
-          state.chatScrollOffset = Math.max(0, state.chatScrollOffset - 3);
-          render();
-          return;
-        }
-      }
-
-      if (!key.startsWith("\u001b") && key >= " ") {
-        if (state.modelPickerOpen) {
-          state.modelPickerQuery += key;
-          state.modelPickerIndex = 0;
-          render();
-          return;
-        }
-        if (state.historyPopupOpen) {
-          closeHistoryPopup();
-        }
-        state.promptBuffer = `${state.promptBuffer.slice(0, state.promptCursor)}${key}${state.promptBuffer.slice(state.promptCursor)}`;
-        state.promptCursor += key.length;
-        state.selectedSection = "agent";
-        resetHistoryNavigation();
-        resetCompletionNavigation();
-        render();
-      }
-    };
-
-    const animationInterval = setInterval(() => {
-      state.action = session.action;
-      if (!state.action.pending) {
-        return;
-      }
-      state.spinnerFrame += 1;
-      render();
-    }, 180);
-
-    const periodicMemoryInterval = setInterval(() => {
-      if (finished || periodicMemoryInFlight) {
-        return;
-      }
-      if (Date.now() < nextPeriodicMemoryAt) {
-        return;
-      }
-      periodicMemoryInFlight = true;
-      void maybePersistPeriodicMemory(session)
-        .then((saved) => {
-          if (saved) {
-            pushActivity("memory checkpoint auto · periodic");
-          }
-          return maybeArchiveAgedChatHistory(session);
-        })
-        .then((archived) => {
-          if (archived) {
-            pushActivity("chat history archived · aged");
-          }
-        })
-        .catch((error) => {
-          const message = error instanceof Error ? error.message : String(error);
-          pushActivity(`memory periodic failed · ${message}`);
-        })
-        .finally(() => {
-          nextPeriodicMemoryAt = scheduleNextPeriodicMemoryAutosave(Date.now());
-          periodicMemoryInFlight = false;
-        });
-    }, PERIODIC_MEMORY_TICK_MS);
-
-    try {
-      recordRuntimeEvent(session, {
-        kind: "system",
-        status: "info",
-        summary: "runtime baseline ready",
-      });
-      pushActivity("runtime baseline ready");
-      process.once("SIGINT", onSigint);
-      stdin.setEncoding("utf8");
-      if (typeof stdin.setRawMode === "function") {
-        stdin.setRawMode(true);
-        rawModeChanged = priorRawMode !== true;
-      }
-      writeTerminalMouseMode(session);
-      stdin.resume();
-      stdin.on("data", onData);
-      render();
-    } catch (error) {
-      fail(error);
-    }
-  });
 }
 
 function createDefaultRuntimeTuiState(view: RuntimeTuiView): RuntimeTuiState {
@@ -5040,7 +4120,7 @@ function normalizeCompactText(value: string): string {
     .slice(0, 160);
 }
 
-type AttachmentMutationCommand =
+export type AttachmentMutationCommand =
   | { kind: "attach"; rawPath: string }
   | { kind: "detach" };
 
@@ -5059,7 +4139,7 @@ function parseAttachmentMutationCommand(prompt: string): AttachmentMutationComma
   return { kind: "attach", rawPath };
 }
 
-function applyAttachmentMutationCommand(
+export function applyAttachmentMutationCommand(
   session: RuntimeSession,
   command: AttachmentMutationCommand,
 ): { output: string; attachment: ImageAttachment | null } {
@@ -5118,14 +4198,14 @@ function formatBytes(value: number): string {
   return `${mib.toFixed(1)}MB`;
 }
 
-function formatAttachmentLabel(attachment: ImageAttachment | null): string {
+export function formatAttachmentLabel(attachment: ImageAttachment | null): string {
   if (!attachment) {
     return "none";
   }
   return `${attachment.name} (${attachment.mimeType}, ${formatBytes(attachment.bytes)})`;
 }
 
-function extractClipboardImageToTempFile(): { path: string; source: string } {
+export function extractClipboardImageToTempFile(): { path: string; source: string } {
   const tempDir = mkdtempSync(path.join(tmpdir(), "nexagent-clipboard-"));
   const outputPath = path.join(tempDir, "clipboard.png");
 

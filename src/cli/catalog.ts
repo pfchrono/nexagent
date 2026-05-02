@@ -10,7 +10,7 @@ export const COMMAND_CATALOG = [
   { name: "/model", usage: "/model [status|list|name]", description: "show or set model for active provider" },
   { name: "/skill", usage: "/skill [name] [args...]", description: "list skills or resolve and route a skill by name" },
   { name: "/mouse", usage: "/mouse [status|mode <auto|scroll|select>]", description: "show or set transcript mouse interaction mode" },
-  { name: "/status", usage: "/status [--verbose]", description: "show runtime, repo, auth, and style status (compact default)" },
+  { name: "/status", usage: "/status [--verbose|--sentry [--send-test-event]]", description: "show runtime, repo, auth, style, and Sentry status" },
   { name: "/caveman-mode", usage: "/caveman-mode [on|off|status]", description: "toggle compressed caveman response style" },
   { name: "/deadpoolmode", usage: "/deadpoolmode [on|off|status]", description: "toggle Deadpool prose style overlay" },
   { name: "/statusline", usage: "/statusline [on|off|status]", description: "toggle compact runtime statusline footer" },
@@ -28,7 +28,7 @@ export const COMMAND_CATALOG = [
   { name: "/rg", usage: "/rg <pattern> [path]", description: "search repo files with ripgrep" },
   { name: "/diff", usage: "/diff [path]", description: "show bounded git diff for repo or one path" },
   { name: "/hooks", usage: "/hooks", description: "inspect repo-local hook policy" },
-  { name: "/memory", usage: "/memory [--verbose|save <text>|checkpoint [reason]|session [focus]]", description: "inspect or persist archivist memory/checkpoints" },
+  { name: "/memory", usage: "/memory [--verbose|--maintenance|save <text>|checkpoint [reason]|session [focus]]", description: "inspect, maintain, or persist archivist memory/checkpoints" },
   { name: "/attach", usage: "/attach <image-path>", description: "attach local image for next prompt (http transports only)" },
   { name: "/detach", usage: "/detach", description: "clear queued image attachment" },
 ] as const;

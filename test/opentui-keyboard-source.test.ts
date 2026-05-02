@@ -100,6 +100,70 @@ test("OpenTUI renderer key source preserves startup named printable keys without
   source.dispose();
 });
 
+test("OpenTUI renderer key source can fall back to raw stdin for startup keys", () => {
+  const keyInput = new EventEmitter();
+  const rawInput = new EventEmitter();
+  const source = createOpenTuiKeyboardSource({
+    on(event, handler) {
+      keyInput.on(event, handler);
+    },
+    off(event, handler) {
+      keyInput.off(event, handler);
+    },
+  }, {
+    on(event, handler) {
+      rawInput.on(event, handler);
+    },
+    off(event, handler) {
+      rawInput.off(event, handler);
+    },
+  });
+  const captured: string[] = [];
+
+  rawInput.emit("data", "/a");
+  const unsubscribe = source.subscribe((event) => captured.push(event.sequence));
+
+  assert.deepEqual(captured, ["/", "a"]);
+  unsubscribe();
+  source.dispose();
+});
+
+test("OpenTUI renderer key source dedupes raw fallback when both streams report same key", () => {
+  const keyInput = new EventEmitter();
+  const rawInput = new EventEmitter();
+  const source = createOpenTuiKeyboardSource({
+    on(event, handler) {
+      keyInput.on(event, handler);
+    },
+    off(event, handler) {
+      keyInput.off(event, handler);
+    },
+  }, {
+    on(event, handler) {
+      rawInput.on(event, handler);
+    },
+    off(event, handler) {
+      rawInput.off(event, handler);
+    },
+  });
+  const captured: string[] = [];
+
+  keyInput.emit("keypress", {
+    name: "slash",
+    ctrl: false,
+    meta: false,
+    shift: false,
+    option: false,
+    sequence: "/",
+  });
+  rawInput.emit("data", "/");
+  const unsubscribe = source.subscribe((event) => captured.push(event.sequence));
+
+  assert.deepEqual(captured, ["/"]);
+  unsubscribe();
+  source.dispose();
+});
+
 test("OpenTUI raw keyboard parser keeps Enter and Tab as special keys", () => {
   assert.deepEqual(parseRawKeyboardInput("\r\n\t").map((event) => [event.name, event.ctrl]), [
     ["return", false],
@@ -111,6 +175,13 @@ test("OpenTUI raw keyboard parser keeps Enter and Tab as special keys", () => {
 test("OpenTUI raw keyboard parser handles Alt Enter as meta return", () => {
   assert.deepEqual(parseRawKeyboardInput("\x1b\r").map((event) => [event.name, event.meta, event.option]), [
     ["return", true, true],
+  ]);
+});
+
+test("OpenTUI raw keyboard parser handles shifted Enter CSI variants", () => {
+  assert.deepEqual(parseRawKeyboardInput("\x1b[13;2u\x1b[13;2~").map((event) => [event.name, event.shift]), [
+    ["return", true],
+    ["return", true],
   ]);
 });
 
@@ -154,6 +225,6 @@ test("OpenTUI entry disables Kitty keyboard startup negotiation", async () => {
   assert.match(source, /useMouse: true/);
   assert.match(source, /enableMouseMovement: true/);
   assert.match(source, /createOpenTuiKeyboardSource/);
-  assert.match(source, /renderer\.keyInput/);
+  assert.match(source, /renderer\.keyInput, renderer\.stdin/);
   assert.doesNotMatch(source, /createBufferedKeyboardSource\(process\.stdin\)/);
 });

@@ -151,7 +151,7 @@ test("parseCommand preserves empty run prompt for resolvePrompt", async () => {
   assert.deepEqual(parseCommand(["run", "say", "hi"]), { kind: "run", prompt: "say hi", yolo: false, debug });
   assert.deepEqual(parseCommand(["run"]), { kind: "run", prompt: null, yolo: false, debug });
   assert.deepEqual(parseCommand(["--yolo"]), { kind: "inspect", yolo: true, debug });
-  assert.deepEqual(parseCommand(["--opentui"]), { kind: "inspect", yolo: false, openTui: true, debug });
+  assert.deepEqual(parseCommand(["--opentui"]), { kind: "inspect", yolo: false, debug });
   assert.deepEqual(parseCommand(["--yolo", "run", "say", "hi"]), { kind: "run", prompt: "say hi", yolo: true, debug });
   assert.deepEqual(parseCommand(["run", "--yolo", "say", "hi"]), { kind: "run", prompt: "say hi", yolo: true, debug });
   assert.deepEqual(parseCommand(["--debug", "--verbose", "--debugfile", "trace.log", "run", "say", "hi"]), {
@@ -174,16 +174,28 @@ test("formatLaunchHelp documents launch switches", async () => {
     }
   }
   assert.match(output, /nexagent run/);
+  assert.doesNotMatch(output, /--opentui/);
+  assert.doesNotMatch(output, /--classic-tui|--legacy-tui/);
   assert.match(output, /\/help - show available runtime commands/);
 });
 
+test("default interactive launch uses OpenTUI without legacy fallback switch", async () => {
+  const source = await readFile(new URL("../src/cli.ts", import.meta.url), "utf8");
+
+  assert.match(source, /import\("\.\/opentui\/entry\.js"\)/);
+  assert.match(source, /await runOpenTuiRuntime\(session\)/);
+  assert.doesNotMatch(source, /await runRuntimeTui\(session\)/);
+  assert.doesNotMatch(source, /flag: "--opentui"/);
+  assert.doesNotMatch(source, /--classic-tui|--legacy-tui/);
+});
+
 test("debug log paths stay under home or temp roots", async () => {
-  const { resolveDebugLogPath } = await import("../src/runtime/debug.js");
+  const { RuntimeConfigurationError, resolveDebugLogPath } = await import("../src/runtime/debug.js");
 
   assert.match(resolveDebugLogPath(null, new Date("2026-04-30T12:00:00.000Z")), /\/tmp\/nexagent-debug-2026-04-30T12-00-00-000Z\.log$/);
   assert.match(resolveDebugLogPath("custom.log"), /\/\.nexagent\/debug\/custom\.log$/);
-  assert.throws(() => resolveDebugLogPath("/etc/nexagent.log"), /debug file must be under/);
-  assert.throws(() => resolveDebugLogPath("custom.txt"), /debug file must end with \.log/);
+  assert.throws(() => resolveDebugLogPath("/etc/nexagent.log"), RuntimeConfigurationError);
+  assert.throws(() => resolveDebugLogPath("custom.txt"), RuntimeConfigurationError);
 });
 
 test("applyYoloMode is session scoped and leaves persisted defaults intact", async () => {
@@ -457,7 +469,7 @@ test("runRuntimeCommand exposes command catalog through help", async () => {
     "/provider [status|name|transport ...] [--verbose] - show or switch provider and transport mode",
     "/skill [name] [args...] - list skills or resolve and route a skill by name",
     "/mouse [status|mode <auto|scroll|select>] - show or set transcript mouse interaction mode",
-    "/memory [--verbose|save <text>|checkpoint [reason]|session [focus]] - inspect or persist archivist memory/checkpoints",
+    "/memory [--verbose|--maintenance|save <text>|checkpoint [reason]|session [focus]] - inspect, maintain, or persist archivist memory/checkpoints",
     "/attach <image-path> - attach local image for next prompt (http transports only)",
     "/detach - clear queued image attachment",
     "!<command> - run guarded shell command and add output to transcript",
@@ -531,6 +543,26 @@ test("runRuntimeCommand reports runtime status and style stack", async () => {
   assert.match(verboseOutput, /yoloMode: false/);
   assert.match(verboseOutput, /^tool-policy$/m);
   assert.match(verboseOutput, /^memory$/m);
+
+  const sentry = runRuntimeCommand(session, "/status --sentry");
+  assert.equal(sentry?.ok, true);
+  assert.equal(sentry?.activity, "sentry status");
+  assert.match(sentry?.output ?? "", /^sentry$/m);
+  assert.match(sentry?.output ?? "", /^redaction: tags-only$/m);
+  assert.match(sentry?.output ?? "", /^self-test: dry-run$/m);
+
+  const sentryTest = runRuntimeCommand(session, "/status --sentry --send-test-event");
+  assert.equal(sentryTest?.ok, true);
+  assert.equal(sentryTest?.activity, "sentry status · test event");
+  assert.match(sentryTest?.output ?? "", /^self-test: event requested$/m);
+
+  const badSentry = runRuntimeCommand(session, "/status --sentry --unknown");
+  assert.equal(badSentry?.ok, false);
+  assert.match(badSentry?.message ?? "", /usage: \/status/);
+
+  const missingSentry = runRuntimeCommand(session, "/status --send-test-event");
+  assert.equal(missingSentry?.ok, false);
+  assert.match(missingSentry?.message ?? "", /usage: \/status/);
 });
 
 test("formatRuntimeStatus compact includes turn state/objective/blocker", async () => {
@@ -749,9 +781,36 @@ test("runRuntimeCommand compacts conversation manually", async () => {
   const result = runRuntimeCommand(session, "/compact");
 
   assert.equal(result?.ok, true);
+  assert.match(result?.output ?? "", /enabled: true/);
+  assert.match(result?.output ?? "", /preserveTurns: 4/);
   assert.match(result?.output ?? "", /summary: present/);
   assert.match(result?.output ?? "", /compacts: 1/);
   assert.match(result?.output ?? "", /last-compact: 7 ->/);
+});
+
+test("compactConversation preserves queued intent locally without event content", async () => {
+  const { compactConversation } = await import("../src/runtime/session.js");
+  const session = createSession();
+  session.conversation = [
+    { role: "user", content: "one", tokens: 1 },
+    { role: "assistant", content: "two", tokens: 1 },
+    { role: "user", content: "three", tokens: 1 },
+    { role: "assistant", content: "four", tokens: 1 },
+    { role: "user", content: "five", tokens: 1 },
+    { role: "assistant", content: "six", tokens: 1 },
+  ];
+
+  const queued = "continue with private follow-up";
+  compactConversation(session, "auto", queued);
+
+  assert.equal(session.compaction.snapshot?.queuedUserMessage, queued);
+  assert.equal(session.compaction.queuedUserMessage, null);
+  const compactEvents = session.events
+    .filter((event) => event.kind === "compact")
+    .map((event) => `${event.summary} ${event.detail ?? ""}`)
+    .join("\n");
+  assert.match(compactEvents, /queued user message preserved/);
+  assert.doesNotMatch(compactEvents, /private follow-up/);
 });
 
 test("runRuntimeCommand toggles caveman mode", async () => {
@@ -835,13 +894,18 @@ test("runRuntimeCommand switches codex backend transport mode", async () => {
 
 test("runRuntimeCommand suggests help for unknown commands", async () => {
   const { runRuntimeCommand } = await import("../src/cli.js");
-  const result = runRuntimeCommand(createSession(), "/nope");
+  const session = createSession();
+  const result = runRuntimeCommand(session, "/nope");
 
   assert.deepEqual(result, {
     ok: false,
     message: "unknown command /nope; use /help",
     activity: "command failed · /nope",
   });
+  assert.equal(
+    session.events.some((event) => event.kind === "control" && event.summary.includes("command.failed")),
+    true,
+  );
 });
 
 test("runRuntimeCommand supports local tool commands", async () => {
@@ -937,6 +1001,7 @@ test("runRuntimeCommand supports local tool commands", async () => {
     assert.match(compactMemory?.output ?? "", /^memory$/m);
     assert.match(compactMemory?.output ?? "", /^enabled: false$/m);
     assert.match(compactMemory?.output ?? "", /^boundary: disabled$/m);
+    assert.match(compactMemory?.output ?? "", /^signal: matches=0 .* duplicates=0/m);
 
     const verboseMemory = runRuntimeCommand(session, "/memory --verbose");
     assert.equal(verboseMemory?.ok, true);
@@ -944,6 +1009,7 @@ test("runRuntimeCommand supports local tool commands", async () => {
     assert.match(verboseMemory?.output ?? "", /^memory$/m);
     assert.match(verboseMemory?.output ?? "", /^enabled: false$/m);
     assert.match(verboseMemory?.output ?? "", /^retrieval: idle$/m);
+    assert.match(verboseMemory?.output ?? "", /^diagnostics: matches=0 .* stale=0 .* noisy=0$/m);
     assert.match(verboseMemory?.output ?? "", /^writePreview: none$/m);
   } finally {
     await rm(cwd, { recursive: true, force: true });
@@ -966,6 +1032,69 @@ test("runRuntimeCommand reports tool policy", async () => {
   assert.match(verboseTools?.output ?? "", /^mode: repo-local-guarded$/m);
   assert.match(verboseTools?.output ?? "", /^protected: /m);
   assert.match(verboseTools?.output ?? "", /timeout=5000ms/);
+});
+
+test("runRuntimeCommand maintains archivist memory by removing exact duplicates", async () => {
+  const { runRuntimeCommand } = await import("../src/cli.js");
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-memory-maintenance-"));
+  try {
+    const storagePath = path.join(cwd, ".nexagent", "archivist.json");
+    await mkdir(path.dirname(storagePath), { recursive: true });
+    await writeFile(storagePath, JSON.stringify({
+      version: "1.0.0",
+      entries: [
+        {
+          type: "memory",
+          summary: "same fact",
+          content: "same fact content",
+          tags: ["alpha"],
+          projectPath: cwd,
+          createdAt: "2025-01-01T00:00:00.000Z",
+        },
+        {
+          type: "memory",
+          summary: "same fact",
+          content: "same fact content",
+          tags: ["alpha"],
+          projectPath: cwd,
+          createdAt: "2025-01-02T00:00:00.000Z",
+        },
+        {
+          type: "memory",
+          summary: "different fact",
+          content: "different fact content",
+          tags: ["beta"],
+          projectPath: cwd,
+          createdAt: "2025-01-03T00:00:00.000Z",
+        },
+      ],
+    }, null, 2), "utf8");
+
+    const session = createSession();
+    session.cwd = cwd;
+    session.repo.root = cwd;
+    session.archivist.enabled = true;
+    session.archivist.boundary = "bounded-write";
+    session.archivist.storagePath = storagePath;
+    session.archivist.storageExists = true;
+
+    const result = runRuntimeCommand(session, "/memory --maintance");
+
+    assert.equal(result?.ok, true);
+    assert.equal(result?.activity, "memory maintenance");
+    assert.match(result?.output ?? "", /^memory maintenance$/m);
+    assert.match(result?.output ?? "", /^entries: 3 -> 2$/m);
+    assert.match(result?.output ?? "", /^removedDuplicates: 1$/m);
+    assert.match(result?.output ?? "", /^persisted: true$/m);
+    assert.equal(session.archivist.diagnostics?.saveCount, 2);
+    assert.equal(session.archivist.diagnostics?.duplicateSuspectCount, 0);
+
+    const store = JSON.parse(await readFile(storagePath, "utf8")) as { entries: Array<{ summary: string; createdAt: string }> };
+    assert.equal(store.entries.length, 2);
+    assert.equal(store.entries.find((entry) => entry.summary === "same fact")?.createdAt, "2025-01-02T00:00:00.000Z");
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
 });
 
 test("runRuntimeCommand manages nexsight store", async () => {

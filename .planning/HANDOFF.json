@@ -1,89 +1,24 @@
 {
   "version": "1.0",
-  "timestamp": "2026-04-28T23:35:42.172Z",
-  "context": "milestone",
-  "milestone": "v1.5",
-  "phase": "66",
-  "phase_name": "composer-and-command-surface-port",
-  "phase_dir": null,
+  "timestamp": "2026-05-01T04:07:00.000Z",
+  "phase": "71",
+  "phase_name": "sentry-observability-and-diagnostics-integration",
+  "phase_dir": ".planning/phases/71-sentry-observability-and-diagnostics-integration",
   "plan": null,
   "task": null,
   "total_tasks": 0,
-  "status": "paused",
-  "completed_tasks": [
-    {
-      "id": 64,
-      "name": "OpenTUI spike and migration contract",
-      "status": "done",
-      "commit": "19dea18"
-    },
-    {
-      "id": 65,
-      "name": "OpenTUI app shell baseline",
-      "status": "done",
-      "commit": "54d3562"
-    }
-  ],
-  "remaining_tasks": [
-    {
-      "id": 66,
-      "name": "Composer and command surface port",
-      "status": "not_started"
-    },
-    {
-      "id": 67,
-      "name": "Transcript, trace, and scrollbox port",
-      "status": "not_started"
-    },
-    {
-      "id": 68,
-      "name": "Control surfaces and cockpit polish",
-      "status": "not_started"
-    },
-    {
-      "id": 69,
-      "name": "Default switch and old renderer retirement",
-      "status": "not_started"
-    }
-  ],
+  "status": "ready_for_discussion",
+  "completed_tasks": [],
+  "remaining_tasks": [],
   "blockers": [],
-  "human_actions_pending": [
-    {
-      "action": "Keep Dogfood-*.md reports untracked until later dogfood synthesis work.",
-      "context": "User explicitly asked these reports stay out for now.",
-      "blocking": false
-    }
-  ],
+  "human_actions_pending": [],
   "decisions": [
     {
-      "decision": "Treat Phase 65 as complete and start next with Phase 66 discussion/planning.",
-      "rationale": "Roadmap marks Phase 65 complete; no Phase 66 phase directory exists yet.",
-      "phase": "65"
-    },
-    {
-      "decision": "Commit dogfood runtime hardening and OpenTUI baseline before pausing.",
-      "rationale": "User asked to commit and push dogfood code changes, Nexsight, bun.lock, OpenTUI work, and README updates.",
-      "phase": "65"
-    },
-    {
-      "decision": "Leave Dogfood report markdown untracked.",
-      "rationale": "Reports are source material for later work, not part of the current committed runtime fix.",
-      "phase": "65"
+      "decision": "Phase 70 is complete.",
+      "rationale": "Phase 70 executed, build/test validation passed, and 70-VERIFICATION.md status is passed.",
+      "phase": "70"
     }
   ],
-  "uncommitted_files": [
-    "Dogfood-codex-fresh-report.md",
-    "Dogfood-codex-report.md",
-    "Dogfood-findings-nexagent.md",
-    "Dogfood-freecode-report.md",
-    "Dogfood-hermes-agent-report.md",
-    "Dogfood-openclaude-report.md",
-    "Dogfood-openclaw-report.md",
-    "Dogfood-opencode-report.md",
-    "Dogfood-rtk-report.md",
-    "Dogfood-soulforge-report.md",
-    "Dogfood-tamux-report.md"
-  ],
-  "next_action": "Run $gsd-discuss-phase 66 or $gsd-plan-phase 66 to create the Phase 66 context/plan for composer and command surface port.",
-  "context_notes": "Phase 65 code was committed and pushed as 54d3562. Verification passed: bun test ./test/*.test.ts, bun run build, npm run lint, git diff --check. Main remaining local clutter is untracked Dogfood-*.md reports intentionally left out."
+  "next_action": "Run $gsd-discuss-phase 71 or $gsd-plan-phase 71.",
+  "context_notes": "Phase 70 is complete. Phase 71 is parked for Sentry observability and diagnostics integration."
 }

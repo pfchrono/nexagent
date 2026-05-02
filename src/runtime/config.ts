@@ -23,6 +23,7 @@ export interface HarnessConfig {
   toolPolicy: ToolPolicy;
   hooks?: HooksConfig;
   archivist: ArchivistConfig;
+  compaction?: CompactionConfig;
 }
 
 export interface PromptConfig {
@@ -64,6 +65,24 @@ export interface ArchivistConfig {
   storageExists: boolean;
   retrieval: ArchivistRetrievalState;
   writes: ArchivistWriteState;
+  diagnostics?: ArchivistDiagnosticsState;
+}
+
+export interface ArchivistDiagnosticsState {
+  retrievalMatchCount: number;
+  retrievalSourceCategory: string | null;
+  saveCount: number;
+  checkpointCount: number;
+  duplicateSuspectCount: number;
+  staleSignalCount: number;
+  noisySignalCount: number;
+}
+
+export interface CompactionConfig {
+  enabled: boolean;
+  thresholdPercent: number;
+  modelThresholdOverrides: Record<string, number>;
+  preserveTurns: number;
 }
 
 export interface ArchivistRetrievalState {
@@ -161,6 +180,7 @@ interface NexagentSettings {
     enabledServers?: string[];
   };
   archivist?: ArchivistSettings;
+  compaction?: Partial<CompactionConfig>;
   imports?: {
     claude?: {
       enabled?: boolean;
@@ -180,6 +200,7 @@ interface ResolvedConfigSource {
   enabledMcpServers?: string[];
   hooks?: HooksConfig;
   archivist?: ArchivistSettings;
+  compaction?: Partial<CompactionConfig>;
 }
 
 const DEFAULT_PRODUCT_NAME = "nexagent";
@@ -264,6 +285,7 @@ export async function loadHarnessConfig(cwd: string): Promise<HarnessConfig> {
     toolPolicy: createToolPolicy(cwd),
     hooks: mergedConfig.hooks ?? createEmptyHooksConfig(),
     archivist: await resolveArchivistConfig(cwd, mergedConfig.archivist),
+    compaction: resolveCompactionConfig(mergedConfig.compaction),
   };
 }
 
@@ -326,6 +348,7 @@ function mapNexagentSettings(settings: NexagentSettings | null, settingsDir: str
     mcpConfigPath: settings.mcp?.configPath ? resolvePathFromBase(settingsDir, settings.mcp.configPath) : undefined,
     enabledMcpServers: settings.mcp?.enabledServers,
     archivist: settings.archivist ? mapArchivistSettings(settings.archivist, settingsDir) : undefined,
+    compaction: settings.compaction,
   };
 }
 
@@ -373,6 +396,7 @@ function mergeConfigSources(...sources: ResolvedConfigSource[]): ResolvedConfigS
     enabledMcpServers: source.enabledMcpServers ?? resolved.enabledMcpServers,
     hooks: source.hooks ?? resolved.hooks,
     archivist: mergeArchivistSettings(resolved.archivist, source.archivist),
+    compaction: mergeCompactionSettings(resolved.compaction, source.compaction),
   }), {});
 }
 
@@ -554,6 +578,54 @@ function mergeArchivistSettings(
     ...resolved,
     ...source,
   };
+}
+
+function mergeCompactionSettings(
+  resolved?: Partial<CompactionConfig>,
+  source?: Partial<CompactionConfig>,
+): Partial<CompactionConfig> | undefined {
+  if (!resolved && !source) {
+    return undefined;
+  }
+  return {
+    ...resolved,
+    ...source,
+    modelThresholdOverrides: {
+      ...(resolved?.modelThresholdOverrides ?? {}),
+      ...(source?.modelThresholdOverrides ?? {}),
+    },
+  };
+}
+
+function resolveCompactionConfig(settings?: Partial<CompactionConfig>): CompactionConfig {
+  return {
+    enabled: settings?.enabled ?? true,
+    thresholdPercent: normalizeThreshold(settings?.thresholdPercent, 0.5),
+    modelThresholdOverrides: normalizeThresholdOverrides(settings?.modelThresholdOverrides),
+    preserveTurns: normalizePreserveTurns(settings?.preserveTurns),
+  };
+}
+
+function normalizeThreshold(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 && value < 1 ? value : fallback;
+}
+
+function normalizeThresholdOverrides(value: unknown): Record<string, number> {
+  if (!value || typeof value !== "object") {
+    return {};
+  }
+  const normalized: Record<string, number> = {};
+  for (const [model, threshold] of Object.entries(value as Record<string, unknown>)) {
+    const modelName = model.trim();
+    if (modelName && typeof threshold === "number" && Number.isFinite(threshold) && threshold > 0 && threshold < 1) {
+      normalized[modelName] = threshold;
+    }
+  }
+  return normalized;
+}
+
+function normalizePreserveTurns(value: unknown): number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 2 && value <= 20 ? value : 4;
 }
 
 async function resolveArchivistConfig(cwd: string, settings?: ArchivistSettings): Promise<ArchivistConfig> {

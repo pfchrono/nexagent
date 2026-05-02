@@ -18,7 +18,7 @@ export async function runOpenTuiRuntime(session: RuntimeSession): Promise<void> 
     enableMouseMovement: true,
     useKittyKeyboard: null,
   });
-  const keyboardSource = createOpenTuiKeyboardSource(renderer.keyInput);
+  const keyboardSource = createOpenTuiKeyboardSource(renderer.keyInput, renderer.stdin);
 
   let settled = false;
   await new Promise<void>((resolve) => {

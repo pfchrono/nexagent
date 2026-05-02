@@ -4,6 +4,7 @@ import { CODEX_EXEC_ADAPTER, invokeCodexExecTransport } from "./provider/codex-e
 import { getCodexModelDefinition, normalizeCodexModel } from "./models.js";
 import { getProviderModelOptions } from "./provider/registry.js";
 import {
+  captureSentryDiagnostic,
   logSentryError,
   logSentryInfo,
   setSentrySpanAttributes,
@@ -20,6 +21,7 @@ import {
   isNexsightToolCall,
   shouldRouteToNexsightOnly,
 } from "./runtime/nexsight-router.js";
+import { toDiagnosticRuntimeEvent, type RuntimeDiagnosticInput } from "./runtime/diagnostics.js";
 import { consumeOperatorSteer, estimateTokenCount, recordRuntimeEvent, setRuntimeAction } from "./runtime/session.js";
 import type { RuntimeApprovalRequest, RuntimeSession } from "./runtime/session.js";
 import { beginSkillRun, completeSkillRun, recordSkillToolResult } from "./runtime/skill-runner.js";
@@ -69,12 +71,19 @@ export interface ProviderFailure {
 
 export type ProviderResult = ProviderSuccess | ProviderFailure;
 
+export interface CodexInvocationMetrics {
+  inputTokens: number;
+  outputTokens: number;
+  durationMs: number;
+}
+
 export interface CodexInvocation {
   exitCode: number;
   stdout: string;
   stderr: string;
   output: string;
   raw?: unknown;
+  metrics?: CodexInvocationMetrics;
 }
 
 export type CodexInvoker = (request: ProviderRequest, model: string | null) => Promise<CodexInvocation>;
@@ -85,7 +94,29 @@ export interface CodexInvokers {
 }
 
 const TOOL_CALL_PATTERN = /<nexagent_tool_call>([\s\S]+?)<\/nexagent_tool_call>/;
-const TOOL_CALL_MARKUP_PATTERN = /<\s*\/?\s*nexagent_tool_call\b/i;
+const INTERNAL_TOOL_TAG_NAMES = [
+  "read_file",
+  "write_file",
+  "apply_patch",
+  "batch_edit",
+  "preview_patch",
+  "list_dir",
+  "search_content",
+  "search_files",
+  "web_fetch",
+  "web_search",
+  "git_status",
+  "git_diff",
+  "shell_command",
+  "nexsight_execute",
+  "nexsight_index",
+  "nexsight_batch",
+  "nexsight_search",
+  "archivist_save",
+  "archivist_checkpoint",
+] as const satisfies readonly InternalToolCall["name"][];
+const INTERNAL_TOOL_TAG_PATTERN = INTERNAL_TOOL_TAG_NAMES.join("|");
+const TOOL_CALL_MARKUP_PATTERN = new RegExp(`<\\s*\\/?\\s*(?:(?:nexagent_)?tool_call|${INTERNAL_TOOL_TAG_PATTERN})\\b`, "i");
 const MAX_INTERNAL_TOOL_STEPS = 6;
 const MAX_INTERNAL_TOOL_CYCLES = 2;
 const MAX_GUIDANCE_NUDGES_BEFORE_SYNTHESIS = 2;
@@ -307,7 +338,7 @@ async function executeProviderRequestImpl(
           exitCode: invocation.exitCode,
         }, { verboseOnly: true });
       }
-      turnRun.onProviderStep(step + 1);
+      turnRun.onProviderStep(step + 1, invocation.metrics);
 
       if (invocation.exitCode !== 0) {
         return createCodexFailure(provider, model, invocation.stderr, invocation.stdout, transport.id);
@@ -342,6 +373,15 @@ async function executeProviderRequestImpl(
             status: "queued",
             summary: "malformed tool call nudge applied",
             detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
+          });
+          recordRuntimeDiagnostic(request.session, {
+            class: "provider.malformed_tool_call",
+            attributes: {
+              provider,
+              transport: request.session.providerTransport.mode,
+              model: model ?? "default",
+              adapter: transport.id,
+            },
           });
           prompt = `${assembled.prompt}\n\n${toolTranscript.length > 0 ? `Internal tool transcript:\n${toolTranscript.join("\n\n")}\n\n` : ""}${MALFORMED_TOOL_CALL_NUDGE}`;
           continue;
@@ -804,13 +844,32 @@ async function invokeProviderWithSentrySpan(
         });
       }
 
+      const startedAt = Date.now();
       const invocation = await withAbortController(
         request.session,
         (signal) => invoker(createRequest(signal), model),
       );
+      const durationMs = Date.now() - startedAt;
+      const usage = extractGenAiUsage(invocation.raw);
+      const inputTokens = usage["gen_ai.usage.input_tokens"] || estimateTokenCount(promptForOptionalCapture);
+      const outputTokens = usage["gen_ai.usage.output_tokens"] || estimateTokenCount(invocation.output);
+      invocation.metrics = { inputTokens, outputTokens, durationMs };
+      if (invocation.exitCode !== 0) {
+        recordRuntimeDiagnostic(request.session, {
+          class: "provider.transport",
+          attributes: {
+            provider: request.session.provider,
+            transport: request.session.providerTransport.mode,
+            model: model ?? "default",
+            adapter,
+            exit_code: invocation.exitCode,
+            duration_ms: durationMs,
+          },
+        });
+      }
 
       setSentrySpanAttributes(span, {
-        ...extractGenAiUsage(invocation.raw),
+        ...usage,
         "gen_ai.response.output_chars": invocation.output.length,
         "nexagent.exit_code": invocation.exitCode,
       });
@@ -913,7 +972,7 @@ async function executeOpenAiNativeToolLoop(
         exitCode: invocation.exitCode,
       }, { verboseOnly: true });
     }
-    turnRun.onProviderStep(step + 1);
+    turnRun.onProviderStep(step + 1, invocation.metrics);
 
     if (invocation.exitCode !== 0) {
       return createCodexFailure(request.session.provider, model, invocation.stderr, invocation.stdout, transport.id);
@@ -931,6 +990,15 @@ async function executeOpenAiNativeToolLoop(
           status: "queued",
           summary: "malformed tool call nudge applied",
           detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
+        });
+        recordRuntimeDiagnostic(request.session, {
+          class: "provider.malformed_tool_call",
+          attributes: {
+            provider: request.session.provider,
+            transport: request.session.providerTransport.mode,
+            model: model ?? "default",
+            adapter: transport.id,
+          },
         });
         nativeInput = [{ role: "user", content: MALFORMED_TOOL_CALL_NUDGE }];
         return null;
@@ -1134,6 +1202,16 @@ function createMissingWriteEvidenceFailure(
     summary: `${request.session.provider} turn failed`,
     detail: "assistant claimed file mutation without write evidence",
   });
+  recordRuntimeDiagnostic(request.session, {
+    class: "provider.missing_evidence",
+    attributes: {
+      provider: request.session.provider,
+      transport,
+      model: model ?? "default",
+      adapter,
+      required_evidence: "write",
+    },
+  });
   return {
     ok: false,
     provider: request.session.provider,
@@ -1180,6 +1258,16 @@ function createMissingRequiredToolEvidenceFailure(
     status: "failed",
     summary: `${request.session.provider} turn failed`,
     detail: `assistant completed without required ${requiredTool} evidence`,
+  });
+  recordRuntimeDiagnostic(request.session, {
+    class: "provider.missing_evidence",
+    attributes: {
+      provider: request.session.provider,
+      transport,
+      model: model ?? "default",
+      adapter,
+      required_evidence: requiredTool,
+    },
   });
   return {
     ok: false,
@@ -1310,6 +1398,15 @@ async function executeToolWithRuntimeActivity(session: RuntimeSession, call: Int
       summary: `tool ${call.name} not executed`,
       detail: risk,
     });
+    recordRuntimeDiagnostic(session, {
+      class: "tool.blocked",
+      attributes: {
+        tool_name: call.name,
+        risk,
+        approval_state: session.operationControls.lastDecision ?? "pending",
+        blocked_reason: session.operationControls.lastDecision === "canceled" ? "canceled" : "approval_rejected",
+      },
+    });
     return {
       ok: false,
       tool: call.name,
@@ -1321,21 +1418,36 @@ async function executeToolWithRuntimeActivity(session: RuntimeSession, call: Int
   const durationMs = Date.now() - startedAt;
   setRuntimeAction(session, result.ok ? "ready" : "error", `tool ${call.name} ${result.ok ? "complete" : "failed"} · ${risk}`);
   const outputPreview = truncateToolOutput(result.output);
+  const inputTokens = estimateTokenCount(JSON.stringify({ name: call.name, arguments: call.arguments }));
   const outputTokens = estimateTokenCount(result.output);
   recordRuntimeEvent(session, {
     kind: "tool",
     status: result.ok ? "completed" : "failed",
     summary: `tool ${call.name} ${result.ok ? "completed" : "failed"}`,
-    detail: `${risk}; duration=${formatToolDuration(durationMs)}; out~${outputTokens}; output=${outputPreview}`,
+    detail: `${risk}; duration=${formatToolDuration(durationMs)}; in~${inputTokens}; out~${outputTokens}; output=${outputPreview}`,
   });
+  if (!result.ok) {
+    recordRuntimeDiagnostic(session, {
+      class: "tool.failed",
+      attributes: {
+        tool_name: call.name,
+        risk,
+        duration_ms: durationMs,
+        input_tokens: inputTokens,
+        output_tokens: outputTokens,
+      },
+    });
+  }
   return result;
 }
 
 function formatToolDuration(durationMs: number): string {
-  if (durationMs < 1000) {
-    return `${durationMs}ms`;
-  }
-  return `${(durationMs / 1000).toFixed(1)}s`;
+  return `${(Math.max(0, durationMs) / 1000).toFixed(2)}s`;
+}
+
+function recordRuntimeDiagnostic(session: RuntimeSession, input: RuntimeDiagnosticInput): void {
+  const event = captureSentryDiagnostic(input, { sendEvent: true });
+  recordRuntimeEvent(session, toDiagnosticRuntimeEvent(event));
 }
 
 function formatToolArgumentsPreview(value: unknown): string {
@@ -1439,7 +1551,7 @@ function parseInternalToolCall(output: string): InternalToolCall | null {
     return parsed;
   }
 
-  return parseAttributeStyleToolCall(output);
+  return parseAttributeStyleToolCall(output) ?? parseBareInternalToolTag(output);
 }
 
 function parseToolCallJson(value: string): InternalToolCall | null {
@@ -1502,19 +1614,21 @@ function containsToolCallMarkup(output: string): boolean {
 }
 
 function parseAttributeStyleToolCall(output: string): InternalToolCall | null {
-  const opening = output.match(/<nexagent_tool_call\b([^>]*)>/i);
-  if (!opening) {
+  const match = output.match(/<(?:nexagent_)?tool_call\b([^>]*)>([\s\S]*?)<\/(?:nexagent_)?tool_call>/i);
+  if (!match) {
     return null;
   }
 
-  const attributes = opening[1] ?? "";
+  const attributes = match[1] ?? "";
+  const body = match[2] ?? "";
   const name = readXmlAttribute(attributes, "name");
   if (!name) {
     return null;
   }
 
+  const childArguments = parseArgumentChildren(body);
   const rawArguments = readXmlAttribute(attributes, "arguments") ?? extractJsonAfterToken(output, "arguments");
-  const parsedArguments = parseToolArguments(rawArguments ?? "{}");
+  const parsedArguments = rawArguments ? parseToolArguments(rawArguments) : childArguments ?? {};
   if (!parsedArguments) {
     return null;
   }
@@ -1523,6 +1637,56 @@ function parseAttributeStyleToolCall(output: string): InternalToolCall | null {
     name: name as InternalToolCall["name"],
     arguments: parsedArguments,
   };
+}
+
+function parseBareInternalToolTag(output: string): InternalToolCall | null {
+  const paired = output.match(new RegExp(`<(${INTERNAL_TOOL_TAG_PATTERN})\\b([^>]*)>([\\s\\S]*?)<\\/\\1>`, "i"));
+  const selfClosing = output.match(new RegExp(`<(${INTERNAL_TOOL_TAG_PATTERN})\\b([^>]*)\\/>`, "i"));
+  const match = paired ?? selfClosing;
+  if (!match) {
+    return null;
+  }
+  const name = match[1] as InternalToolCall["name"] | undefined;
+  if (!name) {
+    return null;
+  }
+  const attributes = parseXmlAttributes(match[2] ?? "");
+  const body = (match[3] ?? "").trim();
+  if (body.length > 0 && attributes.content === undefined && attributes.code === undefined) {
+    attributes.content = decodeXmlAttribute(body);
+  }
+  return {
+    name,
+    arguments: attributes,
+  };
+}
+
+function parseArgumentChildren(body: string): Record<string, unknown> | null {
+  const args: Record<string, unknown> = {};
+  const pattern = /<(?:argument|arg)\b([^>]*)>([\s\S]*?)<\/(?:argument|arg)>/gi;
+  let matched = false;
+  for (const match of body.matchAll(pattern)) {
+    const name = readXmlAttribute(match[1] ?? "", "name");
+    if (!name) {
+      continue;
+    }
+    matched = true;
+    args[name] = decodeXmlAttribute((match[2] ?? "").trim());
+  }
+  return matched ? args : null;
+}
+
+function parseXmlAttributes(attributes: string): Record<string, unknown> {
+  const parsed: Record<string, unknown> = {};
+  const pattern = /\b([A-Za-z_][\w-]*)\s*=\s*(?:"([^"]*)"|'([^']*)')/g;
+  for (const match of attributes.matchAll(pattern)) {
+    const key = match[1];
+    if (!key || key === "name") {
+      continue;
+    }
+    parsed[key] = decodeXmlAttribute(match[2] ?? match[3] ?? "");
+  }
+  return parsed;
 }
 
 function readXmlAttribute(attributes: string, name: string): string | null {

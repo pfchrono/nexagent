@@ -30,12 +30,19 @@ export function createBufferedKeyboardSource(keyInput: KeyInputEmitter): OpenTui
   );
 }
 
-export function createOpenTuiKeyboardSource(keyInput: OpenTuiKeyInputEmitter): OpenTuiKeyboardSource {
-  return createBufferedSource<OpenTuiKeyInputEmitter, OpenTuiKeyEvent>(
+export function createOpenTuiKeyboardSource(
+  keyInput: OpenTuiKeyInputEmitter,
+  fallbackInput?: KeyInputEmitter,
+): OpenTuiKeyboardSource {
+  const rendererSource = createBufferedSource<OpenTuiKeyInputEmitter, OpenTuiKeyEvent>(
     keyInput,
     "keypress",
     (key) => [normalizeOpenTuiKeyEvent(key)],
   );
+  if (!fallbackInput) {
+    return rendererSource;
+  }
+  return createMergedKeyboardSource(rendererSource, createBufferedKeyboardSource(fallbackInput));
 }
 
 function createBufferedSource<TEmitter extends {
@@ -82,6 +89,38 @@ function createBufferedSource<TEmitter extends {
       subscribers.clear();
       pending.length = 0;
       keyInput.off(eventName, listener);
+    },
+  };
+}
+
+function createMergedKeyboardSource(primary: OpenTuiKeyboardSource, fallback: OpenTuiKeyboardSource): OpenTuiKeyboardSource {
+  return {
+    subscribe(handler) {
+      let primarySeen = false;
+      const emitPrimary = (key: OpenTuiKeyEvent): void => {
+        if (isUsableKeyEvent(key)) {
+          primarySeen = true;
+        }
+        handler(key);
+      };
+      const emitFallback = (key: OpenTuiKeyEvent): void => {
+        if (!primarySeen) {
+          handler(key);
+        }
+      };
+      const unsubscribers = [
+        primary.subscribe(emitPrimary),
+        fallback.subscribe(emitFallback),
+      ];
+      return () => {
+        for (const unsubscribe of unsubscribers) {
+          unsubscribe();
+        }
+      };
+    },
+    dispose() {
+      primary.dispose();
+      fallback.dispose();
     },
   };
 }
@@ -216,6 +255,9 @@ function mapCsiSequence(sequence: string, final: string | undefined): OpenTuiKey
     case "F":
       return withModifier("end");
     case "~": {
+      if (sequence === "\x1b[13;2~") {
+        return specialKey("return", sequence, { shift: true });
+      }
       if (sequence === "\x1b[1~" || sequence === "\x1b[7~") {
         return withModifier("home");
       }
@@ -233,9 +275,27 @@ function mapCsiSequence(sequence: string, final: string | undefined): OpenTuiKey
       }
       return null;
     }
+    case "u":
+      return mapKittyStyleKeyCode(sequence);
     default:
       return null;
   }
+}
+
+function mapKittyStyleKeyCode(sequence: string): OpenTuiKeyEvent | null {
+  const match = sequence.match(/^\x1b\[(\d+)(?:;(\d+))?u$/);
+  if (!match) {
+    return null;
+  }
+  const code = Number(match[1]);
+  const modifier = parseCsiModifier(sequence);
+  if (code === 13) {
+    return specialKey("return", sequence, modifier);
+  }
+  if (code === 9) {
+    return specialKey("tab", sequence, modifier);
+  }
+  return null;
 }
 
 function parseCsiModifier(sequence: string): Partial<OpenTuiKeyEvent> {
@@ -293,4 +353,8 @@ function specialKey(name: string, sequence: string, overrides: Partial<OpenTuiKe
     sequence,
     ...overrides,
   };
+}
+
+function isUsableKeyEvent(key: OpenTuiKeyEvent): boolean {
+  return key.sequence.length > 0 || key.name.length > 0 || key.ctrl || key.meta || key.option;
 }

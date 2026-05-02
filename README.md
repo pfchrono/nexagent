@@ -23,15 +23,15 @@ Terminal-first AI coding harness for local operator-driven development.
 - Supports `--debug`, `--debugfile <path.log>`, and `--verbose` for diagnostic logs.
 - Supports `/cavemanmode` and `/deadpoolmode` instruction overlays for concise/operator-style model replies.
 - Shows cockpit-style TUI panels for turn metadata, warnings, structured actions/results, risk/outcome state, recovery actions, navigation hints, and terminal capabilities.
-- Includes an opt-in OpenTUI shell baseline via `--opentui` for the ongoing v1.5 terminal UI rewrite.
+- Uses OpenTUI as the default interactive shell for the v1.5 terminal UI.
 
 ## Repository Layout
 
-- `src/cli.ts` — CLI entrypoint, commands, TUI rendering, GUI rendering
+- `src/cli.ts` — CLI entrypoint, commands, runtime inspect payloads, GUI rendering
 - `src/runtime/` — config, session state, instructions, tools, persistence, memory
 - `src/provider*.ts` — provider request routing and transports
 - `src/tui/` — terminal primitives
-- `src/opentui/` — opt-in OpenTUI shell baseline and runtime view adapter
+- `src/opentui/` — default interactive OpenTUI shell and runtime view adapter
 - `test/` — CLI, provider, runtime config, instructions, and tool tests
 - `.planning/` — project roadmap, state, requirements, phase artifacts, audits
 - `.nexagent/`, `.claude/`, `.mcp.json` — repo-local runtime and assistant configuration
@@ -93,7 +93,7 @@ bun compile dev:linux
 Runtime flags are passed when launching the built binary:
 
 ```bash
-./dist/nexagent-linux-x64 --opentui
+./dist/nexagent-linux-x64 --yolo
 ```
 
 ## CLI Usage
@@ -116,13 +116,13 @@ Run with YOLO guarded approval bypass:
 bun run dev -- --yolo run "continue current task"
 ```
 
-Run the opt-in OpenTUI shell baseline:
+Run the default interactive OpenTUI shell:
 
 ```bash
-bun run dev -- --opentui
+bun run dev
 ```
 
-OpenTUI is not the default path yet. Current shell work includes the live runtime shell, multiline composer, slash/skill command surfaces, bounded transcript review, collapsible trace blocks, mouse wheel scrolling, and OSC52 copy feedback. Transcript review uses `PageUp`/`PageDown`, `Ctrl+Up`/`Ctrl+Down`, mouse wheel, `Ctrl+End` for latest output, `Ctrl+T` for trace, and `Ctrl+C`/`Ctrl+Y` to copy the selected block. Use `Ctrl+Q` or `/quit` to exit OpenTUI.
+OpenTUI is the default interactive path after the v1.5 migration acceptance checks. Current shell work includes the live runtime shell, multiline composer, slash/skill command surfaces, bounded transcript review, collapsible trace blocks, cockpit warning/action/approval/memory surfaces, mouse wheel scrolling, and OSC52 copy feedback. Transcript review uses `PageUp`/`PageDown`, `Ctrl+Up`/`Ctrl+Down`, mouse wheel, `Ctrl+End` for latest output, `Ctrl+T` for trace, and `Ctrl+C`/`Ctrl+Y` to copy the selected block. Use `Ctrl+Q` or `/quit` to exit OpenTUI.
 
 Show launch help:
 
@@ -222,18 +222,37 @@ Sentry logs are enabled through `enableLogs: true`. Nexagent records concise pro
 - `gen_ai.request` for model calls, with model/provider/transport metadata and token usage when returned by the provider
 - `gen_ai.execute_tool` for internal tool calls
 
+Diagnostic Sentry payloads are tags-only by default. Runtime diagnostics classify command failures, provider transport/auth failures, malformed tool calls, missing evidence gates, blocked/failed tools, compaction state, OpenTUI events, and memory signal counters without sending raw prompts, assistant output, tool output, file content, or transcript text. Use `/status --sentry` for local Sentry health and dry-run self-test details. Use `/status --sentry --send-test-event` only when an explicit test event is wanted.
+
+Compaction can be configured in `.nexagent/settings.json` or `~/.nexagent/settings.json`:
+
+```json
+{
+  "compaction": {
+    "enabled": true,
+    "thresholdPercent": 0.5,
+    "preserveTurns": 4,
+    "modelThresholdOverrides": {
+      "gpt-5.4": 0.6
+    }
+  }
+}
+```
+
 ## Common Runtime Commands
 
 Inside TUI:
 
 - `/help` — command list
 - `/status` — compact runtime status
+- `/status --sentry` — safe Sentry diagnostics and self-test status
 - `/provider` — provider status or provider switch
 - `/provider transport ...` — transport mode switch
 - `/model` — model status or switch
 - `/tools` — internal tool policy and availability
 - `/tools nexsight` — Nexsight store/status helpers
-- `/memory` — Archivist memory status and commands
+- `/memory` — Archivist memory status, safe signal counters, and commands
+- `/memory --maintenance` — remove exact duplicate Archivist entries and refresh memory diagnostics
 - `/skill` — list or route skills
 - `/attach <image-path>` — queue image attachment for HTTP transports
 - `/mouse` — mouse mode status/config

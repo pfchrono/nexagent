@@ -24,7 +24,7 @@ test("createOpenTuiRuntimeView maps runtime session without mutation", () => {
     toolPolicy: "repo-local-guarded",
     providerTransportMode: "cli-exec",
     imageAttachmentSupported: false,
-    headerTitle: "nexagent :: opentui",
+    headerTitle: "nexagent :: agent tui",
     providerLabel: "codex/gpt-5.4",
     sessionLabel: "session session_test | turns 2",
     statusLabel: "ready - runtime baseline",
@@ -43,9 +43,47 @@ test("createOpenTuiRuntimeView maps runtime session without mutation", () => {
       label: "trace",
       summaryLines: ["trace empty"],
       detailLines: ["trace empty"],
-      collapsedByDefault: true,
+      collapsedByDefault: false,
     }],
+    cockpit: {
+      approval: {
+        mode: "open",
+        pendingTool: null,
+        lastDecision: "none",
+        hints: ["/approval approve", "/approval reject"],
+      },
+      warnings: [],
+      ladder: {
+        intent: "idle",
+        plan: "ready",
+        act: "idle",
+        result: "pending",
+      },
+      overrideHints: ["Ctrl+Q quit", "/cancel", "/steer <message>", "/approval status"],
+      memory: {
+        active: "session context active",
+        retrieved: "retrieved context idle",
+        checkpoints: "checkpoints idle",
+      },
+      risk: "pending · approval open",
+    },
+    statusline: {
+      model: "gpt-5.4",
+      branch: "main",
+      repoName: "repo",
+      sessionAge: "0s",
+      memoryUsedBytes: view.statusline.memoryUsedBytes,
+      memoryTotalBytes: view.statusline.memoryTotalBytes,
+      contextUsed: 0,
+      contextWindow: 272000,
+      contextPercent: 0,
+      lastInputTokens: 0,
+      lastOutputTokens: 0,
+    },
   });
+  assert.ok(view.statusline.memoryTotalBytes > 0);
+  assert.ok(view.statusline.memoryUsedBytes >= 0);
+  assert.ok(view.statusline.memoryUsedBytes <= view.statusline.memoryTotalBytes);
   assert.equal(JSON.stringify(session.action), before);
 });
 
@@ -83,8 +121,177 @@ test("createOpenTuiRuntimeView maps transcript and trace lines", () => {
     "tool completed - tool nexsight_execute completed",
   ]);
   assert.match(view.traceDetailLines.join("\n"), /transport=codex-http/);
+  assert.equal(view.traceBlocks.length, 1);
   assert.equal(view.traceBlocks[0]?.collapsedByDefault, true);
+  assert.match(view.traceBlocks[0]?.summaryLines[0] ?? "", /provider request started/);
+  assert.match(view.traceBlocks[0]?.summaryLines[1] ?? "", /more lines; expand/);
   assert.match(view.traceBlocks.map((block) => block.detailLines.join("\n")).join("\n"), /transport=codex-http/);
+});
+
+test("createOpenTuiRuntimeView keeps one expanded trace block with full event detail", () => {
+  const session = createSession();
+  session.events = [
+    {
+      at: "2025-01-01T00:00:01.000Z",
+      kind: "prompt",
+      status: "queued",
+      summary: "user prompt accepted",
+      detail: "inspect tools",
+    },
+    {
+      at: "2025-01-01T00:00:02.000Z",
+      kind: "provider",
+      status: "failed",
+      summary: "codex response failed",
+      detail: "line one\nline two with exact detail\nline three",
+    },
+  ];
+
+  const view = createOpenTuiRuntimeView(session);
+
+  assert.equal(view.traceBlocks.length, 1);
+  assert.equal(view.traceBlocks[0]?.label, "turn trace");
+  assert.match(view.traceBlocks[0]?.detailLines.join("\n") ?? "", /line two with exact detail/);
+  assert.match(view.traceBlocks[0]?.detailLines.join("\n") ?? "", /provider \| failed/);
+});
+
+test("createOpenTuiRuntimeView keeps pending prompt visible after prior conversation", () => {
+  const session = createSession();
+  session.conversation = [
+    { role: "user", content: "Hello!", tokens: 1 },
+    { role: "assistant", content: "Hi! How can I help?", tokens: 5 },
+  ];
+  session.events = [
+    {
+      at: "2025-01-01T00:00:01.000Z",
+      kind: "prompt",
+      status: "queued",
+      summary: "user prompt accepted",
+      detail: "Hello!",
+    },
+    {
+      at: "2025-01-01T00:00:02.000Z",
+      kind: "assistant",
+      status: "completed",
+      summary: "assistant response completed",
+      detail: "Hi! How can I help?",
+    },
+    {
+      at: "2025-01-01T00:00:03.000Z",
+      kind: "prompt",
+      status: "queued",
+      summary: "user prompt accepted",
+      detail: "What tools and mcp tools do you have?",
+    },
+  ];
+
+  const view = createOpenTuiRuntimeView(session);
+
+  assert.deepEqual(view.transcriptBlocks.map((block) => block.label), ["you", "agent", "you"]);
+  assert.equal(view.transcriptBlocks[2]?.kind, "user");
+  assert.match(view.transcriptBlocks[2]?.detailLines.join("\n") ?? "", /What tools and mcp tools/);
+});
+
+test("createOpenTuiRuntimeView orders chat by prompt and assistant events", () => {
+  const session = createSession();
+  session.conversation = [
+    { role: "user", content: "first", tokens: 1 },
+    { role: "assistant", content: "first ack", tokens: 2 },
+    { role: "user", content: "second", tokens: 1 },
+    { role: "assistant", content: "second ack", tokens: 2 },
+  ];
+  session.events = [
+    { at: "2025-01-01T00:00:01.000Z", kind: "prompt", status: "queued", summary: "user prompt accepted", detail: "first" },
+    { at: "2025-01-01T00:00:02.000Z", kind: "assistant", status: "completed", summary: "assistant response completed", detail: "first ack" },
+    { at: "2025-01-01T00:00:03.000Z", kind: "prompt", status: "queued", summary: "user prompt accepted", detail: "second" },
+    { at: "2025-01-01T00:00:04.000Z", kind: "assistant", status: "completed", summary: "assistant response completed", detail: "second ack" },
+    { at: "2025-01-01T00:00:05.000Z", kind: "prompt", status: "queued", summary: "user prompt accepted", detail: "third" },
+    { at: "2025-01-01T00:00:06.000Z", kind: "assistant", status: "failed", summary: "assistant failed", detail: "third failed" },
+  ];
+
+  const view = createOpenTuiRuntimeView(session);
+
+  assert.deepEqual(view.transcriptBlocks.map((block) => block.label), ["you", "agent", "you", "agent", "you", "agent"]);
+  assert.deepEqual(view.transcriptBlocks.map((block) => block.detailLines[0]), ["first", "first ack", "second", "second ack", "third", "third failed"]);
+});
+
+test("createOpenTuiRuntimeView orders chat by prompt, tools, and assistant events", () => {
+  const session = createSession();
+  session.conversation = [
+    { role: "user", content: "run search", tokens: 2 },
+    { role: "assistant", content: "found it", tokens: 2 },
+  ];
+  session.events = [
+    { at: "2025-01-01T00:00:01.000Z", kind: "prompt", status: "queued", summary: "user prompt accepted", detail: "run search" },
+    { at: "2025-01-01T00:00:02.000Z", kind: "tool", status: "started", summary: "tool search_files started", detail: "read-only; args={\"pattern\":\"turn\"}" },
+    { at: "2025-01-01T00:00:03.000Z", kind: "tool", status: "completed", summary: "tool search_files completed", detail: "read-only; duration=0.04s; in~3; out~9; output=src/opentui/App.tsx" },
+    { at: "2025-01-01T00:00:04.000Z", kind: "assistant", status: "completed", summary: "assistant response completed", detail: "found it" },
+  ];
+
+  const view = createOpenTuiRuntimeView(session);
+
+  assert.deepEqual(view.transcriptBlocks.map((block) => block.kind), ["user", "tool", "tool", "assistant"]);
+  assert.deepEqual(view.transcriptBlocks.map((block) => block.label), ["you", "tool search_files", "tool search_files · 0.04s ↓ 3 ↑ 9", "agent"]);
+  assert.match(view.transcriptBlocks[1]?.detailLines.join("\n") ?? "", /started · tool search_files started/);
+  assert.match(view.transcriptBlocks[2]?.detailLines.join("\n") ?? "", /0\.04s ↓ 3 ↑ 9/);
+  assert.match(view.transcriptBlocks[2]?.detailLines.join("\n") ?? "", /output=src\/opentui\/App\.tsx/);
+  assert.equal(view.statusline.lastInputTokens, 3);
+  assert.equal(view.statusline.lastOutputTokens, 9);
+});
+
+test("createOpenTuiRuntimeView keeps command output out of chat and available in trace", () => {
+  const session = createSession();
+  session.conversation = [
+    { role: "user", content: "show memory", tokens: 2 },
+    { role: "assistant", content: "memory checked", tokens: 2 },
+  ];
+  session.events = [
+    { at: "2025-01-01T00:00:01.000Z", kind: "prompt", status: "queued", summary: "user prompt accepted", detail: "show memory" },
+    { at: "2025-01-01T00:00:02.000Z", kind: "command", status: "completed", summary: "memory status", detail: "memory\nenabled: true\nmatches=3" },
+    { at: "2025-01-01T00:00:03.000Z", kind: "assistant", status: "completed", summary: "assistant response completed", detail: "memory checked" },
+  ];
+
+  const view = createOpenTuiRuntimeView(session);
+
+  assert.deepEqual(view.transcriptBlocks.map((block) => block.kind), ["user", "assistant"]);
+  assert.deepEqual(view.transcriptBlocks.map((block) => block.detailLines[0]), ["show memory", "memory checked"]);
+  assert.doesNotMatch(view.transcriptBlocks.map((block) => block.detailLines.join("\n")).join("\n"), /matches=3/);
+  assert.match(view.traceBlocks.map((block) => block.detailLines.join("\n")).join("\n"), /command \| completed/);
+  assert.match(view.traceBlocks.map((block) => block.detailLines.join("\n")).join("\n"), /matches=3/);
+});
+
+test("createOpenTuiRuntimeView renders active skill prompts as compact skill rows", () => {
+  const session = createSession();
+  session.conversation = [
+    { role: "user", content: "skill -> gsd-stats", tokens: 2 },
+    { role: "assistant", content: "stats complete", tokens: 2 },
+  ];
+  session.events = [
+    { at: "2025-01-01T00:00:01.000Z", kind: "prompt", status: "queued", summary: "active skill gsd-stats requested", detail: "skill -> gsd-stats" },
+    { at: "2025-01-01T00:00:02.000Z", kind: "assistant", status: "completed", summary: "assistant response completed", detail: "stats complete" },
+  ];
+
+  const view = createOpenTuiRuntimeView(session);
+
+  assert.equal(view.transcriptBlocks[0]?.kind, "skill");
+  assert.equal(view.transcriptBlocks[0]?.label, "skill -> gsd-stats");
+  assert.equal(view.transcriptBlocks[0]?.collapsedByDefault, true);
+  assert.deepEqual(view.transcriptBlocks[0]?.summaryLines, ["skill -> gsd-stats"]);
+  assert.equal(view.transcriptBlocks[1]?.kind, "assistant");
+});
+
+test("createOpenTuiRuntimeView surfaces compaction progress when no chat turn exists", () => {
+  const session = createSession();
+  session.events = [
+    { at: "2025-01-01T00:00:01.000Z", kind: "compact", status: "started", summary: "manual compaction started" },
+    { at: "2025-01-01T00:00:02.000Z", kind: "compact", status: "completed", summary: "manual compaction completed", detail: "summary=present · turns=4 · tokens=14000->2400" },
+  ];
+
+  const view = createOpenTuiRuntimeView(session);
+
+  assert.deepEqual(view.transcriptBlocks.map((block) => block.kind), ["system", "system"]);
+  assert.match(view.transcriptBlocks.map((block) => block.detailLines.join("\n")).join("\n"), /manual compaction started/);
+  assert.match(view.transcriptBlocks.map((block) => block.detailLines.join("\n")).join("\n"), /tokens=14000->2400/);
 });
 
 test("OpenTUI short command output stays expanded by default", () => {
@@ -128,6 +335,76 @@ test("OpenTUI assistant replies preserve multiline content and cap huge replies"
   assert.equal(block?.summaryLines.length, 31);
   assert.equal(block?.detailLines.length, 32);
   assert.equal(block?.detailLines[1], "reply line 2");
+});
+
+test("OpenTUI cockpit view maps approval warnings ladder and memory split", () => {
+  const session = createSession();
+  session.operationControls.requireApprovalForGuarded = true;
+  session.operationControls.pendingApproval = {
+    tool: "write_file",
+    risk: "guarded",
+    summary: "write tmp/example.txt",
+  };
+  session.operationControls.steerMessage = "use smaller patch";
+  session.operationControls.steerState = "queued";
+  session.archivist.retrieval = { used: true, sourceCategory: "memory", matchCount: 2, preview: "hidden preview" };
+  session.archivist.writes = { used: true, action: "checkpoint", sourceCategory: "session", savedAt: "2026-04-30T00:00:00.000Z", entryCount: 1, preview: "hidden write" };
+  session.archivist.diagnostics = {
+    retrievalMatchCount: 2,
+    retrievalSourceCategory: "memory",
+    saveCount: 4,
+    checkpointCount: 1,
+    duplicateSuspectCount: 1,
+    staleSignalCount: 2,
+    noisySignalCount: 3,
+  };
+  session.events = [
+    {
+      at: "2026-04-30T00:00:01.000Z",
+      kind: "prompt",
+      status: "completed",
+      summary: "build cockpit",
+    },
+    {
+      at: "2026-04-30T00:00:02.000Z",
+      kind: "tool",
+      status: "queued",
+      summary: "tool write_file queued",
+    },
+  ];
+
+  const view = createOpenTuiRuntimeView(session);
+
+  assert.equal(view.cockpit.approval.mode, "guarded");
+  assert.equal(view.cockpit.approval.pendingTool, "write_file");
+  assert.deepEqual(view.cockpit.approval.hints, ["/approval approve", "/approval reject"]);
+  assert.equal(view.cockpit.warnings[0]?.type, "approval");
+  assert.match(view.cockpit.warnings.map((warning) => warning.action).join("\n"), /approval approve/);
+  assert.equal(view.cockpit.ladder.intent, "build cockpit");
+  assert.equal(view.cockpit.ladder.act, "tool write_file queued");
+  assert.match(view.cockpit.memory.retrieved, /2 match/);
+  assert.match(view.cockpit.memory.checkpoints, /checkpoint/);
+  assert.doesNotMatch(JSON.stringify(view.cockpit.memory), /hidden preview|hidden write/);
+});
+
+test("OpenTUI memory diagnostics fallback is counts-only", () => {
+  const session = createSession();
+  session.archivist.retrieval = { used: false, sourceCategory: null, matchCount: 0, preview: "hidden retrieval" };
+  session.archivist.writes = { used: false, action: null, sourceCategory: null, savedAt: null, entryCount: 0, preview: "hidden write" };
+  session.archivist.diagnostics = {
+    retrievalMatchCount: 0,
+    retrievalSourceCategory: null,
+    saveCount: 4,
+    checkpointCount: 1,
+    duplicateSuspectCount: 1,
+    staleSignalCount: 2,
+    noisySignalCount: 3,
+  };
+
+  const view = createOpenTuiRuntimeView(session);
+
+  assert.equal(view.cockpit.memory.checkpoints, "memory signal · dup 1 · stale 2");
+  assert.doesNotMatch(JSON.stringify(view.cockpit.memory), /hidden retrieval|hidden write/);
 });
 
 function createSession(): RuntimeSession {

@@ -1,8 +1,27 @@
 import { flushSync, useTerminalDimensions } from "@opentui/react";
 import { useEffect, useRef, useState } from "react";
 
-import { runRuntimeCommand } from "../cli.js";
+import {
+  applyAttachmentMutationCommand,
+  buildActiveSkillExecutionPrompt,
+  extractClipboardImageToTempFile,
+  formatAttachmentLabel,
+  formatProgressChrome,
+  formatPromptEventDetail,
+  runRuntimeCommand,
+  type RuntimeCommandResult,
+} from "../cli.js";
+import { executeProviderRequest, type ImageAttachment } from "../provider.js";
+import { checkpointNexsightSession } from "../runtime/nexsight.js";
 import type { RuntimeSession } from "../runtime/session.js";
+import {
+  maybeCompactConversation,
+  recordConversationTurn,
+  recordRuntimeEvent,
+  recordTurnTelemetry,
+  setRuntimeAction,
+  subscribeRuntimeSession,
+} from "../runtime/session.js";
 import {
   createOpenTuiComposerState,
   handleOpenTuiComposerEvent,
@@ -13,7 +32,7 @@ import {
 import { createCommandSurface, createRuntimeCommandIntent, resolveSkillPreview, type CommandPaletteRow } from "./command-surface.js";
 import type { OpenTuiKeyEvent, OpenTuiKeyboardSource } from "./keyboard-source.js";
 import {
-  createLocalOutputBlock,
+  createOpenTuiRuntimeView,
   type OpenTuiRuntimeView,
   type OpenTuiTranscriptBlock,
 } from "./runtime-view.js";
@@ -28,10 +47,15 @@ import {
 
 const SKILL_PREVIEW_PREFIX = "skill:";
 const COMPOSER_CURSOR = "|";
-const ALT_V_UNSUPPORTED_MESSAGE = "Alt+V paste-image unavailable in OpenTUI; use /attach <image-path>";
+const ALT_V_UNSUPPORTED_MESSAGE = "No clipboard image found; use /attach <image-path>";
 const COPIED_RESULTS_NOTICE = "copied results to clipboard";
 const PALETTE_VISIBLE_ROWS = 5;
 const PALETTE_CHROME_ROWS = 5;
+const TRACE_DETAIL_PALETTE_MIN_ROWS = 8;
+const COMPOSER_VISIBLE_PROMPT_ROWS = 4;
+const STATUSLINE_RESERVED_ROWS = 3;
+const WARNING_VISIBLE_ROWS = 3;
+const WIDE_COCKPIT_MIN_COLUMNS = 120;
 
 interface OpenTuiMouseLikeEvent {
   type?: string;
@@ -53,7 +77,7 @@ export interface OpenTuiAppProps {
   onExit: () => void;
 }
 
-export function OpenTuiApp({ view, session, keyboardSource, promptHistory = [], onPromptHistoryChange, onExit }: OpenTuiAppProps) {
+export function OpenTuiApp({ view: initialView, session, keyboardSource, promptHistory = [], onPromptHistoryChange, onExit }: OpenTuiAppProps) {
   const { width, height } = useTerminalDimensions();
   const terminalWidth = width > 0 ? width : process.stdout.columns || 80;
   const terminalHeight = height > 0 ? height : process.stdout.rows || 24;
@@ -63,9 +87,18 @@ export function OpenTuiApp({ view, session, keyboardSource, promptHistory = [], 
   const [composer, setComposer] = useState<OpenTuiComposerState>(() => createOpenTuiComposerState());
   const [history, setHistory] = useState(promptHistory);
   const [traceExpanded, setTraceExpanded] = useState(false);
+  const [traceProgressPaletteKey, setTraceProgressPaletteKey] = useState<string | null>(null);
+  const [traceDetailScrollOffset, setTraceDetailScrollOffset] = useState(0);
   const [shellNotice, setShellNotice] = useState("ready");
-  const [outputBlocks, setOutputBlocks] = useState<OpenTuiTranscriptBlock[]>([]);
+  const [runtimeView, setRuntimeView] = useState<OpenTuiRuntimeView>(initialView);
   const [transcriptState, setTranscriptState] = useState<OpenTuiTranscriptState>(() => createOpenTuiTranscriptState());
+  const [pendingImageAttachment, setPendingImageAttachment] = useState<ImageAttachment | null>(null);
+  const [cockpitExpanded, setCockpitExpanded] = useState(false);
+  const [spinnerTick, setSpinnerTick] = useState(0);
+  const providerRunningRef = useRef(false);
+  const mountedRef = useRef(true);
+  const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const view = runtimeView;
 
   const commandSurface = createCommandSurface(view.cwd, composer.text, composer.selectedIndex);
   const skillPreview = resolveSkillPreview(view.cwd, composer.text, composer.selectedIndex);
@@ -73,7 +106,39 @@ export function OpenTuiApp({ view, session, keyboardSource, promptHistory = [], 
   const visiblePaletteRows = visiblePaletteWindow(paletteRows, composer.selectedIndex, PALETTE_VISIBLE_ROWS);
   const paletteDisplayRows = createPaletteDisplayRows(composer, paletteRows, visiblePaletteRows, paletteWidth);
   const paletteFooterLine = paletteRows.length > PALETTE_VISIBLE_ROWS ? `${String(composer.selectedIndex + 1)}/${String(paletteRows.length)} - use arrows` : "";
-  const previewLine = skillPreview.status === "none" ? commandSurface.hint : skillPreview.label.replace(/^skill:/, SKILL_PREVIEW_PREFIX);
+  const paletteTitle = paletteTitleForOverlay(composer, commandSurface.title);
+  const palettePanelRows = renderPalettePanelRows({
+    width: paletteWidth,
+    title: paletteTitle,
+    query: composer.overlayMode === "history-search" ? "history search" : commandSurface.query,
+    displayRows: paletteDisplayRows,
+    footerLine: paletteFooterLine,
+  });
+  const previewLine = skillPreview.status === "none" ? commandSurface.hint ?? "" : skillPreview.label.replace(/^skill:/, SKILL_PREVIEW_PREFIX);
+  const showCockpitPanel = cockpitExpanded;
+  const wideCockpitLayout = terminalWidth >= WIDE_COCKPIT_MIN_COLUMNS;
+  const compactCockpitLayout = terminalHeight < 30;
+  const cockpitWarningRows = view.cockpit.warnings.slice(0, WARNING_VISIBLE_ROWS);
+  const cockpitWarningOverflow = Math.max(0, view.cockpit.warnings.length - WARNING_VISIBLE_ROWS);
+  const cockpitMemoryRows = wideCockpitLayout
+    ? [
+      view.cockpit.memory.active,
+      view.cockpit.memory.retrieved,
+      view.cockpit.memory.checkpoints,
+    ]
+    : [
+      `${view.cockpit.memory.active} | ${view.cockpit.memory.retrieved}`,
+    ];
+  const cockpitPanelRows = renderCockpitPanelRows({
+    width: contentWidth,
+    warningRows: cockpitWarningRows,
+    warningOverflow: cockpitWarningOverflow,
+    ladder: view.cockpit.ladder,
+    memoryRows: cockpitMemoryRows,
+    overrideHints: view.cockpit.overrideHints,
+    risk: view.cockpit.risk,
+    compact: compactCockpitLayout,
+  });
   const attachmentLine = composer.attachment
     ? composer.attachment.supported
       ? `attached: ${composer.attachment.label} | clear attachment`
@@ -89,17 +154,53 @@ export function OpenTuiApp({ view, session, keyboardSource, promptHistory = [], 
     });
   }, [keyboardSource]);
 
-  function handleKeyboardKey(key: OpenTuiKeyEvent): void {
-    if (key.ctrl && key.name === "c") {
-      copySelectedTranscriptBlock();
-      return;
+  useEffect(() => {
+    return () => {
+      mountedRef.current = false;
+      if (refreshTimerRef.current) {
+        clearTimeout(refreshTimerRef.current);
+        refreshTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!session) {
+      return undefined;
     }
+    return subscribeRuntimeSession(session, () => scheduleRuntimeViewRefresh(16));
+  }, [session]);
+
+  useEffect(() => {
+    if (!session || view.status !== "running") {
+      return undefined;
+    }
+    const interval = setInterval(() => {
+      setSpinnerTick((current) => current + 1);
+      scheduleRuntimeViewRefresh(0);
+    }, 80);
+    return () => clearInterval(interval);
+  }, [session, view.status]);
+
+  function handleKeyboardKey(key: OpenTuiKeyEvent): void {
     if (key.ctrl && key.name === "q") {
       onExit();
       return;
     }
     if (key.ctrl && key.name === "t") {
-      setTraceExpanded((current) => !current);
+      setTraceExpanded((current) => {
+        const next = !current;
+        if (!next) {
+          setTraceProgressPaletteKey(null);
+          setTraceDetailScrollOffset(0);
+        }
+        return next;
+      });
+      return;
+    }
+    if (key.ctrl && key.name === "p") {
+      setCockpitExpanded((current) => !current);
+      setShellNotice(cockpitExpanded ? "cockpit hidden" : "cockpit shown");
       return;
     }
     if (key.ctrl && key.name === "r") {
@@ -107,12 +208,23 @@ export function OpenTuiApp({ view, session, keyboardSource, promptHistory = [], 
       return;
     }
     if (key.ctrl && key.name === "y") {
-      copySelectedTranscriptBlock();
+      copyLatestResultBlock();
+      return;
+    }
+    if (traceProgressPaletteKey && composer.overlayMode === "none" && key.name === "escape") {
+      closeTraceDetailPalette();
+      return;
+    }
+    if (traceProgressPaletteKey && composer.overlayMode === "none" && key.name === "pageup") {
+      scrollTraceDetailPalette(-traceDetailVisibleRows);
+      return;
+    }
+    if (traceProgressPaletteKey && composer.overlayMode === "none" && key.name === "pagedown") {
+      scrollTraceDetailPalette(traceDetailVisibleRows);
       return;
     }
     if ((key.name === "v" || key.sequence.toLowerCase() === "v") && (key.meta || key.option)) {
-      appendOutput(ALT_V_UNSUPPORTED_MESSAGE);
-      setShellNotice("paste-image shortcut unavailable");
+      void pasteImageFromClipboard();
       return;
     }
     if (key.name === "pageup") {
@@ -221,21 +333,72 @@ export function OpenTuiApp({ view, session, keyboardSource, promptHistory = [], 
   }
 
   const paletteOverlayHeight = PALETTE_VISIBLE_ROWS + PALETTE_CHROME_ROWS;
-  const paletteTop = Math.max(5, terminalHeight - paletteOverlayHeight - 5);
-  const transcriptViewportHeight = Math.max(4, terminalHeight - 14);
-  const transcriptBlocks = [...view.transcriptBlocks, ...outputBlocks, ...(traceExpanded ? view.traceBlocks : [])];
-  const transcriptRenderRows = flattenTranscriptBlocks(transcriptBlocks, transcriptState);
+  const cockpitRowBudget = showCockpitPanel ? compactCockpitLayout ? 6 : wideCockpitLayout ? 9 : 8 : 0;
+  const composerPromptRows = renderComposerPromptRows(composer, contentWidth);
+  const composerReservedRows = composerPanelHeight(composerPromptRows.length, Boolean(attachmentLine));
+  const paletteTop = Math.max(4, terminalHeight - composerReservedRows - STATUSLINE_RESERVED_ROWS - paletteOverlayHeight - 1);
+  const traceProgressAllRows = traceExpanded
+    ? renderTraceProgressRows(view.traceBlocks, contentWidth)
+    : [];
+  const traceProgressDisplayRows = markActiveTraceProgressRow(traceProgressAllRows, traceProgressPaletteKey, contentWidth);
+  const traceProgressRows = traceExpanded
+    ? limitTraceProgressRows(traceProgressDisplayRows, contentWidth, Math.max(6, Math.min(18, Math.floor(terminalHeight * 0.28))))
+    : [];
+  const activeTraceProgressRow = traceProgressPaletteKey
+    ? traceProgressDisplayRows.find((row) => row.key === traceProgressPaletteKey) ?? null
+    : null;
+  const traceDetailPaletteWidth = Math.min(Math.max(48, Math.floor(contentWidth * 0.78)), Math.max(32, contentWidth - 4));
+  const traceDetailPaletteLeft = Math.max(0, Math.floor((contentWidth - traceDetailPaletteWidth) / 2));
+  const traceDetailPaletteHeight = Math.max(
+    TRACE_DETAIL_PALETTE_MIN_ROWS,
+    Math.min(Math.max(TRACE_DETAIL_PALETTE_MIN_ROWS, terminalHeight - composerReservedRows - STATUSLINE_RESERVED_ROWS - 7), Math.floor(terminalHeight * 0.56)),
+  );
+  const traceDetailVisibleRows = Math.max(1, traceDetailPaletteHeight - 4);
+  const traceDetailPaletteRows = activeTraceProgressRow
+    ? renderTraceDetailPaletteRows({
+      width: traceDetailPaletteWidth,
+      row: activeTraceProgressRow,
+      scrollOffset: traceDetailScrollOffset,
+      visibleRows: traceDetailVisibleRows,
+    })
+    : [];
+  const traceDetailPaletteTop = Math.max(4, Math.floor((terminalHeight - composerReservedRows - STATUSLINE_RESERVED_ROWS - traceDetailPaletteHeight) / 2));
+  const progressRowBudget = traceProgressRows.length;
+  const transcriptViewportHeight = Math.max(1, terminalHeight - 8 - cockpitRowBudget - progressRowBudget - STATUSLINE_RESERVED_ROWS - composerReservedRows);
+  const transcriptBlocks = view.transcriptBlocks;
+  const transcriptRenderRows = flattenTranscriptBlocks(transcriptBlocks, transcriptState, contentWidth);
   const transcriptMetrics: TranscriptMetrics = {
     contentLineCount: transcriptRenderRows.length,
     viewportLineCount: transcriptViewportHeight,
     blockCount: transcriptBlocks.length,
   };
   const visibleTranscriptRows = visibleLineWindow(transcriptRenderRows, transcriptState, transcriptViewportHeight);
-  const traceLabel = traceExpanded ? view.traceExpandedLabel : view.traceCollapsedLabel;
-  const composerLine = composer.text.length > 0 ? renderComposerLine(composer, contentWidth) : `> ${COMPOSER_CURSOR}`;
   const transcriptLineTotal = Math.max(1, transcriptRenderRows.length);
   const transcriptWindowEnd = Math.min(transcriptLineTotal, transcriptState.scrollOffset + transcriptViewportHeight);
   const transcriptPositionLabel = `${String(transcriptWindowEnd)}/${String(transcriptLineTotal)}`;
+  const transcriptFillerRows = Array.from(
+    { length: Math.max(0, transcriptViewportHeight - visibleTranscriptRows.length) },
+    (_, index) => `transcript-filler-${String(index)}`,
+  );
+  const traceLabel = traceExpanded ? view.traceExpandedLabel : view.traceCollapsedLabel;
+  const statuslineProgress = formatOpenTuiStatuslineProgress(spinnerTick, view);
+  const statuslineRows = renderStatuslineRows({
+    width: contentWidth,
+    progress: statuslineProgress,
+    statusline: view.statusline,
+    traceLabel,
+    shellNotice,
+    transcriptPosition: transcriptPositionLabel,
+  });
+  const composerPanelRows = renderComposerPanelRows({
+    width: contentWidth,
+    attachmentLine,
+    attachmentSupported: composer.attachment?.supported ?? false,
+    promptLines: composerPromptRows,
+    previewLine,
+    statusLine: `${String(terminalWidth)}x${String(terminalHeight)} · ${traceLabel} · ${shellNotice}`,
+  });
+  const keyLine = "Keys: Enter send · Esc clear · Tab complete · Alt+V paste-image · ↑/↓ history · PageUp/PageDown Ctrl+Up/Ctrl+Down wheel · Ctrl+P cockpit · Ctrl+T trace · Ctrl+Y copy reply · /reload · /quit";
 
   useEffect(() => {
     setTranscriptState((current) => handleOpenTuiTranscriptEvent(current, {
@@ -247,21 +410,79 @@ export function OpenTuiApp({ view, session, keyboardSource, promptHistory = [], 
   return (
     <box flexDirection="column" width={terminalWidth} height={terminalHeight} padding={1}>
       <text width={contentWidth} fg="#8bd5ff">{view.headerTitle}</text>
-      <text width={contentWidth} fg="#a6adc8">{`${view.providerLabel} | ${view.sessionLabel} | cwd ${view.cwdLabel}`}</text>
-      <box flexDirection="column" width={contentWidth} marginTop={1}>
-        <text width={contentWidth} fg="#f9e2af">status</text>
-        <text width={contentWidth}>{view.statusLabel}</text>
-        <text width={contentWidth} fg="#a6adc8">{view.footerLabel}</text>
-      </box>
+      <text width={contentWidth} fg="#a6adc8">====================</text>
+      <text width={contentWidth} fg="#a6adc8">{`provider ${view.providerLabel.split("/")[0]} | ${view.sessionLabel}`}</text>
+      {view.cockpit.approval.pendingTool ? (
+        <box
+          flexDirection="column"
+          width={paletteWidth}
+          height={5}
+          position="absolute"
+          top={Math.max(4, paletteTop - 6)}
+          left={paletteMarginLeft + 1}
+          zIndex={90}
+          padding={1}
+          shouldFill
+          backgroundColor="#000000"
+        >
+          <text width={paletteWidth} fg="#f9e2af">Approval required</text>
+          <text width={paletteWidth} fg="#f38ba8">{fitLine(`tool ${view.cockpit.approval.pendingTool}`, paletteWidth)}</text>
+          <text width={paletteWidth} fg="#a6adc8">{fitLine(view.cockpit.approval.hints.join(" | "), paletteWidth)}</text>
+        </box>
+      ) : null}
+      {showCockpitPanel ? (
+        <box flexDirection="column" width={contentWidth} marginTop={1}>
+          {cockpitPanelRows.map((row) => (
+            <text key={row} width={contentWidth} fg={row.includes("approval") || row.includes("Controls") ? "#f9e2af" : "#a6adc8"}>
+              {row}
+            </text>
+          ))}
+        </box>
+      ) : null}
+      {traceProgressRows.length > 0 ? (
+        <box flexDirection="column" width={contentWidth}>
+          {traceProgressRows.map((row) => (
+            <text
+              key={row.key}
+              width={contentWidth}
+              fg={row.fg}
+              onMouseUp={(event) => handleTraceProgressRowClick(row, event)}
+            >{row.text}</text>
+          ))}
+        </box>
+      ) : null}
+      {activeTraceProgressRow ? (
+        <box
+          flexDirection="column"
+          width={traceDetailPaletteWidth}
+          height={traceDetailPaletteHeight}
+          position="absolute"
+          top={traceDetailPaletteTop}
+          left={traceDetailPaletteLeft + 1}
+          zIndex={95}
+          padding={0}
+          overflow="hidden"
+          shouldFill
+          backgroundColor="#000000"
+          onMouse={(event) => handleTraceDetailPaletteMouse(event)}
+          onMouseScroll={(event) => handleTraceDetailPaletteMouseScroll(event)}
+        >
+          {traceDetailPaletteRows.map((row) => (
+            <text key={row.key} width={traceDetailPaletteWidth} fg={row.fg}>
+              {row.text}
+            </text>
+          ))}
+        </box>
+      ) : null}
       <box
         flexDirection="column"
         width={contentWidth}
-        height={transcriptViewportHeight + 3}
+        height={transcriptViewportHeight + 1}
         marginTop={1}
         onMouse={(event) => handleTranscriptMouse(event)}
         onMouseScroll={(event) => handleTranscriptMouseScroll(event)}
       >
-        <text width={contentWidth} fg="#f9e2af">transcript</text>
+        <text width={contentWidth} fg="#f9e2af">{chatDividerLine(contentWidth, "top")}</text>
         {visibleTranscriptRows.map((row) => (
           <text
             key={row.key}
@@ -275,10 +496,9 @@ export function OpenTuiApp({ view, session, keyboardSource, promptHistory = [], 
             {row.text}
           </text>
         ))}
-        <text width={contentWidth} fg="#f9e2af">{traceLabel}</text>
-        <text width={contentWidth} fg="#a6adc8">
-          {`${transcriptState.atLatest ? "latest" : "scrolled"} | ${transcriptPositionLabel} | PageUp/PageDown Ctrl+Up/Ctrl+Down wheel | Ctrl+C/Ctrl+Y copy`}
-        </text>
+        {transcriptFillerRows.map((key) => (
+          <text key={key} width={contentWidth}> </text>
+        ))}
       </box>
       {composer.overlayMode !== "none" ? (
         <box
@@ -289,28 +509,47 @@ export function OpenTuiApp({ view, session, keyboardSource, promptHistory = [], 
           top={paletteTop}
           left={paletteMarginLeft + 1}
           zIndex={100}
-          padding={1}
+          padding={0}
           overflow="hidden"
           shouldFill
           backgroundColor="#000000"
         >
-          <text width={paletteWidth} fg="#f9e2af">{commandSurface.title}</text>
-          <text width={paletteWidth} fg="#a6adc8">{fitLine(composer.overlayMode === "history-search" ? "history search" : commandSurface.query, paletteWidth)}</text>
-          {paletteDisplayRows.map((row) => (
+          {palettePanelRows.map((row) => (
             <text key={row.key} width={paletteWidth} fg={row.fg}>
               {row.text}
             </text>
           ))}
-          <text width={paletteWidth} fg="#a6adc8">{paletteFooterLine}</text>
         </box>
       ) : null}
-      <box flexDirection="column" width={contentWidth} marginTop={1}>
-        <text width={contentWidth} fg="#f9e2af">composer</text>
-        {attachmentLine ? <text width={contentWidth} fg={composer.attachment?.supported ? "#f9e2af" : "#f38ba8"}>{attachmentLine}</text> : null}
-        <text width={contentWidth}>{composerLine}</text>
-        {previewLine ? <text width={contentWidth} fg="#a6adc8">{previewLine}</text> : null}
+      <box
+        flexDirection="column"
+        width={contentWidth}
+        height={STATUSLINE_RESERVED_ROWS}
+        position="absolute"
+        top={Math.max(1, terminalHeight - composerReservedRows - STATUSLINE_RESERVED_ROWS)}
+        left={1}
+        zIndex={79}
+        padding={0}
+      >
+        {statuslineRows.map((row) => (
+          <text key={row.key} width={contentWidth} fg={row.fg}>{row.text}</text>
+        ))}
       </box>
-      <text width={contentWidth} fg="#a6adc8">{`${String(terminalWidth)}x${String(terminalHeight)} | ${traceLabel} | ${shellNotice}`}</text>
+      <box
+        flexDirection="column"
+        width={contentWidth}
+        height={composerReservedRows}
+        position="absolute"
+        top={Math.max(1, terminalHeight - composerReservedRows)}
+        left={1}
+        zIndex={80}
+        padding={0}
+      >
+        {composerPanelRows.map((row) => (
+          <text key={row.key} width={contentWidth} fg={row.fg}>{row.text}</text>
+        ))}
+        <text width={contentWidth} fg="#ffffff">{fitLine(keyLine, contentWidth)}</text>
+      </box>
     </box>
   );
 
@@ -326,7 +565,7 @@ export function OpenTuiApp({ view, session, keyboardSource, promptHistory = [], 
       return;
     }
     if (result.intent.kind === "clear-attachment") {
-      setShellNotice("attachment cleared");
+      clearPendingAttachment();
       return;
     }
     if (result.intent.kind === "accept-selection") {
@@ -343,20 +582,11 @@ export function OpenTuiApp({ view, session, keyboardSource, promptHistory = [], 
       return;
     }
     if (prompt === "/detach" || prompt === "/attach clear") {
-      setComposer((current) => setComposerAttachment(current, null));
-      appendOutput("attachment cleared");
-      setShellNotice("attachment cleared");
+      clearPendingAttachment();
       return;
     }
     if (prompt.startsWith("/attach")) {
-      const label = prompt.replace(/^\/attach\s*/i, "").trim();
-      setComposer((current) => setComposerAttachment(current, {
-        label: label.length > 0 ? label : "clipboard",
-        supported: view.imageAttachmentSupported,
-      }));
-      const message = view.imageAttachmentSupported ? "image attached" : "Image attach unavailable for current transport";
-      appendOutput(message);
-      setShellNotice(message);
+      attachImagePath(prompt.replace(/^\/attach\s*/i, "").trim());
       return;
     }
 
@@ -367,32 +597,201 @@ export function OpenTuiApp({ view, session, keyboardSource, promptHistory = [], 
     const intent = createRuntimeCommandIntent(prompt, skillPreview);
     if (intent.kind === "runtime-command" && session) {
       const result = runRuntimeCommand(session, intent.input);
-      if (result?.ok && result.output) {
-        appendOutput(result.output);
-      }
-      if (result && !result.ok) {
-        appendOutput(result.message);
+      const autoInvokeAfterSkill = Boolean(result?.ok && result.autoInvokeAfterSkill);
+      if (result && !autoInvokeAfterSkill) {
+        recordCommandOutputEvent(intent.input, result);
       }
       setShellNotice(result ? result.activity : "command routed");
+      if (autoInvokeAfterSkill) {
+        void submitProviderPrompt(buildActiveSkillExecutionPrompt(session, intent.input), {
+          transcriptPrompt: formatActiveSkillTranscriptPrompt(session),
+          promptSummary: `active skill ${session.activeSkill?.name ?? "selected"} requested`,
+        });
+        return;
+      }
       if (result?.ok && intent.input.trim() === "/quit") {
         onExit();
       }
       return;
     }
-    appendOutput(`prompt queued: ${intent.input}`);
-    setShellNotice(`prompt queued: ${intent.input}`);
-  }
-
-  function appendOutput(output: string): void {
-    const lines = output
-      .split(/\r?\n/)
-      .map((line) => line.trimEnd())
-      .filter((line) => line.length > 0);
-    if (lines.length === 0) {
+    if (!session) {
+      setShellNotice(`prompt queued: ${intent.input}`);
       return;
     }
-    const block = createLocalOutputBlock(`local-output-${Date.now().toString(36)}-${String(lines.length)}`, lines);
-    setOutputBlocks((current) => [...current, block].slice(-20));
+    void submitProviderPrompt(intent.input);
+  }
+
+  function attachImagePath(rawPath: string): void {
+    if (!session) {
+      setShellNotice("attachment unavailable");
+      return;
+    }
+    if (!rawPath.trim()) {
+      void pasteImageFromClipboard();
+      return;
+    }
+    try {
+      const result = applyAttachmentMutationCommand(session, { kind: "attach", rawPath });
+      setPendingImageAttachment(result.attachment);
+      setComposer((current) => setComposerAttachment(current, result.attachment
+        ? { label: formatAttachmentLabel(result.attachment), supported: true }
+        : null));
+      setShellNotice("image attached");
+    } catch (error) {
+      setShellNotice("image attach failed");
+    }
+  }
+
+  async function pasteImageFromClipboard(): Promise<void> {
+    if (!session) {
+      setShellNotice("paste-image unavailable");
+      return;
+    }
+    try {
+      const extracted = extractClipboardImageToTempFile();
+      const result = applyAttachmentMutationCommand(session, { kind: "attach", rawPath: extracted.path });
+      setPendingImageAttachment(result.attachment);
+      setComposer((current) => setComposerAttachment(current, result.attachment
+        ? { label: `${formatAttachmentLabel(result.attachment)} via ${extracted.source}`, supported: true }
+        : null));
+      setShellNotice(`image pasted · ${extracted.source}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setShellNotice(message || ALT_V_UNSUPPORTED_MESSAGE);
+    }
+  }
+
+  function clearPendingAttachment(silent = false): void {
+    setPendingImageAttachment(null);
+    setComposer((current) => setComposerAttachment(current, null));
+    setShellNotice(silent ? "attachment cleared" : "image attachment cleared");
+  }
+
+  async function submitProviderPrompt(
+    prompt: string,
+    display: { transcriptPrompt?: string; promptSummary?: string } = {},
+  ): Promise<void> {
+    if (!session) {
+      return;
+    }
+    if (providerRunningRef.current || session.action.pending) {
+      setShellNotice("turn already running");
+      return;
+    }
+
+    providerRunningRef.current = true;
+    recordRuntimeEvent(session, {
+      kind: "prompt",
+      status: "queued",
+      summary: display.promptSummary ?? "user prompt accepted",
+      detail: formatPromptEventDetail(display.transcriptPrompt ?? prompt),
+    });
+    setRuntimeAction(session, "running", "provider request");
+    refreshRuntimeView();
+    setShellNotice("provider request started");
+
+    try {
+      const autoCompact = maybeCompactConversation(session, prompt);
+      if (autoCompact.compacted) {
+        setRuntimeAction(session, "running", `auto compact · ${autoCompact.beforeTokens} -> ${autoCompact.afterTokens}`);
+        refreshRuntimeView();
+      }
+
+      const attachmentForTurn = pendingImageAttachment;
+      const result = await executeProviderRequest({
+        session,
+        prompt,
+        ...(attachmentForTurn ? { attachments: [attachmentForTurn] } : {}),
+      });
+      if (result.ok) {
+        recordConversationTurn(session, "user", display.transcriptPrompt ?? prompt);
+        recordConversationTurn(session, "assistant", result.output);
+        recordTurnTelemetry(session, prompt, result.output);
+        checkpointNexsightSession(session, "turn");
+        setRuntimeAction(session, "ready", `response received · ${result.provider}`);
+        setShellNotice(`response received · ${result.provider}`);
+        if (attachmentForTurn) {
+          clearPendingAttachment(true);
+        }
+        return;
+      }
+
+      setRuntimeAction(session, "error", result.message);
+      recordRuntimeEvent(session, {
+        kind: "provider",
+        status: "failed",
+        summary: `${result.provider} response failed`,
+        detail: result.detail,
+      });
+      recordRuntimeEvent(session, {
+        kind: "assistant",
+        status: "failed",
+        summary: result.message,
+        detail: `${result.message}\n${result.detail}`,
+      });
+      setShellNotice(result.message);
+      if (attachmentForTurn) {
+        clearPendingAttachment(true);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setRuntimeAction(session, "error", message);
+      recordRuntimeEvent(session, {
+        kind: "provider",
+        status: "failed",
+        summary: "provider request failed",
+        detail: message,
+      });
+      recordRuntimeEvent(session, {
+        kind: "assistant",
+        status: "failed",
+        summary: "provider request failed",
+        detail: message,
+      });
+      setShellNotice("provider request failed");
+    } finally {
+      providerRunningRef.current = false;
+      refreshRuntimeView();
+    }
+  }
+
+  function refreshRuntimeView(): void {
+    if (!session || !mountedRef.current) {
+      return;
+    }
+    setRuntimeView(createOpenTuiRuntimeView(session));
+  }
+
+  function scheduleRuntimeViewRefresh(delayMs: number): void {
+    if (!session || !mountedRef.current || refreshTimerRef.current) {
+      return;
+    }
+    refreshTimerRef.current = setTimeout(() => {
+      refreshTimerRef.current = null;
+      refreshRuntimeView();
+    }, delayMs);
+  }
+
+  function recordCommandOutputEvent(input: string, result: RuntimeCommandResult): void {
+    if (!session) {
+      return;
+    }
+    const detail = result.ok ? result.output : result.message;
+    recordRuntimeEvent(session, {
+      kind: "command",
+      status: result.ok ? "completed" : "failed",
+      summary: result.activity,
+      detail: detail.trim() || result.activity || input.trim(),
+    });
+    refreshRuntimeView();
+  }
+
+  function formatActiveSkillTranscriptPrompt(currentSession: RuntimeSession): string {
+    const skill = currentSession.activeSkill;
+    if (!skill) {
+      return "skill -> selected";
+    }
+    return `skill -> ${skill.name}${skill.args && skill.args !== "(none)" ? ` ${skill.args}` : ""}`;
   }
 
   function updateTranscriptState(event: Parameters<typeof handleOpenTuiTranscriptEvent>[1]): void {
@@ -423,9 +822,60 @@ export function OpenTuiApp({ view, session, keyboardSource, promptHistory = [], 
     event.preventDefault();
   }
 
+  function handleTraceProgressRowClick(row: TraceProgressRow, event: OpenTuiMouseLikeEvent): void {
+    if (row.canToggle) {
+      setTraceProgressPaletteKey((current) => current === row.toggleKey ? null : row.toggleKey);
+      setTraceDetailScrollOffset(0);
+      setShellNotice(row.canToggle ? "trace detail palette" : "trace row selected");
+    }
+    event.stopPropagation();
+    event.preventDefault();
+  }
+
+  function handleTraceDetailPaletteMouse(event: OpenTuiMouseLikeEvent): void {
+    if (event.type === "scroll") {
+      handleTraceDetailPaletteMouseScroll(event);
+    }
+  }
+
+  function handleTraceDetailPaletteMouseScroll(event: OpenTuiMouseLikeEvent): void {
+    const direction = event.scroll?.direction;
+    const legacyButton = event.button;
+    const delta = direction === "up" || legacyButton === 4 ? -3 : 3;
+    scrollTraceDetailPalette(delta);
+    event.stopPropagation();
+    event.preventDefault();
+  }
+
+  function closeTraceDetailPalette(): void {
+    setTraceProgressPaletteKey(null);
+    setTraceDetailScrollOffset(0);
+    setShellNotice("trace detail closed");
+  }
+
+  function scrollTraceDetailPalette(delta: number): void {
+    const lineCount = activeTraceProgressRow ? traceDetailContentLines(activeTraceProgressRow).length : 0;
+    const maxOffset = Math.max(0, lineCount - traceDetailVisibleRows);
+    setTraceDetailScrollOffset((current) => Math.max(0, Math.min(maxOffset, current + delta)));
+    setShellNotice("trace detail scroll");
+  }
+
   function copySelectedTranscriptBlock(): void {
     const selectedBlock = transcriptBlocks[transcriptState.selectedBlockIndex] ?? transcriptBlocks[transcriptBlocks.length - 1];
     const text = selectedBlock ? blockTextForCopy(selectedBlock, transcriptState) : "";
+    if (!text.trim()) {
+      setShellNotice("nothing selected to copy");
+      return;
+    }
+    const copied = copyTextToClipboardOsc52(text);
+    setShellNotice(copied ? COPIED_RESULTS_NOTICE : "copy unavailable");
+  }
+
+  function copyLatestResultBlock(): void {
+    const selectedBlock = [...transcriptBlocks]
+      .reverse()
+      .find((block) => block.kind === "assistant" || block.kind === "result");
+    const text = selectedBlock ? blockTextForFullCopy(selectedBlock) : "";
     if (!text.trim()) {
       setShellNotice("nothing selected to copy");
       return;
@@ -445,40 +895,255 @@ interface TranscriptRenderRow {
   canToggle: boolean;
 }
 
-function flattenTranscriptBlocks(blocks: OpenTuiTranscriptBlock[], state: OpenTuiTranscriptState): TranscriptRenderRow[] {
+interface TraceProgressRow {
+  key: string;
+  text: string;
+  fg: string;
+  toggleKey: string;
+  canToggle: boolean;
+  detailLines: string[];
+}
+
+function flattenTranscriptBlocks(blocks: OpenTuiTranscriptBlock[], state: OpenTuiTranscriptState, width: number): TranscriptRenderRow[] {
   return blocks.flatMap((block, blockIndex) => {
     const selected = blockIndex === state.selectedBlockIndex;
     const expanded = isBlockExpanded(state, block.id, block.collapsedByDefault);
     const detailAvailable = block.detailLines.length > block.summaryLines.length || block.collapsedByDefault;
-    const label = `${selected ? "> " : "  "}${block.label}${detailAvailable ? (expanded ? " [-]" : " [+]") : ""}`;
-    const lines = expanded ? block.detailLines : block.summaryLines;
-    return [
-      {
-        key: `${block.id}-label`,
-        text: label,
-        fg: selected ? "#8bd5ff" : "#f9e2af",
-        blockId: block.id,
+    const rawLines = expanded ? block.detailLines : block.summaryLines;
+    const lines = block.kind === "assistant" || block.kind === "result"
+      ? renderMarkdownDisplayLines(rawLines)
+      : rawLines;
+    if (!expanded && isCompactTranscriptBlock(block.kind)) {
+      const compactLabel = compactTranscriptBlockLabel(block);
+      return [createTranscriptRenderRow({
+        key: `${block.id}-compact`,
+        text: fitLine(`${selected ? "> " : "  "}${compactTranscriptBlockIcon(block.kind)} ${compactLabel}${detailAvailable ? " [+]" : ""}`, width),
+        fg: selected ? "#8bd5ff" : transcriptBlockAccent(block.kind),
+        block,
         blockIndex,
         isLabel: true,
         canToggle: detailAvailable,
-      },
-      ...lines.map((line, lineIndex) => ({
-        key: `${block.id}-${String(lineIndex)}`,
-        text: `    ${line}`,
-        fg: block.kind === "trace" || block.kind === "tool" ? "#a6adc8" : undefined,
-        blockId: block.id,
+      })];
+    }
+    const frameTitle = `${transcriptBlockDisplayLabel(block)}${detailAvailable ? (expanded ? " [-]" : " [+]") : ""}`;
+    const fg = transcriptBlockAccent(block.kind);
+    const bodyFg = transcriptBlockBodyColor(block.kind);
+    const innerWidth = Math.max(12, width - 6);
+    const top = `${selected ? "> " : "  "}${frameTop(` ${frameTitle} `, innerWidth)}`;
+    const bottom = `  ${frameBottom(innerWidth)}`;
+    return [
+      createTranscriptRenderRow({
+        key: `${block.id}-label`,
+        text: fitFrameLine(top, width),
+        fg: selected ? "#8bd5ff" : fg,
+        block,
+        blockIndex,
+        isLabel: true,
+        canToggle: detailAvailable,
+      }),
+      ...lines.flatMap((line, lineIndex) => wrapOpenFrameBodyRows(line, innerWidth).map((wrappedLine, wrapIndex) => createTranscriptRenderRow({
+        key: `${block.id}-${String(lineIndex)}-${String(wrapIndex)}`,
+        text: fitFrameLine(`    ${wrappedLine}`, width),
+        fg: bodyFg,
+        block,
         blockIndex,
         isLabel: false,
         canToggle: detailAvailable,
-      })),
+      }))),
+      createTranscriptRenderRow({
+        key: `${block.id}-bottom`,
+        text: fitFrameLine(bottom, width),
+        fg,
+        block,
+        blockIndex,
+        isLabel: false,
+        canToggle: detailAvailable,
+      }),
     ];
   });
+}
+
+function renderTraceProgressRows(blocks: OpenTuiTranscriptBlock[], width: number): TraceProgressRow[] {
+  return renderTraceProgressEventRows(blocks.flatMap((block) => block.detailLines), width);
+}
+
+function markActiveTraceProgressRow(rows: TraceProgressRow[], activeKey: string | null, width: number): TraceProgressRow[] {
+  if (!activeKey) {
+    return rows;
+  }
+  return rows.map((row) => {
+    if (row.key !== activeKey || !row.canToggle) {
+      return row;
+    }
+    return {
+      ...row,
+      text: fitLine(row.text.replace(/ \[\+\]$/, " [-]"), width),
+    };
+  });
+}
+
+function limitTraceProgressRows(rows: TraceProgressRow[], width: number, maxRows: number): TraceProgressRow[] {
+  if (rows.length <= maxRows) {
+    return rows;
+  }
+  const headCount = Math.min(3, Math.max(1, Math.floor(maxRows / 4)));
+  const tailCount = Math.max(1, maxRows - headCount - 1);
+  return [
+    ...rows.slice(0, headCount),
+    {
+      key: "trace-progress-overflow",
+      text: fitLine(`  ... ${String(rows.length - headCount - tailCount)} older progress events`, width),
+      fg: "#6c7086",
+      toggleKey: "trace-progress-overflow",
+      canToggle: false,
+      detailLines: [],
+    },
+    ...rows.slice(rows.length - tailCount),
+  ];
+}
+
+function renderTraceProgressEventRows(lines: string[], width: number): TraceProgressRow[] {
+  const rows: TraceProgressRow[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? "";
+    const detailLines: string[] = [];
+    while (lines[index + 1]?.startsWith("  ")) {
+      detailLines.push(lines[index + 1] ?? "");
+      index += 1;
+    }
+    const row = parseTraceProgressLine(line, detailLines, width);
+    if (!row) {
+      continue;
+    }
+    rows.push(row);
+  }
+  return rows;
+}
+
+function parseTraceProgressLine(line: string, detailLines: string[], width: number): TraceProgressRow | null {
+  const parts = line.split(" | ");
+  if (parts.length < 4 || !/^\d{4}-\d{2}-\d{2}T/.test(parts[0] ?? "")) {
+    return null;
+  }
+  const kind = parts[1] ?? "event";
+  const status = parts[2] ?? "queued";
+  const summary = parts.slice(3).join(" | ");
+  const statusMark = status === "completed" ? "ok"
+    : status === "failed" || status === "blocked" ? "!"
+      : status === "started" ? ">"
+        : "-";
+  const compactSummary = formatTraceProgressSummary(kind, status, summary);
+  const metrics = formatTraceProgressMetricBadge(detailLines);
+  const key = `trace-progress-${parts[0]}-${kind}-${status}-${summary}`;
+  const hasDetail = detailLines.length > 0;
+  const suffix = hasDetail ? " [+]" : "";
+  const fg = status === "failed" || status === "blocked" ? "#f38ba8"
+    : kind === "tool" ? "#89b4fa"
+      : kind === "assistant" || kind === "provider" ? "#cba6f7"
+        : "#a6adc8";
+  return {
+    key,
+    text: fitLine(`${statusMark} ${compactSummary}${metrics ? ` · ${metrics}` : ""}${suffix}`, width),
+    fg,
+    toggleKey: key,
+    canToggle: hasDetail,
+    detailLines,
+  };
+}
+
+function formatTraceProgressMetricBadge(detailLines: string[]): string {
+  const detail = detailLines.map((line) => line.trim()).join("; ");
+  const duration = readTraceProgressMetric(detail, "duration");
+  const inputTokens = readTraceProgressMetric(detail, "turn_in") ?? readTraceProgressMetric(detail, "in");
+  const outputTokens = readTraceProgressMetric(detail, "turn_out") ?? readTraceProgressMetric(detail, "out");
+  return [
+    duration,
+    inputTokens ? `↓ ${inputTokens}` : null,
+    outputTokens ? `↑ ${outputTokens}` : null,
+  ].filter((value): value is string => Boolean(value)).join(" ");
+}
+
+function readTraceProgressMetric(detail: string, key: "duration" | "in" | "out" | "turn_in" | "turn_out"): string | null {
+  const separator = key === "duration" ? "=" : "~";
+  const match = new RegExp(`(?:^|[;\\s])${key}${separator}([^;\\s]+)`).exec(detail);
+  return match?.[1] ?? null;
+}
+
+function traceDetailContentLines(row: TraceProgressRow): string[] {
+  return [
+    row.text.replace(/ \[[+-]\]$/, ""),
+    ...row.detailLines.map((line) => line.trimStart()),
+  ];
+}
+
+function renderTraceDetailPaletteRows(options: {
+  width: number;
+  row: TraceProgressRow;
+  scrollOffset: number;
+  visibleRows: number;
+}): Array<{ key: string; text: string; fg: string }> {
+  const innerWidth = Math.max(12, options.width - 4);
+  const contentLines = traceDetailContentLines(options.row);
+  const maxOffset = Math.max(0, contentLines.length - options.visibleRows);
+  const scrollOffset = Math.max(0, Math.min(maxOffset, options.scrollOffset));
+  const visibleLines = contentLines.slice(scrollOffset, scrollOffset + options.visibleRows);
+  const paddedLines = Array.from({ length: options.visibleRows }, (_, index) => visibleLines[index] ?? "");
+  const footer = contentLines.length > options.visibleRows
+    ? `${String(scrollOffset + 1)}-${String(Math.min(contentLines.length, scrollOffset + options.visibleRows))}/${String(contentLines.length)} · wheel/PageUp/PageDown · Esc close`
+    : "Esc close";
+  return [
+    { key: "trace-detail-top", text: frameTop(" Trace detail ", innerWidth), fg: "#89b4fa" },
+    ...paddedLines.map((line, index) => ({
+      key: `trace-detail-row-${String(scrollOffset)}-${String(index)}`,
+      text: frameBody(line, innerWidth),
+      fg: index === 0 && scrollOffset === 0 ? options.row.fg : "#cdd6f4",
+    })),
+    { key: "trace-detail-footer", text: frameBody(footer, innerWidth), fg: "#a6adc8" },
+    { key: "trace-detail-bottom", text: frameBottom(innerWidth), fg: "#89b4fa" },
+  ].map((row) => ({ ...row, text: fitFrameLine(row.text, options.width) }));
+}
+
+function formatTraceProgressSummary(kind: string, status: string, summary: string): string {
+  if (kind === "tool") {
+    const toolName = summary
+      .replace(/^tool\s+/, "")
+      .replace(/\s+(started|completed|failed|blocked)$/i, "");
+    return `tool ${toolName} ${status}`;
+  }
+  if (kind === "prompt") {
+    return `prompt ${status} · ${summary}`;
+  }
+  return `${kind} ${status} · ${summary}`;
+}
+
+function createTranscriptRenderRow(options: {
+  key: string;
+  text: string;
+  fg?: string;
+  block: OpenTuiTranscriptBlock;
+  blockIndex: number;
+  isLabel: boolean;
+  canToggle: boolean;
+}): TranscriptRenderRow {
+  return {
+    key: options.key,
+    text: options.text,
+    fg: options.fg,
+    blockId: options.block.id,
+    blockIndex: options.blockIndex,
+    isLabel: options.isLabel,
+    canToggle: options.canToggle,
+  };
 }
 
 function blockTextForCopy(block: OpenTuiTranscriptBlock, state: OpenTuiTranscriptState): string {
   const expanded = isBlockExpanded(state, block.id, block.collapsedByDefault);
   const lines = expanded ? block.detailLines : block.summaryLines;
   return [`${block.label}:`, ...lines].join("\n");
+}
+
+function blockTextForFullCopy(block: OpenTuiTranscriptBlock): string {
+  return [`${block.label}:`, ...block.detailLines].join("\n");
 }
 
 function copyTextToClipboardOsc52(text: string): boolean {
@@ -491,9 +1156,209 @@ function copyTextToClipboardOsc52(text: string): boolean {
   }
 }
 
+function renderComposerPromptRows(composer: OpenTuiComposerState, width: number): string[] {
+  if (composer.text.length === 0) {
+    return [`> ${COMPOSER_CURSOR}`];
+  }
+  const rendered = renderComposerLine(composer, width);
+  return rendered.split("\n").slice(-COMPOSER_VISIBLE_PROMPT_ROWS);
+}
+
+function composerPanelHeight(promptRowCount: number, hasAttachment: boolean): number {
+  return 5 + promptRowCount + (hasAttachment ? 1 : 0);
+}
+
 function renderComposerLine(composer: OpenTuiComposerState, width: number): string {
   const cursorIndex = Math.max(0, Math.min(composer.text.length, composer.cursorIndex));
-  return fitLine(`> ${composer.text.slice(0, cursorIndex)}${COMPOSER_CURSOR}${composer.text.slice(cursorIndex)}`, width);
+  const withCursor = `${composer.text.slice(0, cursorIndex)}${COMPOSER_CURSOR}${composer.text.slice(cursorIndex)}`;
+  return withCursor
+    .split("\n")
+    .map((line, index) => fitLine(`${index === 0 ? "> " : "  "}${line}`, width))
+    .join("\n");
+}
+
+function renderComposerPanelRows(options: {
+  width: number;
+  attachmentLine: string | null;
+  attachmentSupported: boolean;
+  promptLines: string[];
+  previewLine: string;
+  statusLine: string;
+}): Array<{ key: string; text: string; fg: string }> {
+  const innerWidth = Math.max(12, options.width - 4);
+  const rows: Array<{ key: string; text: string; fg: string }> = [
+    { key: "composer-top", text: frameTop(" composer ", innerWidth), fg: "#ffffff" },
+  ];
+  if (options.attachmentLine) {
+    rows.push({
+      key: "composer-attachment",
+      text: frameBody(options.attachmentLine, innerWidth),
+      fg: options.attachmentSupported ? "#f9e2af" : "#f38ba8",
+    });
+  }
+  rows.push(
+    ...options.promptLines.map((line, index) => ({
+      key: `composer-prompt-${String(index)}`,
+      text: frameBody(line, innerWidth),
+      fg: "#ffffff",
+    })),
+    { key: "composer-preview", text: frameBody(options.previewLine, innerWidth), fg: "#a6adc8" },
+    { key: "composer-status", text: frameBody(options.statusLine, innerWidth), fg: "#a6adc8" },
+    { key: "composer-bottom", text: frameBottom(innerWidth), fg: "#ffffff" },
+  );
+  return rows.map((row) => ({ ...row, text: fitFrameLine(row.text, options.width) }));
+}
+
+function frameTop(title: string, innerWidth: number): string {
+  const safeTitle = title.length > innerWidth ? title.slice(0, innerWidth) : title;
+  return `╭${safeTitle}${"─".repeat(Math.max(0, innerWidth - safeTitle.length + 2))}╮`;
+}
+
+function frameBottom(innerWidth: number): string {
+  return `╰${"─".repeat(innerWidth + 2)}╯`;
+}
+
+function frameBody(line: string, innerWidth: number): string {
+  return `│ ${fitLine(line, innerWidth).padEnd(innerWidth)} │`;
+}
+
+function wrapOpenFrameBodyRows(line: string, innerWidth: number): string[] {
+  return wrapPlainLine(line, innerWidth + 2).map((part) => part);
+}
+
+function transcriptBlockDisplayLabel(block: OpenTuiTranscriptBlock): string {
+  if (block.kind === "user") {
+    return "user";
+  }
+  if (block.kind === "assistant") {
+    return "agent";
+  }
+  return block.label;
+}
+
+function isCompactTranscriptBlock(kind: OpenTuiTranscriptBlock["kind"]): boolean {
+  return kind === "tool" || kind === "skill" || kind === "command" || kind === "trace" || kind === "system";
+}
+
+function compactTranscriptBlockIcon(kind: OpenTuiTranscriptBlock["kind"]): string {
+  if (kind === "tool") {
+    return "🔧";
+  }
+  if (kind === "skill") {
+    return "$";
+  }
+  if (kind === "command") {
+    return "›";
+  }
+  if (kind === "trace") {
+    return "…";
+  }
+  return "!";
+}
+
+function compactTranscriptBlockLabel(block: OpenTuiTranscriptBlock): string {
+  if (block.kind === "tool") {
+    return block.label;
+  }
+  const first = block.summaryLines[0] ?? block.detailLines[0] ?? "";
+  return first ? `${block.label} · ${first}` : block.label;
+}
+
+function transcriptBlockAccent(kind: OpenTuiTranscriptBlock["kind"]): string {
+  if (kind === "user") {
+    return "#ffffff";
+  }
+  if (kind === "skill") {
+    return "#8bd5ff";
+  }
+  if (kind === "tool" || kind === "trace") {
+    return "#89b4fa";
+  }
+  if (kind === "command" || kind === "system") {
+    return "#a6adc8";
+  }
+  return "#f9e2af";
+}
+
+function transcriptBlockBodyColor(kind: OpenTuiTranscriptBlock["kind"]): string | undefined {
+  if (kind === "tool" || kind === "trace") {
+    return "#89b4fa";
+  }
+  if (kind === "user" || kind === "skill" || kind === "command" || kind === "system") {
+    return "#a6adc8";
+  }
+  return undefined;
+}
+
+function fitFrameLine(line: string, width: number): string {
+  if (line.length <= width) {
+    return line;
+  }
+  return line.slice(0, Math.max(0, width));
+}
+
+function chatDividerLine(width: number, edge: "top" | "bottom"): string {
+  const rule = "─".repeat(Math.max(0, width - 2));
+  return edge === "top" ? `╭${rule}╮` : `╰${rule}╯`;
+}
+
+function wrapPlainLine(line: string, width: number): string[] {
+  const maxLength = Math.max(1, width);
+  const normalized = line.replace(/\t/g, "  ").trimEnd();
+  if (normalized.length <= maxLength) {
+    return [normalized];
+  }
+  const rows: string[] = [];
+  let remaining = normalized;
+  while (remaining.length > maxLength) {
+    const slice = remaining.slice(0, maxLength + 1);
+    const breakAt = Math.max(slice.lastIndexOf(" "), slice.lastIndexOf("/"), slice.lastIndexOf("-"));
+    const cut = breakAt > Math.floor(maxLength * 0.45) ? breakAt + 1 : maxLength;
+    rows.push(remaining.slice(0, cut).trimEnd());
+    remaining = remaining.slice(cut).trimStart();
+  }
+  if (remaining.length > 0) {
+    rows.push(remaining);
+  }
+  return rows.length > 0 ? rows : [""];
+}
+
+function renderMarkdownDisplayLines(lines: string[]): string[] {
+  const rendered: string[] = [];
+  let inFence = false;
+  for (const rawLine of lines) {
+    const line = rawLine.trimEnd();
+    const fence = line.match(/^```\s*([A-Za-z0-9_-]+)?\s*$/);
+    if (fence) {
+      inFence = !inFence;
+      const language = fence[1];
+      if (inFence && language) {
+        rendered.push(`${language}:`);
+      }
+      continue;
+    }
+    if (inFence) {
+      rendered.push(`  ${line}`);
+      continue;
+    }
+    const heading = line.match(/^#{1,6}\s+(.+)$/);
+    if (heading?.[1]) {
+      rendered.push(heading[1]);
+      continue;
+    }
+    const bullet = line.match(/^\s*[-*]\s+(.+)$/);
+    if (bullet?.[1]) {
+      rendered.push(`• ${bullet[1]}`);
+      continue;
+    }
+    const numbered = line.match(/^\s*(\d+)\.\s+(.+)$/);
+    if (numbered?.[1] && numbered[2]) {
+      rendered.push(`${numbered[1]}. ${numbered[2]}`);
+      continue;
+    }
+    rendered.push(line.replace(/\*\*([^*]+)\*\*/g, "$1").replace(/`([^`]+)`/g, "$1"));
+  }
+  return rendered.length > 0 ? rendered : lines;
 }
 
 function fitLine(line: string, width: number): string {
@@ -506,6 +1371,73 @@ function fitLine(line: string, width: number): string {
     return singleLine.slice(0, maxLength);
   }
   return `${singleLine.slice(0, maxLength - 3)}...`;
+}
+
+function formatOpenTuiStatuslineProgress(spinnerTick: number, view: OpenTuiRuntimeView): string {
+  if (view.status === "running") {
+    return formatProgressChrome(spinnerTick, { status: view.status as RuntimeSession["action"]["status"], detail: view.detail });
+  }
+  const tokensTotal = view.statusline.lastInputTokens + view.statusline.lastOutputTokens;
+  if (tokensTotal <= 0) {
+    return "";
+  }
+  return formatProgressChrome(spinnerTick, { status: "running", detail: view.detail })
+    .replace(" · running · ", ` · ${view.status} · `);
+}
+
+function renderStatuslineRows(options: {
+  width: number;
+  progress: string;
+  statusline: OpenTuiRuntimeView["statusline"];
+  traceLabel: string;
+  shellNotice: string;
+  transcriptPosition: string;
+}): Array<{ key: string; text: string; fg: string }> {
+  const tokensTotal = options.statusline.lastInputTokens + options.statusline.lastOutputTokens;
+  const progressPrefix = options.progress ? `${options.progress}  ` : "";
+  const memLabel = `${formatMemoryBytes(options.statusline.memoryUsedBytes)}/${formatMemoryBytes(options.statusline.memoryTotalBytes)}`;
+  const gitLabel = `${options.statusline.branch}/${options.statusline.repoName}`;
+  const contextBar = formatContextUsageBar(options.statusline.contextPercent, 20);
+  const row1 = `${progressPrefix}Model: ${formatModelLabel(options.statusline.model)}  Mem: ${memLabel}  Git: ${gitLabel}  Session: ${options.statusline.sessionAge}`;
+  const row2 = `Context: ${contextBar} ${String(options.statusline.contextPercent)}%  nexagent  Total: ${formatCompactNumber(tokensTotal)}  ↓ In: ${formatCompactNumber(options.statusline.lastInputTokens)}  ↑ Out: ${formatCompactNumber(options.statusline.lastOutputTokens)}  ${options.transcriptPosition} · ${options.traceLabel} · ${options.shellNotice}`;
+  return [
+    { key: "status-divider", text: chatDividerLine(options.width, "bottom"), fg: "#f9e2af" },
+    { key: "status-row-1", text: fitLine(row1, options.width), fg: "#f9e2af" },
+    { key: "status-row-2", text: fitLine(row2, options.width), fg: "#a6adc8" },
+  ];
+}
+
+function formatContextUsageBar(percent: number, width: number): string {
+  const barWidth = Math.max(4, width);
+  const clampedPercent = Math.max(0, Math.min(100, Math.round(percent)));
+  const filled = Math.round((clampedPercent / 100) * barWidth);
+  return `[${"=".repeat(filled)}${"-".repeat(barWidth - filled)}]`;
+}
+
+function formatMemoryBytes(bytes: number): string {
+  const gib = bytes / (1024 ** 3);
+  if (gib >= 1) {
+    return `${gib.toFixed(1)}G`;
+  }
+  const mib = bytes / (1024 ** 2);
+  if (mib >= 1) {
+    return `${mib.toFixed(0)}M`;
+  }
+  return `${Math.max(0, bytes).toFixed(0)}B`;
+}
+
+function formatModelLabel(model: string): string {
+  return model.replace(/^gpt-/i, "GPT ").replace(/-/g, " ").toUpperCase();
+}
+
+function formatCompactNumber(value: number): string {
+  if (Math.abs(value) >= 1_000_000) {
+    return `${(value / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
+  }
+  if (Math.abs(value) >= 1_000) {
+    return `${(value / 1_000).toFixed(1).replace(/\.0$/, "")}k`;
+  }
+  return String(value);
 }
 
 function rowsForOverlay(
@@ -535,10 +1467,10 @@ function createPaletteDisplayRows(
   width: number,
 ): Array<{ key: string; text: string; fg: string }> {
   const rows = paletteRows.length > 0
-    ? visibleRows.map((row) => ({
-      key: `palette-${row.value}`,
+    ? visibleRows.map((row, index) => ({
+      key: `palette-${String(index)}-${row.selected ? "selected" : "row"}-${row.value}`,
       text: fitLine(`${row.selected ? "> " : "  "}${row.label} ${row.hint}`, width),
-      fg: row.selected ? "#8bd5ff" : "#a6adc8",
+      fg: row.selected ? "#8bd5ff" : "#cdd6f4",
     }))
     : [{
       key: "palette-empty",
@@ -553,6 +1485,37 @@ function createPaletteDisplayRows(
   });
 }
 
+function renderPalettePanelRows(options: {
+  width: number;
+  title: string;
+  query: string;
+  displayRows: Array<{ key: string; text: string; fg: string }>;
+  footerLine: string;
+}): Array<{ key: string; text: string; fg: string }> {
+  const innerWidth = Math.max(12, options.width - 4);
+  return [
+    { key: "palette-top", text: frameTop(` ${options.title} `, innerWidth), fg: "#f9e2af" },
+    { key: "palette-query", text: frameBody(options.query, innerWidth), fg: "#a6adc8" },
+    ...options.displayRows.map((row) => ({
+      key: row.key,
+      text: frameBody(row.text, innerWidth),
+      fg: row.fg,
+    })),
+    { key: "palette-footer", text: frameBody(options.footerLine, innerWidth), fg: "#a6adc8" },
+    { key: "palette-bottom", text: frameBottom(innerWidth), fg: "#f9e2af" },
+  ].map((row) => ({ ...row, text: fitFrameLine(row.text, options.width) }));
+}
+
+function paletteTitleForOverlay(composer: OpenTuiComposerState, commandSurfaceTitle: string): string {
+  if (composer.overlayMode === "history-search") {
+    return "History";
+  }
+  if (composer.overlayMode === "skill") {
+    return "$ Skills";
+  }
+  return commandSurfaceTitle;
+}
+
 function visiblePaletteWindow(rows: CommandPaletteRow[], selectedIndex: number, maxRows: number): CommandPaletteRow[] {
   if (rows.length <= maxRows) {
     return rows;
@@ -561,4 +1524,37 @@ function visiblePaletteWindow(rows: CommandPaletteRow[], selectedIndex: number, 
   const halfWindow = Math.floor(maxRows / 2);
   const start = Math.max(0, Math.min(rows.length - maxRows, clampedIndex - halfWindow));
   return rows.slice(start, start + maxRows);
+}
+
+function renderCockpitPanelRows(options: {
+  width: number;
+  warningRows: OpenTuiRuntimeView["cockpit"]["warnings"];
+  warningOverflow: number;
+  ladder: OpenTuiRuntimeView["cockpit"]["ladder"];
+  memoryRows: string[];
+  overrideHints: string[];
+  risk: string;
+  compact: boolean;
+}): string[] {
+  const innerWidth = Math.max(20, options.width - 4);
+  const title = " status ";
+  const top = `╭${title}${"─".repeat(Math.max(0, innerWidth - title.length))}╮`;
+  const bottom = `╰${"─".repeat(innerWidth + 2)}╯`;
+  const warningLine = options.warningRows.length > 0
+    ? options.warningRows.map((warning) => `${warning.type} ${warning.message}`).join(" | ")
+    : "clear";
+  const overflow = options.warningOverflow > 0 ? ` (+${String(options.warningOverflow)})` : "";
+  const body = [
+    `Turn      ${options.ladder.intent}`,
+    `Progress  ${options.ladder.plan} -> ${options.ladder.act} -> ${options.ladder.result}`,
+    `Signals   ${warningLine}${overflow}`,
+    ...(options.compact ? options.memoryRows.slice(0, 1) : options.memoryRows),
+    `Controls  ${options.overrideHints.join(" | ")}`,
+    `State     ${options.risk}`,
+  ];
+  return [
+    fitLine(top, options.width),
+    ...body.map((line) => fitLine(`│ ${line.padEnd(innerWidth)} │`, options.width)),
+    fitLine(bottom, options.width),
+  ];
 }

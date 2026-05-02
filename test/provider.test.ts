@@ -600,6 +600,100 @@ test("executeProviderRequest accepts attribute-style internal tool calls", async
   );
 });
 
+test("executeProviderRequest accepts generic tool_call XML with argument children", async () => {
+  const session = createSession();
+  const result = await executeProviderRequest(
+    {
+      session,
+      prompt: "check git",
+    },
+    {
+      exec: async (request) => {
+        if (!request.prompt.includes("Internal tool transcript")) {
+          return {
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            output: '<tool_call name="git_status"><arg name="path">/home/pfchrono/code/nexagent</arg></tool_call>',
+          };
+        }
+
+        return {
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+          output: "repo status checked",
+        };
+      },
+      http: async () => {
+        throw new Error("http should not be used");
+      },
+      codexHttp: async () => {
+        throw new Error("codex-http should not be used");
+      },
+    },
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.output, "repo status checked");
+  assert.equal(
+    session.events.some((event) => event.kind === "tool" && event.summary === "tool git_status completed"),
+    true,
+  );
+});
+
+test("executeProviderRequest accepts bare internal tool XML tags", async () => {
+  const session = createSession();
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-provider-bare-tool-"));
+  session.cwd = cwd;
+  session.repo.root = cwd;
+  session.toolPolicy.allowedRoots = [cwd];
+  await writeFile(path.join(cwd, "progress.md"), "phase 70\n", "utf8");
+
+  try {
+    const result = await executeProviderRequest(
+      {
+        session,
+        prompt: "read progress",
+      },
+      {
+        exec: async (request) => {
+          if (!request.prompt.includes("Internal tool transcript")) {
+            return {
+              exitCode: 0,
+              stdout: "",
+              stderr: "",
+              output: `<read_file path="${path.join(cwd, "progress.md")}" />`,
+            };
+          }
+
+          return {
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            output: "progress checked",
+          };
+        },
+        http: async () => {
+          throw new Error("http should not be used");
+        },
+        codexHttp: async () => {
+          throw new Error("codex-http should not be used");
+        },
+      },
+    );
+
+    assert.equal(result.ok, true);
+    assert.equal(result.output, "progress checked");
+    assert.equal(
+      session.events.some((event) => event.kind === "tool" && event.summary === "tool read_file completed"),
+      true,
+    );
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test("executeProviderRequest repairs multiline JSON strings in tool markup", async () => {
   const session = createSession();
   const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-provider-nexsight-"));
@@ -1033,6 +1127,10 @@ test("executeProviderRequest nudges malformed tool markup instead of surfacing i
     session.events.some((event) => event.kind === "control" && event.summary === "malformed tool call nudge applied"),
     true,
   );
+  assert.equal(
+    session.events.some((event) => event.kind === "control" && event.summary.includes("provider.malformed_tool_call")),
+    true,
+  );
 });
 
 test("executeProviderRequest nudges non-actionable confirmation replies to continue", async () => {
@@ -1414,6 +1512,10 @@ test("executeProviderRequest blocks repeated file-change claims without write ev
       true,
     );
     assert.equal(
+      session.events.some((event) => event.kind === "control" && event.summary.includes("provider.missing_evidence")),
+      true,
+    );
+    assert.equal(
       session.events.some((event) => event.kind === "assistant" && event.status === "completed"),
       false,
     );
@@ -1708,6 +1810,24 @@ test("executeProviderRequest injects archivist retrieval into prompt and state",
             projectPath: cwd,
             tags: ["auth", "codex-http"],
           },
+          {
+            type: "note",
+            summary: "duplicate signal sample",
+            content: "duplicate signal sample",
+            projectPath: cwd,
+          },
+          {
+            type: "note",
+            summary: "duplicate signal sample",
+            content: "duplicate signal sample",
+            projectPath: cwd,
+          },
+          {
+            type: "note",
+            summary: "tiny",
+            content: "tiny",
+            projectPath: cwd,
+          },
         ],
       }),
       "utf8",
@@ -1746,6 +1866,10 @@ test("executeProviderRequest injects archivist retrieval into prompt and state",
     assert.equal(session.archivist.retrieval.sourceCategory, "project-memory");
     assert.equal(session.archivist.retrieval.matchCount, 1);
     assert.match(session.archivist.retrieval.preview ?? "", /chatgpt backend/);
+    assert.equal(session.archivist.diagnostics?.retrievalMatchCount, 1);
+    assert.equal(session.archivist.diagnostics?.retrievalSourceCategory, "project-memory");
+    assert.equal(session.archivist.diagnostics?.duplicateSuspectCount, 1);
+    assert.equal(session.archivist.diagnostics?.noisySignalCount, 1);
     assert.deepEqual(result, {
       ok: true,
       provider: "codex",

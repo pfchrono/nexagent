@@ -149,9 +149,20 @@ function skillPaletteHint(skill: RuntimeSkillDefinition): string {
 
 function surfaceTitle(trimmed: string): string {
   if (trimmed.startsWith("$") || trimmed.startsWith("/skill")) {
-    return "Select skill";
+    return "$ Skills";
   }
-  return "Command palette";
+  if (trimmed.startsWith("/") && !trimmed.includes(" ")) {
+    return "/ Commands";
+  }
+  if (completionLooksLikePath(trimmed)) {
+    return "Files";
+  }
+  return "Suggestions";
+}
+
+function completionLooksLikePath(trimmed: string): boolean {
+  const token = trimmed.split(/\s+/).at(-1) ?? "";
+  return token.startsWith("./") || token.startsWith("../") || token.startsWith("~/") || token.startsWith("/");
 }
 
 function parseSkillInput(input: string): { skillName: string; rawArgs: string } | null {

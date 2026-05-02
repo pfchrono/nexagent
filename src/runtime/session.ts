@@ -56,8 +56,10 @@ export interface RuntimeCompactionSnapshot {
 }
 
 export interface RuntimeCompactionState {
+  enabled?: boolean;
   thresholdPercent: number;
   modelThresholdOverrides: Record<string, number>;
+  preserveTurns?: number;
   queuedUserMessage: string | null;
   summary: string | null;
   snapshot: RuntimeCompactionSnapshot | null;
@@ -116,6 +118,27 @@ export interface RuntimeSession extends RuntimeState {
   debug?: RuntimeDebugState;
 }
 
+export type RuntimeSessionListener = () => void;
+
+const runtimeSessionListeners = new WeakMap<RuntimeSession, Set<RuntimeSessionListener>>();
+const runtimeSessionRevisions = new WeakMap<RuntimeSession, number>();
+
+export function subscribeRuntimeSession(session: RuntimeSession, listener: RuntimeSessionListener): () => void {
+  const listeners = runtimeSessionListeners.get(session) ?? new Set<RuntimeSessionListener>();
+  listeners.add(listener);
+  runtimeSessionListeners.set(session, listeners);
+  return () => {
+    listeners.delete(listener);
+    if (listeners.size === 0) {
+      runtimeSessionListeners.delete(session);
+    }
+  };
+}
+
+export function getRuntimeSessionRevision(session: RuntimeSession): number {
+  return runtimeSessionRevisions.get(session) ?? 0;
+}
+
 export function createRuntimeSession(runtime: RuntimeBootstrap): RuntimeSession {
   const runtimeState = createRuntimeState(runtime);
   const operationControls = createRuntimeOperationControlsState();
@@ -128,7 +151,7 @@ export function createRuntimeSession(runtime: RuntimeBootstrap): RuntimeSession 
     telemetry: createRuntimeTurnTelemetryState(),
     events: createRuntimeEventLog(),
     conversation: [],
-    compaction: createRuntimeCompactionState(),
+    compaction: createRuntimeCompactionState(runtime.config.compaction),
     operationControls,
     debug: createRuntimeDebugState(),
     ...runtimeState,
@@ -162,10 +185,12 @@ export function createRuntimeEventLog(): RuntimeEvent[] {
   }];
 }
 
-export function createRuntimeCompactionState(): RuntimeCompactionState {
+export function createRuntimeCompactionState(settings?: RuntimeBootstrap["config"]["compaction"]): RuntimeCompactionState {
   return {
-    thresholdPercent: 0.5,
-    modelThresholdOverrides: {},
+    enabled: settings?.enabled ?? true,
+    thresholdPercent: settings?.thresholdPercent ?? 0.5,
+    modelThresholdOverrides: settings?.modelThresholdOverrides ?? {},
+    preserveTurns: settings?.preserveTurns ?? 4,
     queuedUserMessage: null,
     summary: null,
     snapshot: null,
@@ -208,6 +233,7 @@ export function setRuntimeAction(
   session.action.detail = detail;
   session.action.pending = status === "running";
   session.action.lastActivity = activityAt;
+  notifyRuntimeSessionChanged(session);
 }
 
 export function deriveTurnCompletionState(session: RuntimeSession): RuntimeTurnCompletionSummary {
@@ -299,13 +325,32 @@ export function recordRuntimeEvent(
   if (session.events.length > 200) {
     session.events.splice(0, session.events.length - 200);
   }
+  notifyRuntimeSessionChanged(session);
   return entry;
 }
 
 export function recordTurnTelemetry(session: RuntimeSession, input: string, output: string): void {
+  const turnMetrics = collectCurrentTurnTokenMetrics(session);
   session.telemetry.turnCount += 1;
-  session.telemetry.lastInputTokens = estimateTokenCount(input);
-  session.telemetry.lastOutputTokens = estimateTokenCount(output);
+  session.telemetry.lastInputTokens = turnMetrics.inputTokens || estimateTokenCount(input);
+  session.telemetry.lastOutputTokens = turnMetrics.outputTokens || estimateTokenCount(output);
+  notifyRuntimeSessionChanged(session);
+}
+
+function collectCurrentTurnTokenMetrics(session: RuntimeSession): { inputTokens: number; outputTokens: number } {
+  const promptIndex = [...session.events].map((event) => event.kind).lastIndexOf("prompt");
+  const events = promptIndex >= 0 ? session.events.slice(promptIndex) : session.events;
+  return events.reduce((metrics, event) => {
+    const detail = event.detail ?? "";
+    metrics.inputTokens += readMetricTokenCount(detail, "in");
+    metrics.outputTokens += readMetricTokenCount(detail, "out");
+    return metrics;
+  }, { inputTokens: 0, outputTokens: 0 });
+}
+
+function readMetricTokenCount(detail: string, key: "in" | "out"): number {
+  const match = new RegExp(`(?:^|[;\\s])${key}~(\\d+)`).exec(detail);
+  return match ? Number.parseInt(match[1] ?? "0", 10) : 0;
 }
 
 export function recordConversationTurn(session: RuntimeSession, role: RuntimeConversationTurn["role"], content: string): void {
@@ -314,6 +359,18 @@ export function recordConversationTurn(session: RuntimeSession, role: RuntimeCon
     content,
     tokens: estimateTokenCount(content),
   });
+  notifyRuntimeSessionChanged(session);
+}
+
+function notifyRuntimeSessionChanged(session: RuntimeSession): void {
+  runtimeSessionRevisions.set(session, getRuntimeSessionRevision(session) + 1);
+  const listeners = runtimeSessionListeners.get(session);
+  if (!listeners) {
+    return;
+  }
+  for (const listener of [...listeners]) {
+    listener();
+  }
 }
 
 export function maybeCompactConversation(session: RuntimeSession, nextUserMessage: string): {
@@ -324,6 +381,15 @@ export function maybeCompactConversation(session: RuntimeSession, nextUserMessag
 } {
   const beforeTokens = estimateConversationTokens(session, nextUserMessage);
   const thresholdTokens = getCompactionThresholdTokens(session);
+
+  if (session.compaction.enabled === false) {
+    return {
+      compacted: false,
+      trigger: null,
+      beforeTokens,
+      afterTokens: beforeTokens,
+    };
+  }
 
   if (beforeTokens <= thresholdTokens || session.conversation.length < 6) {
     return {
@@ -344,6 +410,7 @@ export function maybeCompactConversation(session: RuntimeSession, nextUserMessag
 }
 
 export function compactConversation(session: RuntimeSession, trigger: "auto" | "manual", queuedUserMessage: string | null = null): number {
+  const beforeTokens = estimateConversationTokens(session);
   session.compaction.status = "compacting";
   session.compaction.queuedUserMessage = queuedUserMessage;
   session.compaction.lastTrigger = trigger;
@@ -353,8 +420,16 @@ export function compactConversation(session: RuntimeSession, trigger: "auto" | "
     summary: `${trigger} compaction started`,
     detail: queuedUserMessage ? `queued user message preserved` : undefined,
   });
+  if (queuedUserMessage) {
+    recordRuntimeEvent(session, {
+      kind: "compact",
+      status: "queued",
+      summary: "compaction queued intent preserved",
+      detail: "queued user message preserved",
+    });
+  }
 
-  const preserveCount = Math.min(4, session.conversation.length);
+  const preserveCount = Math.min(session.compaction.preserveTurns ?? 4, session.conversation.length);
   const preservedTurns = preserveCount > 0 ? session.conversation.slice(-preserveCount) : [];
   const compactedTurns = session.conversation.slice(0, Math.max(0, session.conversation.length - preserveCount));
 
@@ -381,13 +456,14 @@ export function compactConversation(session: RuntimeSession, trigger: "auto" | "
   session.conversation = preservedTurns;
   session.compaction.queuedUserMessage = null;
   session.compaction.status = "idle";
+  const afterTokens = estimateConversationTokens(session);
   recordRuntimeEvent(session, {
     kind: "compact",
     status: "completed",
     summary: `${trigger} compaction completed`,
-    detail: `summary=${session.compaction.summary ? "present" : "none"} · turns=${String(session.conversation.length)}`,
+    detail: `summary=${session.compaction.summary ? "present" : "none"} · turns=${String(session.conversation.length)} · tokens=${String(beforeTokens)}->${String(afterTokens)}`,
   });
-  return estimateConversationTokens(session);
+  return afterTokens;
 }
 
 export function applyProviderSelection(session: RuntimeSession, provider: string): void {

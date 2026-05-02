@@ -9,7 +9,7 @@ import { createCommandSurface, createRuntimeCommandIntent, resolveSkillPreview }
 test("OpenTUI command surface lists slash command palette rows", () => {
   const surface = createCommandSurface(process.cwd(), "/st");
 
-  assert.equal(surface.title, "Command palette");
+  assert.equal(surface.title, "/ Commands");
   assert.ok(surface.rows.some((row) => row.label === "/status"));
 });
 
@@ -46,7 +46,7 @@ test("OpenTUI command surface lists bare skill shorthand with descriptions", () 
   const alpha = surface.rows.find((row) => row.label === "alpha");
   const alpine = surface.rows.find((row) => row.label === "alpine");
 
-  assert.equal(surface.title, "Select skill");
+  assert.equal(surface.title, "$ Skills");
   assert.equal(alpha?.hint, "alpha skill (project)");
   assert.equal(alpine?.hint, "alpine skill (project)");
 });
@@ -95,6 +95,8 @@ test("OpenTUI command surface lists path rows for relative and home tokens", () 
     const relative = createCommandSurface(cwd, "look at ./");
     const homeRows = createCommandSurface(cwd, "look at ~/");
 
+    assert.equal(relative.title, "Files");
+    assert.equal(homeRows.title, "Files");
     assert.ok(relative.rows.some((row) => row.label === "./docs/"));
     assert.ok(homeRows.rows.some((row) => row.label === "~/code/"));
   } finally {

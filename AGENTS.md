@@ -7,7 +7,7 @@ Canonical guidance for coding agents working in `nexagent`.
 ## Current Runtime
 
 - TypeScript CLI/runtime under `src/`
-- terminal TUI in `src/cli.ts`
+- default interactive OpenTUI shell in `src/opentui/`
 - provider transports: `cli-exec`, `http-responses`, `codex-http`
 - layered prompt/instruction assembly in `src/runtime/instructions.ts`
 - guarded repo-local internal tools:
@@ -22,13 +22,15 @@ Canonical guidance for coding agents working in `nexagent`.
   - `shell_command`
   - `archivist_save`
   - `archivist_checkpoint`
-- slash commands including `/status`, `/provider`, `/model`, `/tools`, `/memory`, `/skill`, `/attach`, `/mouse`, `/approval`, `/compact`, `/diff`, `/rg`
+- slash commands including `/status`, `/status --sentry`, `/provider`, `/model`, `/tools`, `/memory`, `/memory --maintenance`, `/skill`, `/attach`, `/mouse`, `/approval`, `/compact`, `/diff`, `/rg`
 - `$skill` shorthand routed into `/skill`
 - guarded `!<command>` shell transcript command
 - `--yolo` session mode that bypasses guarded approvals while preserving destructive shell/tool blocks
 - provider-gated image attachment flow for HTTP transports
-- cockpit-style TUI surfaces: paced assistant replies, turn metadata, warning lane, turn blocks, risk/outcome/action rows, navigation hints, capability panel
-- opt-in OpenTUI sidecar via `--opentui` with multiline composer, command/skill overlays, bounded transcript blocks, collapsible trace blocks, mouse wheel transcript scroll, and OSC52 selected-block copy feedback
+- tags-only Sentry diagnostics for command, provider, tool, compaction, OpenTUI, startup, and memory signal failures; raw prompts/output/tool/file/transcript content stays out of Sentry unless explicitly opted in for AI span content
+- configurable compaction thresholds and measurement-only Archivist memory signal counters
+- cockpit-style OpenTUI surfaces: paced assistant replies, turn metadata, warning lane, turn blocks, risk/outcome/action rows, navigation hints, capability panel
+- default OpenTUI shell with multiline composer, command/skill overlays, bounded transcript blocks, collapsible trace blocks, foreground approval panel, capped warning lane, action ladder, pilot override row, split memory summary, mouse wheel transcript scroll, and OSC52 selected-block copy feedback
 
 ## Canonical Docs
 
@@ -67,6 +69,17 @@ If a new launch switch is added or removed in `parseCommand`, update `formatLaun
 - Do not mass-add local state directories such as `.bun/`, `.nexagent/`, `.codex/`, `.npm/`, `.opencode/`, `.rtk/`, or generated scratch files.
 - Preserve destructive-command safety. `--yolo` is not permission to bypass destructive shell/tool blocks.
 - Treat uncommitted changes as user work unless you made them.
+
+## Agent Workflow Guidelines
+
+- Start non-trivial code changes with a short plan before broad file reading. Clarify intended behavior, likely files, and verification path first.
+- Prefer focused codebase reads. Read the full target file before editing a frequently changed or high-churn file, then keep edits narrow.
+- When a file shows repeated rework, write or update a spec, test, or concrete acceptance check before continuing implementation.
+- Record recurring error patterns, rejected approaches, and project-specific constraints in durable guidance instead of rediscovering them each session.
+- Use context-preserving tools for large output: summarize logs, test output, search results, diffs, and API responses before bringing them into the conversation.
+- Use parallel agents for independent research or exploration tasks when available. Keep implementation ownership clear and avoid overlapping edits.
+- Commit incrementally when asked to commit or when work naturally reaches a reviewable checkpoint. Small commits make rollback and review easier.
+- Break large work into deliverable chunks with verification after each chunk. Avoid long sessions that mix unrelated goals.
 
 ## Decision Precedence
 
