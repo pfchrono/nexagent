@@ -80,7 +80,7 @@ export class TurnRun {
     if (claimsNexsightWork(output) && !evidence.hasNexsightEvidence) {
       return "Nexsight";
     }
-    if (claimsTestExecution(output) && !evidence.hasTestEvidence) {
+    if (claimsTestExecution(output) && !evidence.hasTestEvidence && !hasPatchPreviewSmokeEvidence(output, evidence)) {
       return "test";
     }
     return null;
@@ -208,4 +208,13 @@ function claimsTestExecution(output: string): boolean {
   return /\b(?:ran|executed)\s+(?:the\s+)?(?:tests?|validation|build|tsc)\b/i.test(output)
     || /\b(?:tests?|validation|build|tsc)\s+(?:pass(?:ed|es)?|succeed(?:ed)?|green)\b/i.test(output)
     || /\b0 fail\b|\bno failures?\b/i.test(output);
+}
+
+function hasPatchPreviewSmokeEvidence(output: string, evidence: TurnEvidenceSummary): boolean {
+  if (!evidence.hasWriteEvidence || !evidence.hasReadEvidence) {
+    return false;
+  }
+  return /\bpatch preview smoke test\b/i.test(output)
+    || /\bedit tool output\b/i.test(output)
+    || /\bbounded diff preview\b/i.test(output);
 }

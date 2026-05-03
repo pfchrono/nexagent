@@ -373,6 +373,37 @@ test("createOpenTuiRuntimeView surfaces turn token metrics in chat control rows"
   assert.equal(view.statusline.lastOutputTokens, 11);
 });
 
+test("createOpenTuiRuntimeView expands edit tool diff previews in chat", () => {
+  const session = createSession();
+  session.events = [
+    { at: "2025-01-01T00:00:01.000Z", kind: "prompt", status: "queued", summary: "user prompt accepted", detail: "patch smoke" },
+    {
+      at: "2025-01-01T00:00:02.000Z",
+      kind: "tool",
+      status: "completed",
+      summary: "tool apply_patch completed",
+      detail: [
+        "guarded; duration=0.01s; in~12; out~40; output=patched .nexagent/patch-preview-smoke.txt (1 match)",
+        "patched .nexagent/patch-preview-smoke.txt (1 match)",
+        "Edited .nexagent/patch-preview-smoke.txt (+1 -1)",
+        "diff:",
+        "@@ -1,2 +1,2 @@",
+        " alpha",
+        "-beta",
+        "+gamma",
+      ].join("\n"),
+    },
+  ];
+
+  const view = createOpenTuiRuntimeView(session);
+  const toolBlock = view.transcriptBlocks.find((block) => block.kind === "tool");
+
+  assert.equal(toolBlock?.collapsedByDefault, false);
+  assert.match(toolBlock?.detailLines.join("\n") ?? "", /Edited \.nexagent\/patch-preview-smoke\.txt \(\+1 -1\)/);
+  assert.match(toolBlock?.detailLines.join("\n") ?? "", /-beta/);
+  assert.match(toolBlock?.detailLines.join("\n") ?? "", /\+gamma/);
+});
+
 test("createOpenTuiRuntimeView keeps provider nudge debug payloads out of chat", () => {
   const session = createSession();
   session.events = [

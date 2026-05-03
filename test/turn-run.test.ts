@@ -123,6 +123,56 @@ test("turn run owns final evidence checks for claimed tests and Nexsight work", 
   );
 });
 
+test("turn run accepts patch-preview smoke evidence from edit and read tools", () => {
+  const session = createSession();
+  session.events.push(
+    {
+      at: new Date().toISOString(),
+      kind: "tool",
+      status: "completed",
+      summary: "tool write_file completed",
+      detail: "guarded; output=Edited .nexagent/patch-preview-smoke.txt (+2 -0)",
+    },
+    {
+      at: new Date().toISOString(),
+      kind: "tool",
+      status: "completed",
+      summary: "tool apply_patch completed",
+      detail: "guarded; output=Edited .nexagent/patch-preview-smoke.txt (+1 -1)",
+    },
+    {
+      at: new Date().toISOString(),
+      kind: "tool",
+      status: "completed",
+      summary: "tool read_file completed",
+      detail: "low; output=alpha gamma delta",
+    },
+  );
+  const run = new TurnRun({ session, prompt: "Run a patch preview smoke test" });
+
+  assert.equal(
+    run.evaluateFinalEvidence(0, [], "Smoke test passed. The patch preview showed the expected bounded diff preview."),
+    null,
+  );
+});
+
+test("turn run still requires shell evidence for real test-suite claims", () => {
+  const session = createSession();
+  session.events.push({
+    at: new Date().toISOString(),
+    kind: "tool",
+    status: "completed",
+    summary: "tool apply_patch completed",
+    detail: "guarded; output=Edited src/app.ts (+1 -1)",
+  });
+  const run = new TurnRun({ session, prompt: "fix bug" });
+
+  assert.equal(
+    run.evaluateFinalEvidence(0, [], "Ran the test suite and 0 fail."),
+    "test",
+  );
+});
+
 test("turn run does not treat tested Nexsight-related coverage names as claimed Nexsight work", () => {
   const session = createSession();
   session.events.push({

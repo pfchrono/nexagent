@@ -27,7 +27,7 @@ import { consumeOperatorSteer, estimateTokenCount, recordRuntimeEvent, setRuntim
 import type { RuntimeApprovalRequest, RuntimeSession } from "./runtime/session.js";
 import { beginSkillRun, completeSkillRun, recordSkillToolResult } from "./runtime/skill-runner.js";
 import { TurnRun, type MissingTurnEvidence } from "./runtime/turn-run.js";
-import { classifyInternalToolRisk, executeInternalToolAsync, type InternalToolCall, type InternalToolResult } from "./runtime/tools.js";
+import { classifyInternalToolRisk, executeInternalToolAsync, type InternalToolCall, type InternalToolName, type InternalToolResult } from "./runtime/tools.js";
 
 export interface ProviderRequest {
   session: RuntimeSession;
@@ -1414,11 +1414,12 @@ async function executeToolWithRuntimeActivity(session: RuntimeSession, call: Int
   const outputPreview = truncateToolOutput(result.output);
   const inputTokens = estimateTokenCount(JSON.stringify({ name: call.name, arguments: call.arguments }));
   const outputTokens = estimateTokenCount(result.output);
+  const transcriptOutput = formatToolTranscriptOutput(call.name, result);
   recordRuntimeEvent(session, {
     kind: "tool",
     status: result.ok ? "completed" : "failed",
     summary: `tool ${call.name} ${result.ok ? "completed" : "failed"}`,
-    detail: `${risk}; duration=${formatToolDuration(durationMs)}; in~${inputTokens}; out~${outputTokens}; output=${outputPreview}`,
+    detail: `${risk}; duration=${formatToolDuration(durationMs)}; in~${inputTokens}; out~${outputTokens}; output=${outputPreview}${transcriptOutput}`,
   });
   if (!result.ok) {
     const failureClass = classifyToolFailure(result.output);
@@ -1593,6 +1594,21 @@ function truncateToolOutput(value: string): string {
     return "none";
   }
   return trimmed.length > 260 ? `${trimmed.slice(0, 257)}...` : trimmed;
+}
+
+function formatToolTranscriptOutput(toolName: InternalToolName, result: InternalToolResult): string {
+  if (!result.ok || !isDiffPreviewTool(toolName)) {
+    return "";
+  }
+  const output = result.output.trim();
+  if (!output || !/\bEdited .+ \(\+\d+ -\d+\)/.test(output)) {
+    return "";
+  }
+  return `\n${output}`;
+}
+
+function isDiffPreviewTool(toolName: InternalToolName): boolean {
+  return toolName === "write_file" || toolName === "apply_patch" || toolName === "batch_edit" || toolName === "preview_patch";
 }
 
 async function maybeAwaitApproval(session: RuntimeSession, call: InternalToolCall, risk: ReturnType<typeof classifyInternalToolRisk>): Promise<boolean> {

@@ -342,12 +342,13 @@ function createTranscriptBlocks(session: RuntimeSession): OpenTuiTranscriptBlock
         })];
       }
       if (event.kind === "tool") {
+        const lines = formatToolTranscriptLines(event);
         return [createBlock({
           id: `event-tool-${String(index)}-${event.at}`,
           kind: "tool",
           label: formatToolTranscriptLabel(event.summary, event.status, event.detail),
-          lines: formatToolTranscriptLines(event),
-          collapsedByDefault: true,
+          lines,
+          collapsedByDefault: !isPatchPreviewToolEvent(event, lines),
         })];
       }
       if (event.kind === "command") {
@@ -797,6 +798,14 @@ function formatToolDetailLines(detail: string): string[] {
       .replace(/;\s*/g, " · ")
       .replace(/\bin~/g, "in ")
       .replace(/\bout~/g, "out "));
+}
+
+function isPatchPreviewToolEvent(event: RuntimeSession["events"][number], lines: readonly string[]): boolean {
+  if (event.kind !== "tool" || event.status !== "completed") {
+    return false;
+  }
+  return /\btool\s+(write_file|apply_patch|batch_edit|preview_patch)\b/i.test(event.summary)
+    && lines.some((line) => /^Edited .+ \(\+\d+ -\d+\)$/.test(line));
 }
 
 function formatMetricBadge(detail: string): string {

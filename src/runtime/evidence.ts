@@ -12,6 +12,7 @@ export interface TurnEvidenceSummary {
   totalToolEvents: number;
   hasAnyToolEvidence: boolean;
   hasWriteEvidence: boolean;
+  hasReadEvidence: boolean;
   hasNexsightEvidence: boolean;
   hasTestEvidence: boolean;
   snapshots: ToolEvidenceSnapshot[];
@@ -32,6 +33,7 @@ function isEvidenceStatus(status: RuntimeEvent["status"]): boolean {
 export function collectTurnEvidence(session: RuntimeSession, sinceIndex: number, toolTranscript: string[] = []): TurnEvidenceSummary {
   const scoped = session.events.slice(sinceIndex);
   const snapshots: ToolEvidenceSnapshot[] = [];
+  let hasReadEvidence = false;
   let hasWriteEvidence = false;
   let hasNexsightEvidence = toolTranscript.some((entry) => /"name"\s*:\s*"nexsight_(execute|index|batch|search)"/i.test(entry));
   let hasTestEvidence = toolTranscript.some((entry) => {
@@ -49,6 +51,9 @@ export function collectTurnEvidence(session: RuntimeSession, sinceIndex: number,
       continue;
     }
     const contract = getToolContract(toolName);
+    if (toolName === "read_file" && event.status === "completed") {
+      hasReadEvidence = true;
+    }
     if (contract.writes && event.status === "completed") {
       hasWriteEvidence = true;
     }
@@ -66,6 +71,7 @@ export function collectTurnEvidence(session: RuntimeSession, sinceIndex: number,
   return {
     totalToolEvents: snapshots.length,
     hasAnyToolEvidence,
+    hasReadEvidence,
     hasWriteEvidence,
     hasNexsightEvidence,
     hasTestEvidence,
