@@ -145,3 +145,24 @@ test("turn run does not treat tested Nexsight-related coverage names as claimed 
     null,
   );
 });
+
+test("turn run does not treat tool inventory Nexsight names as claimed Nexsight work", () => {
+  const session = createSession();
+  session.events.push({
+    at: new Date().toISOString(),
+    kind: "tool",
+    status: "completed",
+    summary: "tool mcp_list_tools completed",
+    detail: "low; duration=0.00s",
+  });
+  const run = new TurnRun({ session, prompt: "What tools and mcp tools do you have in your arsenal?" });
+
+  assert.equal(
+    run.evaluateFinalEvidence(0, [], [
+      "I used mcp_list_tools and can use these built-in Nexagent tools:",
+      "- nexsight_execute - bounded scripts/commands through Nexsight",
+      "- nexsight_search - search indexed Nexsight knowledge",
+    ].join("\n")),
+    null,
+  );
+});

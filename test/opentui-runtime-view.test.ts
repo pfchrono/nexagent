@@ -24,7 +24,7 @@ test("createOpenTuiRuntimeView maps runtime session without mutation", () => {
     toolPolicy: "repo-local-guarded",
     providerTransportMode: "cli-exec",
     imageAttachmentSupported: false,
-    headerTitle: "nexagent :: agent tui",
+    headerTitle: "nexagent",
     providerLabel: "codex/gpt-5.4",
     sessionLabel: "session session_test | turns 2",
     statusLabel: "ready - runtime baseline",
@@ -67,6 +67,42 @@ test("createOpenTuiRuntimeView maps runtime session without mutation", () => {
       },
       risk: "pending · approval open",
     },
+    configSections: [
+      {
+        title: "provider",
+        rows: ["active codex", "transport cli-exec", "auth ready"],
+      },
+      {
+        title: "ui",
+        rows: ["logo full", "mouse undefined", "statusline off"],
+      },
+      {
+        title: "memory",
+        rows: ["archivist off", "storage disabled", "retrieval idle"],
+      },
+      {
+        title: "mcp",
+        rows: ["configured 0", "hydrated 0/0", "tools 0", "failed none"],
+      },
+      {
+        title: "lsp",
+        rows: ["status disabled by default", "enabled off", "configured no", "indexArchivist off"],
+      },
+      {
+        title: "diagnostics",
+        rows: ["sentry /status --sentry", "redaction tags-only"],
+      },
+    ],
+    logo: {
+      mode: "full",
+      frames: [
+        "nexagent  ◜◆◝  terminal agent",
+        "nexagent  ◠◆◡  terminal agent",
+        "nexagent  ◟◆◞  terminal agent",
+        "nexagent  ◡◆◠  terminal agent",
+      ],
+      metadata: "codex/gpt-5.4 · cli-exec · repo · main · cfg:full",
+    },
     statusline: {
       model: "gpt-5.4",
       branch: "main",
@@ -85,6 +121,63 @@ test("createOpenTuiRuntimeView maps runtime session without mutation", () => {
   assert.ok(view.statusline.memoryUsedBytes >= 0);
   assert.ok(view.statusline.memoryUsedBytes <= view.statusline.memoryTotalBytes);
   assert.equal(JSON.stringify(session.action), before);
+});
+
+test("createOpenTuiRuntimeView maps config sections and logo modes", () => {
+  const session = createSession();
+  session.ui = { logoMode: "condensed" };
+  session.lsp = { enabled: true, command: "typescript-language-server", args: ["--stdio"], indexArchivist: true };
+  session.commandModes.mouseMode = "scroll";
+  session.archivist.enabled = true;
+  session.archivist.storagePath = "/repo/.nexagent/archivist.json";
+  session.archivist.retrieval = { used: true, sourceCategory: "failure-playbook", matchCount: 1, preview: "tool retry" };
+
+  const view = createOpenTuiRuntimeView(session);
+
+  assert.equal(view.logo.mode, "condensed");
+  assert.match(view.logo.frames[0] ?? "", /nexagent/);
+  assert.match(view.logo.metadata, /cfg:condensed/);
+  assert.deepEqual(view.configSections.map((section) => section.title), ["provider", "ui", "memory", "mcp", "lsp", "diagnostics"]);
+  assert.deepEqual(view.configSections.find((section) => section.title === "lsp")?.rows, [
+    "status ready to start",
+    "enabled on",
+    "configured yes",
+    "indexArchivist on",
+  ]);
+  assert.match(view.configSections.find((section) => section.title === "memory")?.rows.join("\n") ?? "", /failure-playbook/);
+});
+
+test("createOpenTuiRuntimeView surfaces MCP hydration health", () => {
+  const session = createSession();
+  session.mcpServers = ["filesystem", "sentry"];
+  session.mcpRegistry = {
+    serverNames: ["filesystem", "sentry"],
+    servers: {},
+    tools: [
+      { server: "filesystem", name: "read_file", description: "read", inputSchema: {} },
+      { server: "filesystem", name: "search", description: "search", inputSchema: {} },
+    ],
+    statuses: [
+      { name: "filesystem", transport: "stdio", status: "hydrated", toolCount: 2, startupTimeoutMs: 10000, message: null },
+      { name: "sentry", transport: "stdio", status: "failed", toolCount: 0, startupTimeoutMs: 10000, message: "Authorization Expired" },
+    ],
+    clients: new Map(),
+  };
+
+  const view = createOpenTuiRuntimeView(session);
+
+  assert.deepEqual(view.configSections.find((section) => section.title === "mcp")?.rows, [
+    "configured 2",
+    "hydrated 1/2",
+    "tools 2",
+    "failed sentry",
+  ]);
+  assert.deepEqual(view.cockpit.warnings.find((warning) => warning.type === "mcp"), {
+    severity: "warning",
+    type: "mcp",
+    message: "MCP failed: sentry",
+    action: "/config or /status --sentry",
+  });
 });
 
 test("createOpenTuiRuntimeView maps transcript and trace lines", () => {
@@ -117,8 +210,8 @@ test("createOpenTuiRuntimeView maps transcript and trace lines", () => {
   assert.equal(view.transcriptBlocks[0]?.kind, "user");
   assert.equal(view.transcriptBlocks[1]?.kind, "assistant");
   assert.deepEqual(view.traceSummaryLines, [
-    "provider started - provider request started",
-    "tool completed - tool nexsight_execute completed",
+    "↗ Provider started · provider request started",
+    "◇ Done Nexsight · ↑ 12",
   ]);
   assert.match(view.traceDetailLines.join("\n"), /transport=codex-http/);
   assert.equal(view.traceBlocks.length, 1);
@@ -152,7 +245,8 @@ test("createOpenTuiRuntimeView keeps one expanded trace block with full event de
   assert.equal(view.traceBlocks.length, 1);
   assert.equal(view.traceBlocks[0]?.label, "turn trace");
   assert.match(view.traceBlocks[0]?.detailLines.join("\n") ?? "", /line two with exact detail/);
-  assert.match(view.traceBlocks[0]?.detailLines.join("\n") ?? "", /provider \| failed/);
+  assert.match(view.traceBlocks[0]?.detailLines.join("\n") ?? "", /Provider failed/);
+  assert.match(view.traceBlocks[0]?.detailLines.join("\n") ?? "", /kind provider · status failed/);
 });
 
 test("createOpenTuiRuntimeView keeps pending prompt visible after prior conversation", () => {
@@ -231,15 +325,74 @@ test("createOpenTuiRuntimeView orders chat by prompt, tools, and assistant event
   const view = createOpenTuiRuntimeView(session);
 
   assert.deepEqual(view.transcriptBlocks.map((block) => block.kind), ["user", "tool", "tool", "assistant"]);
-  assert.deepEqual(view.transcriptBlocks.map((block) => block.label), ["you", "tool search_files", "tool search_files · 0.04s ↓ 3 ↑ 9", "agent"]);
-  assert.match(view.transcriptBlocks[1]?.detailLines.join("\n") ?? "", /started · tool search_files started/);
+  assert.deepEqual(view.transcriptBlocks.map((block) => block.label), ["you", "🔎 Running Search files", "🔎 Done Search files · 0.04s ↓ 3 ↑ 9", "agent"]);
+  assert.match(view.transcriptBlocks[1]?.detailLines.join("\n") ?? "", /🔎 Running Search files/);
   assert.match(view.transcriptBlocks[2]?.detailLines.join("\n") ?? "", /0\.04s ↓ 3 ↑ 9/);
   assert.match(view.transcriptBlocks[2]?.detailLines.join("\n") ?? "", /output=src\/opentui\/App\.tsx/);
   assert.equal(view.statusline.lastInputTokens, 3);
   assert.equal(view.statusline.lastOutputTokens, 9);
 });
 
-test("createOpenTuiRuntimeView keeps command output out of chat and available in trace", () => {
+test("createOpenTuiRuntimeView retains deeper transcript scrollback", () => {
+  const session = createSession();
+  session.conversation = [];
+  session.events = Array.from({ length: 60 }, (_, index) => ({
+    at: `2025-01-01T00:00:${String(index).padStart(2, "0")}.000Z`,
+    kind: "prompt" as const,
+    status: "queued" as const,
+    summary: "user prompt accepted",
+    detail: `prompt ${String(index)}`,
+  }));
+
+  const view = createOpenTuiRuntimeView(session);
+
+  assert.equal(view.transcriptBlocks.length, 60);
+  assert.equal(view.transcriptBlocks[0]?.detailLines[0], "prompt 0");
+  assert.equal(view.transcriptBlocks.at(-1)?.detailLines[0], "prompt 59");
+});
+
+test("createOpenTuiRuntimeView surfaces turn token metrics in chat control rows", () => {
+  const session = createSession();
+  session.events = [
+    { at: "2025-01-01T00:00:01.000Z", kind: "prompt", status: "queued", summary: "user prompt accepted", detail: "Testing 1 2 3" },
+    { at: "2025-01-01T00:00:01.500Z", kind: "control", status: "started", summary: "turn run started" },
+    { at: "2025-01-01T00:00:01.750Z", kind: "control", status: "started", summary: "turn run provider step" },
+    { at: "2025-01-01T00:00:02.000Z", kind: "assistant", status: "completed", summary: "assistant response completed", detail: "done" },
+    { at: "2025-01-01T00:00:03.000Z", kind: "control", status: "completed", summary: "turn run completed", detail: "duration=1.76s; turn_in~2223; turn_out~11" },
+  ];
+
+  const view = createOpenTuiRuntimeView(session);
+  const controlBlock = view.transcriptBlocks.find((block) => block.label === "turn complete");
+
+  assert.equal(controlBlock?.kind, "system");
+  assert.deepEqual(view.transcriptBlocks.map((block) => block.label), ["you", "agent", "turn complete"]);
+  assert.match(controlBlock?.summaryLines.join("\n") ?? "", /1\.76s ↓ 2223 ↑ 11/);
+  assert.match(controlBlock?.detailLines.join("\n") ?? "", /turn_in~2223/);
+  assert.doesNotMatch(view.transcriptBlocks.map((block) => block.detailLines.join("\n")).join("\n"), /turn run started|turn run provider step/);
+  assert.equal(view.statusline.lastInputTokens, 2223);
+  assert.equal(view.statusline.lastOutputTokens, 11);
+});
+
+test("createOpenTuiRuntimeView keeps provider nudge debug payloads out of chat", () => {
+  const session = createSession();
+  session.events = [
+    { at: "2025-01-01T00:00:01.000Z", kind: "prompt", status: "queued", summary: "user prompt accepted", detail: "run tests" },
+    { at: "2025-01-01T00:00:02.000Z", kind: "control", status: "queued", summary: "malformed tool call nudge applied", detail: "<tool_call>\n{\"name\":\"shell_command\",\"arguments\":{\"command\":\"bun test\"}}\n</tool_call>" },
+    { at: "2025-01-01T00:00:03.000Z", kind: "control", status: "queued", summary: "claim evidence nudge applied", detail: "claimed test evidence without shell_command result" },
+    { at: "2025-01-01T00:00:04.000Z", kind: "assistant", status: "completed", summary: "assistant response completed", detail: "Use bun test ./test/tools.test.ts" },
+  ];
+
+  const view = createOpenTuiRuntimeView(session);
+  const transcriptText = view.transcriptBlocks.map((block) => block.detailLines.join("\n")).join("\n");
+  const traceText = view.traceBlocks.map((block) => block.detailLines.join("\n")).join("\n");
+
+  assert.deepEqual(view.transcriptBlocks.map((block) => block.kind), ["user", "assistant"]);
+  assert.doesNotMatch(transcriptText, /<tool_call>|shell_command|claim evidence nudge/);
+  assert.match(traceText, /malformed tool call nudge applied/);
+  assert.match(traceText, /<tool_call>/);
+});
+
+test("createOpenTuiRuntimeView shows command output in chat without diagnostic control detail", () => {
   const session = createSession();
   session.conversation = [
     { role: "user", content: "show memory", tokens: 2 },
@@ -248,16 +401,36 @@ test("createOpenTuiRuntimeView keeps command output out of chat and available in
   session.events = [
     { at: "2025-01-01T00:00:01.000Z", kind: "prompt", status: "queued", summary: "user prompt accepted", detail: "show memory" },
     { at: "2025-01-01T00:00:02.000Z", kind: "command", status: "completed", summary: "memory status", detail: "memory\nenabled: true\nmatches=3" },
-    { at: "2025-01-01T00:00:03.000Z", kind: "assistant", status: "completed", summary: "assistant response completed", detail: "memory checked" },
+    { at: "2025-01-01T00:00:03.000Z", kind: "control", status: "failed", summary: "error command.failed: runtime command failed", detail: "command_name=/memory; class=command.failed" },
+    { at: "2025-01-01T00:00:04.000Z", kind: "assistant", status: "completed", summary: "assistant response completed", detail: "memory checked" },
   ];
 
   const view = createOpenTuiRuntimeView(session);
 
-  assert.deepEqual(view.transcriptBlocks.map((block) => block.kind), ["user", "assistant"]);
-  assert.deepEqual(view.transcriptBlocks.map((block) => block.detailLines[0]), ["show memory", "memory checked"]);
-  assert.doesNotMatch(view.transcriptBlocks.map((block) => block.detailLines.join("\n")).join("\n"), /matches=3/);
-  assert.match(view.traceBlocks.map((block) => block.detailLines.join("\n")).join("\n"), /command \| completed/);
-  assert.match(view.traceBlocks.map((block) => block.detailLines.join("\n")).join("\n"), /matches=3/);
+  assert.deepEqual(view.transcriptBlocks.map((block) => block.kind), ["user", "command", "assistant"]);
+  assert.deepEqual(view.transcriptBlocks.map((block) => block.label), ["you", "command memory status", "agent"]);
+  assert.match(view.transcriptBlocks[1]?.detailLines.join("\n") ?? "", /matches=3/);
+  assert.doesNotMatch(view.transcriptBlocks.map((block) => block.detailLines.join("\n")).join("\n"), /class=command\.failed/);
+  assert.match(view.traceBlocks.map((block) => block.detailLines.join("\n")).join("\n"), /Command completed/);
+  assert.match(view.traceBlocks.map((block) => block.detailLines.join("\n")).join("\n"), /kind command · status completed/);
+  assert.match(view.traceBlocks.map((block) => block.detailLines.join("\n")).join("\n"), /output rendered in chat; command payload hidden from trace/);
+  assert.doesNotMatch(view.traceBlocks.map((block) => block.detailLines.join("\n")).join("\n"), /matches=3/);
+  assert.match(view.traceBlocks.map((block) => block.detailLines.join("\n")).join("\n"), /class=command\.failed/);
+});
+
+test("createOpenTuiRuntimeView shows command-only output before first chat turn", () => {
+  const session = createSession();
+  session.events = [
+    { at: "2025-01-01T00:00:01.000Z", kind: "command", status: "completed", summary: "help", detail: "/help - show available runtime commands\n/status - show runtime status" },
+  ];
+
+  const view = createOpenTuiRuntimeView(session);
+
+  assert.deepEqual(view.transcriptBlocks.map((block) => block.kind), ["command"]);
+  assert.equal(view.transcriptBlocks[0]?.label, "command help");
+  assert.match(view.transcriptBlocks[0]?.detailLines.join("\n") ?? "", /\/help - show available runtime commands/);
+  assert.doesNotMatch(view.traceBlocks.map((block) => block.detailLines.join("\n")).join("\n"), /show available runtime commands/);
+  assert.match(view.traceBlocks.map((block) => block.detailLines.join("\n")).join("\n"), /output rendered in chat; command payload hidden from trace/);
 });
 
 test("createOpenTuiRuntimeView renders active skill prompts as compact skill rows", () => {
@@ -292,6 +465,21 @@ test("createOpenTuiRuntimeView surfaces compaction progress when no chat turn ex
   assert.deepEqual(view.transcriptBlocks.map((block) => block.kind), ["system", "system"]);
   assert.match(view.transcriptBlocks.map((block) => block.detailLines.join("\n")).join("\n"), /manual compaction started/);
   assert.match(view.transcriptBlocks.map((block) => block.detailLines.join("\n")).join("\n"), /tokens=14000->2400/);
+});
+
+test("createOpenTuiRuntimeView keeps manual compact diagnostics out of chat command output", () => {
+  const session = createSession();
+  session.events = [
+    { at: "2025-01-01T00:00:01.000Z", kind: "compact", status: "completed", summary: "manual compaction completed", detail: "summary=present · turns=4 · tokens=2172->1314" },
+    { at: "2025-01-01T00:00:02.000Z", kind: "command", status: "completed", summary: "compact manual · 2172 -> 1314", detail: "manual compaction completed\nsummary=present · turns=4 · tokens=2172->1314" },
+  ];
+
+  const view = createOpenTuiRuntimeView(session);
+  const transcriptText = view.transcriptBlocks.map((block) => block.detailLines.join("\n")).join("\n");
+
+  assert.match(transcriptText, /manual compaction completed/);
+  assert.match(transcriptText, /summary=present · turns=4 · tokens=2172->1314/);
+  assert.doesNotMatch(transcriptText, /threshold|remainingTokens|preserveTurns|lastCompactedAt/);
 });
 
 test("OpenTUI short command output stays expanded by default", () => {
@@ -410,7 +598,7 @@ test("OpenTUI memory diagnostics fallback is counts-only", () => {
 function createSession(): RuntimeSession {
   return {
     id: "session_test",
-    startedAt: "2025-01-01T00:00:00.000Z",
+    startedAt: new Date().toISOString(),
     product: "nexagent",
     provider: "codex",
     providerRegistry: createDefaultProviderRegistry(),
@@ -460,6 +648,13 @@ function createSession(): RuntimeSession {
     },
     mcpServers: [],
     enabledMcpServers: [],
+    mcpRegistry: {
+      serverNames: [],
+      servers: {},
+      tools: [],
+      statuses: [],
+      clients: new Map(),
+    },
     imports: { claude: null },
     hooks: { sourcePath: null, status: "none", events: [], commandCount: 0, invalidEntries: [] },
     auth: {

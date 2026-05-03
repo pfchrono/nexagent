@@ -9,6 +9,7 @@ Canonical guidance for coding agents working in `nexagent`.
 - TypeScript CLI/runtime under `src/`
 - default interactive OpenTUI shell in `src/opentui/`
 - provider transports: `cli-exec`, `http-responses`, `codex-http`
+- provider/model controls include per-provider model selection and reasoning effort selection
 - layered prompt/instruction assembly in `src/runtime/instructions.ts`
 - guarded repo-local internal tools:
   - `read_file`
@@ -22,15 +23,19 @@ Canonical guidance for coding agents working in `nexagent`.
   - `shell_command`
   - `archivist_save`
   - `archivist_checkpoint`
-- slash commands including `/status`, `/status --sentry`, `/provider`, `/model`, `/tools`, `/memory`, `/memory --maintenance`, `/skill`, `/attach`, `/mouse`, `/approval`, `/compact`, `/diff`, `/rg`
+  - `lsp_status`
+  - `lsp_symbols`
+  - `lsp_diagnostics`
+- slash commands including `/status`, `/status --sentry`, `/provider`, `/model`, `/effort`, `/tools`, `/memory`, `/memory --maintenance`, `/config`, `/lsp`, `/skill`, `/attach`, `/detach`, `/mouse`, `/approval`, `/compact`, `/diff`, `/rg`
 - `$skill` shorthand routed into `/skill`
 - guarded `!<command>` shell transcript command
 - `--yolo` session mode that bypasses guarded approvals while preserving destructive shell/tool blocks
-- provider-gated image attachment flow for HTTP transports
+- provider-gated multi-image attachment flow for HTTP transports, with `Alt+V` clipboard image paste and `/attach` path attach
+- startup MCP hydration from `.nexagent/mcp.json`, global `~/.nexagent/mcp.json`, and legacy `.mcp.json` with deduped server names and bounded startup timeouts
 - tags-only Sentry diagnostics for command, provider, tool, compaction, OpenTUI, startup, and memory signal failures; raw prompts/output/tool/file/transcript content stays out of Sentry unless explicitly opted in for AI span content
-- configurable compaction thresholds and measurement-only Archivist memory signal counters
-- cockpit-style OpenTUI surfaces: paced assistant replies, turn metadata, warning lane, turn blocks, risk/outcome/action rows, navigation hints, capability panel
-- default OpenTUI shell with multiline composer, command/skill overlays, bounded transcript blocks, collapsible trace blocks, foreground approval panel, capped warning lane, action ladder, pilot override row, split memory summary, mouse wheel transcript scroll, and OSC52 selected-block copy feedback
+- configurable compaction thresholds, Archivist recurrence/dedupe, failure recovery playbooks, and memory signal counters
+- cockpit-style OpenTUI surfaces: paced assistant replies, turn metadata, warning/error lanes, turn blocks, token/duration badges, risk/outcome/action rows, navigation hints, capability panel
+- default OpenTUI shell with multiline composer, command/skill/model/effort overlays, bounded transcript blocks, collapsible trace blocks, foreground approval panel, capped warning lane, action ladder, pilot override row, split memory summary, MCP/LSP panels, clipboard text paste, mouse wheel transcript scroll, and OSC52 selected-block copy feedback
 
 ## Canonical Docs
 
@@ -53,6 +58,7 @@ Use existing package scripts only:
 
 Do not invent commands. If command surface changes, update `package.json`, `README.md`, and this file.
 If a new launch switch is added or removed in `parseCommand`, update `formatLaunchHelp()` and tests so `nexagent --help` stays complete.
+If a slash command changes, update `src/cli/catalog.ts`, README command docs, and relevant command/autocomplete tests.
 
 ## Debugging Runtime
 
@@ -76,6 +82,7 @@ If a new launch switch is added or removed in `parseCommand`, update `formatLaun
 - Prefer focused codebase reads. Read the full target file before editing a frequently changed or high-churn file, then keep edits narrow.
 - When a file shows repeated rework, write or update a spec, test, or concrete acceptance check before continuing implementation.
 - Record recurring error patterns, rejected approaches, and project-specific constraints in durable guidance instead of rediscovering them each session.
+- Use evidence labels for claims: observed, verified, inferred, assumption, or unknown. Do not present inference as verified. Evidence labels guide claim discipline only; they are not a reason to stop loop work while useful inspection or verification tools remain.
 - Use context-preserving tools for large output: summarize logs, test output, search results, diffs, and API responses before bringing them into the conversation.
 - Use parallel agents for independent research or exploration tasks when available. Keep implementation ownership clear and avoid overlapping edits.
 - Commit incrementally when asked to commit or when work naturally reaches a reviewable checkpoint. Small commits make rollback and review easier.
@@ -88,7 +95,7 @@ When behavior is ambiguous:
 1. direct user request
 2. `AGENTS.md`
 3. `README.md`
-4. repo-local config (`.nexagent/`, `.claude/settings.json`, `.mcp.json`)
+4. repo-local config (`.nexagent/`, `.claude/settings.json`, `.nexagent/mcp.json`, legacy `.mcp.json`)
 5. current code and tests
 6. donor/upstream references
 

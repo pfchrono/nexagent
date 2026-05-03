@@ -91,6 +91,7 @@ export const CODEX_MODEL_CATALOG: readonly CodexModelDefinition[] = [
 ] as const;
 
 export const DEFAULT_CODEX_MODEL = "gpt-5.4";
+export const DEFAULT_CODEX_REASONING_EFFORT: CodexReasoningEffort = "medium";
 
 export function normalizeCodexModel(model: string | null): string | null {
   if (!model) {
@@ -120,6 +121,19 @@ export function getCodexModelDefinition(model: string | null): CodexModelDefinit
     return null;
   }
   return CODEX_MODEL_CATALOG.find((entry) => entry.id === normalized) ?? null;
+}
+
+export function normalizeCodexReasoningEffort(value: string | null | undefined): CodexReasoningEffort | null {
+  if (!value) {
+    return null;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "extra-high" || normalized === "extra_high" || normalized === "x-high" || normalized === "x_high") {
+    return "xhigh";
+  }
+  return normalized === "low" || normalized === "medium" || normalized === "high" || normalized === "xhigh"
+    ? normalized
+    : null;
 }
 
 export function isCodexApiSupportedModel(model: string | null): boolean {

@@ -48,6 +48,10 @@ export async function invokeCodexExecTransport(request: { session: RuntimeSessio
   if (model) {
     args.push("--model", model);
   }
+  const effort = request.session.providerRouting.modelSelection.configuredReasoningEfforts?.[request.session.providerTransport.activeProvider];
+  if (effort) {
+    args.push("-c", `model_reasoning_effort=${effort}`);
+  }
 
   try {
     const { exitCode, stdout, stderr } = await spawnAndCollect(

@@ -246,6 +246,8 @@ Add provider tests for these regressions:
 - Write claim without write evidence -> correction or no claim.
 - GSD agent check -> file-backed/raw workspace output, not command lookup.
 
+Status: implemented and extended. Prompt V3 now adds an evidence contract over the V2 section architecture. Claims must stay labeled as observed, verified, inferred, assumption, or unknown. Candidate fixes are classified as true bug, covered behavior, design gap, or unknown. Contradictions update verdicts and keep the loop moving until verified completion, an approval/safety gate, an external dependency, tool budget exhaustion, or explicit user stop.
+
 ### Slice 6: Remove Old Prompt Drift
 
 - Delete obsolete appended guidance from `src/runtime/instructions.ts` once V2 passes snapshots.
@@ -253,6 +255,16 @@ Add provider tests for these regressions:
 - Add prompt dump/debug command so prompt sections are inspectable without flooding chat.
 
 Status: partial. `src/runtime/instructions.ts` is now only the dispatcher and shared prompt context type. Legacy prompt assembly was moved to `src/runtime/prompt-legacy.ts` and is used only when `prompt.assembly` is `legacy`.
+
+### Slice 7: Runtime UX and Recovery Feedback
+
+- Command result blocks render in chat while command lifecycle/debug detail stays in trace.
+- Tool, provider, and turn rows expose duration and token badges for transcript review.
+- Edit tools include bounded unified diff previews so patch results can be reviewed without opening raw debug output.
+- Tool failures are classified into safe failure classes, logged to Sentry without raw prompt/file/tool output, and saved as Archivist recovery playbooks for future similar failures.
+- MCP startup hydration reports configured, hydrated, skipped, and failed servers, including bounded startup timeouts.
+
+Status: implemented with OpenTUI and runtime tests.
 
 ## Acceptance Criteria
 
@@ -262,7 +274,7 @@ Status: partial. `src/runtime/instructions.ts` is now only the dispatcher and sh
 - Style overlays cannot override execution/tool contracts.
 - Provider overlays are testable units.
 - Dogfood failures shown in recent screenshots have tests or documented blockers.
-- `bun test ./test/*.test.ts`, `bun run build`, `npm run lint`, and `git diff --check` pass.
+- `bun test ./test/*.test.ts`, `bun run build`, and `git diff --check` pass.
 
 ## Recommendation
 

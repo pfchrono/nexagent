@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { createDefaultProviderRegistry } from "../src/provider/registry.js";
+import { applyArchivistRetrieval, rememberArchivistFailure } from "../src/runtime/archivist.js";
 import { resolveNexsightRuntime } from "../src/runtime/nexsight.js";
 import { classifyInternalToolRisk, executeInternalTool, executeInternalToolAsync } from "../src/runtime/tools.js";
 import type { RuntimeSession } from "../src/runtime/session.js";
@@ -108,6 +109,15 @@ function createSession(cwd: string): RuntimeSession {
         preview: null,
       },
     },
+    lsp: {
+      enabled: false,
+      command: null,
+      args: [],
+      indexArchivist: false,
+    },
+    ui: {
+      logoMode: "full",
+    },
     action: {
       status: "ready",
       detail: "runtime baseline",
@@ -162,11 +172,12 @@ test("executeInternalTool writes and patches file inside guarded repo roots", as
         content: "alpha\nbeta\n",
       },
     });
-    assert.deepEqual(writeResult, {
-      ok: true,
-      tool: "write_file",
-      output: "wrote notes.txt (11 chars)",
-    });
+    assert.equal(writeResult.ok, true);
+    assert.equal(writeResult.tool, "write_file");
+    assert.match(writeResult.output, /wrote notes\.txt \(11 chars\)/);
+    assert.match(writeResult.output, /Edited notes\.txt \(\+2 -0\)/);
+    assert.match(writeResult.output, /Index: notes\.txt/);
+    assert.match(writeResult.output, /\+alpha/);
     assert.equal(await readFile(filePath, "utf8"), "alpha\nbeta\n");
 
     const patchResult = executeInternalTool(session, {
@@ -177,11 +188,12 @@ test("executeInternalTool writes and patches file inside guarded repo roots", as
         replace: "gamma",
       },
     });
-    assert.deepEqual(patchResult, {
-      ok: true,
-      tool: "apply_patch",
-      output: "patched notes.txt (1 match)",
-    });
+    assert.equal(patchResult.ok, true);
+    assert.equal(patchResult.tool, "apply_patch");
+    assert.match(patchResult.output, /patched notes\.txt \(1 match\)/);
+    assert.match(patchResult.output, /Edited notes\.txt \(\+1 -1\)/);
+    assert.match(patchResult.output, /-beta/);
+    assert.match(patchResult.output, /\+gamma/);
     assert.equal(await readFile(filePath, "utf8"), "alpha\ngamma\n");
   } finally {
     await rm(cwd, { recursive: true, force: true });
@@ -249,6 +261,9 @@ test("executeInternalTool batch edits validate anchors before writing", async ()
     });
     assert.equal(batchResult.ok, true);
     assert.match(batchResult.output, /batch edited 3 files with 3 operations/);
+    assert.match(batchResult.output, /Edited src\/one\.ts \(\+1 -0\)/);
+    assert.match(batchResult.output, /Index: src\/one\.ts/);
+    assert.match(batchResult.output, /\+inserted/);
     assert.equal(await readFile(path.join(cwd, "src", "one.ts"), "utf8"), "alpha\n// anchor\ninserted\nomega\n");
     assert.equal(await readFile(path.join(cwd, "src", "two.ts"), "utf8"), "first\nchanged\n");
     assert.equal(await readFile(path.join(cwd, "src", "three.ts"), "utf8"), "new file\n");
@@ -755,6 +770,26 @@ test("executeInternalTool blocks destructive shell and caps long output", async 
   }
 });
 
+test("executeInternalTool honors bounded shell timeout argument", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-tools-shell-timeout-"));
+
+  try {
+    const session = createSession(cwd);
+    const result = executeInternalTool(session, {
+      name: "shell_command",
+      arguments: {
+        command: "sleep 1",
+        timeoutMs: 500,
+      },
+    });
+
+    assert.equal(result.ok, false);
+    assert.match(result.output, /shell timed out after 500ms/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test("executeInternalTool blocks destructive shell while yolo mode is active", async () => {
   const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-tools-yolo-shell-guard-"));
 
@@ -808,6 +843,127 @@ test("executeInternalTool saves Archivist memory and checkpoint with bounded lin
     assert.match(checkpointResult.output, /saved checkpoint; entries=2/);
     assert.equal(session.archivist.writes.action, "checkpoint");
     assert.match(session.archivist.writes.preview ?? "", /\[checkpoint\]/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("executeInternalTool merges repeated Archivist memory into canonical recurrence", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-tools-archivist-recurrence-"));
+
+  try {
+    const session = createSession(cwd);
+    session.archivist.enabled = true;
+    session.archivist.boundary = "bounded-write";
+    session.archivist.storagePath = path.join(cwd, ".nexagent", "archivist.json");
+
+    const first = await executeInternalToolAsync(session, {
+      name: "archivist_save",
+      arguments: {
+        summary: "repeat memory",
+        content: "same bounded content",
+        tags: ["phase72"],
+      },
+    });
+    const second = await executeInternalToolAsync(session, {
+      name: "archivist_save",
+      arguments: {
+        summary: "repeat memory",
+        content: "same bounded content",
+        tags: ["phase72"],
+      },
+    });
+
+    assert.equal(first.ok, true);
+    assert.equal(second.ok, true);
+    assert.match(second.output, /entries=1/);
+    assert.match(second.output, /seen=2/);
+
+    const raw = JSON.parse(await readFile(session.archivist.storagePath, "utf8")) as { entries: Array<{ seenCount?: number; firstSeen?: string; lastSeen?: string }> };
+    assert.equal(raw.entries.length, 1);
+    assert.equal(raw.entries[0]?.seenCount, 2);
+    assert.ok(raw.entries[0]?.firstSeen);
+    assert.ok(raw.entries[0]?.lastSeen);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("executeInternalTool exposes disabled LSP status without starting a service", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-tools-lsp-status-"));
+
+  try {
+    const session = createSession(cwd);
+    const result = executeInternalTool(session, {
+      name: "lsp_status",
+      arguments: {},
+    });
+
+    assert.equal(result.ok, true);
+    assert.match(result.output, /^lsp$/m);
+    assert.match(result.output, /^enabled: false$/m);
+    assert.match(result.output, /disabled by default/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("executeInternalTool indexes bounded LSP symbol summaries into Archivist when enabled", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-tools-lsp-symbols-"));
+
+  try {
+    await writeFile(path.join(cwd, "sample.ts"), "export function alpha() { return 1; }\nclass Beta {}\n", "utf8");
+    const session = createSession(cwd);
+    session.lsp.enabled = true;
+    session.lsp.indexArchivist = true;
+    session.archivist.enabled = true;
+    session.archivist.boundary = "bounded-write";
+    session.archivist.storagePath = path.join(cwd, ".nexagent", "archivist.json");
+
+    const result = await executeInternalToolAsync(session, {
+      name: "lsp_symbols",
+      arguments: {
+        path: "sample.ts",
+      },
+    });
+
+    assert.equal(result.ok, true);
+    assert.match(result.output, /^lsp symbols$/m);
+    assert.match(result.output, /function alpha/);
+    assert.match(result.output, /class Beta/);
+
+    const raw = JSON.parse(await readFile(session.archivist.storagePath, "utf8")) as { entries: Array<{ type?: string; content?: string }> };
+    assert.equal(raw.entries.length, 1);
+    assert.equal(raw.entries[0]?.type, "code-symbols");
+    assert.match(raw.entries[0]?.content ?? "", /lsp symbols/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("Archivist stores and recalls failure recovery playbooks", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-tools-failure-playbook-"));
+
+  try {
+    const session = createSession(cwd);
+    session.archivist.enabled = true;
+    session.archivist.boundary = "bounded-write";
+    session.archivist.storagePath = path.join(cwd, ".nexagent", "archivist.json");
+    session.archivist.storageExists = true;
+
+    const stored = await rememberArchivistFailure(session, {
+      toolName: "lsp_symbols",
+      failureClass: "path_not_found",
+      message: "sample.ts: no such file",
+      recoveryHint: "Retry with a project-local file path after list_dir confirms it exists.",
+    });
+    assert.equal(stored?.entryCount, 1);
+
+    await applyArchivistRetrieval(session, "lsp_symbols failed with path error, how recover?");
+
+    assert.equal(session.archivist.retrieval.used, true);
+    assert.equal(session.archivist.retrieval.sourceCategory, "failure-playbook");
+    assert.match(session.archivist.retrieval.preview ?? "", /lsp_symbols failed: path_not_found/);
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }

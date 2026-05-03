@@ -2,7 +2,7 @@ import { readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 
-import { COMMAND_CATALOG, PATH_COMPLETION_COMMANDS, SECOND_ARG_PATH_COMMANDS } from "./catalog.js";
+import { COMMAND_CATALOG, PATH_COMPLETION_COMMANDS, PATH_SUBCOMMANDS, SECOND_ARG_PATH_COMMANDS } from "./catalog.js";
 import { discoverSkills, normalizeSkillToken, parseSkillShorthand } from "./skills.js";
 import type { RuntimeSession } from "../runtime/session.js";
 
@@ -192,8 +192,12 @@ function completeSlashCommand(input: string, selectedIndex = 0): PromptCompletio
 function completeCommandPath(cwd: string, input: string, selectedIndex = 0): PromptCompletionResult {
   const parts = input.split(/\s+/);
   const command = parts[0] ?? "";
-  const pathIndex = SECOND_ARG_PATH_COMMANDS.has(command) ? 2 : 1;
-  if (!PATH_COMPLETION_COMMANDS.has(command) && !(SECOND_ARG_PATH_COMMANDS.has(command) && parts.length >= 3)) {
+  const pathSubcommands = PATH_SUBCOMMANDS.get(command);
+  const hasPathSubcommand = Boolean(pathSubcommands?.has((parts[1] ?? "").toLowerCase()));
+  const secondArgPath = SECOND_ARG_PATH_COMMANDS.has(command) && parts.length >= 3;
+  const thirdArgPath = hasPathSubcommand && parts.length >= 3;
+  const pathIndex = hasPathSubcommand ? 2 : SECOND_ARG_PATH_COMMANDS.has(command) ? 2 : 1;
+  if (!PATH_COMPLETION_COMMANDS.has(command) && !secondArgPath && !thirdArgPath) {
     return emptyCompletion(input);
   }
 

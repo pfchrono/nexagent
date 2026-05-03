@@ -53,7 +53,7 @@
       "env": {
         "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"
       },
-      "description": "GitHub MCP for issues, PRs, branches, and CI status \u2014 supports autofix-pr, commit-push-pr, and issue commands"
+      "description": "GitHub MCP for issues, PRs, branches, and CI status — supports autofix-pr, commit-push-pr, and issue commands"
     },
     "code-review-graph": {
       "command": "uvx",
@@ -87,7 +87,8 @@
         "SENTRY_ACCESS_TOKEN": "${SENTRY_ACCESS_TOKEN}"
       },
       "type": "stdio",
-      "description": "Official Sentry MCP for issue, event, trace, and production error debugging"
+      "description": "Official Sentry MCP for issue, event, trace, and production error debugging",
+      "startup_timeout_sec": 120
     }
   }
 }

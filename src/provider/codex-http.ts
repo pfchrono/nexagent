@@ -54,6 +54,9 @@ export async function invokeCodexHttpTransport(
     },
     body: JSON.stringify({
       model: model ?? "gpt-5.4",
+      ...(request.session.providerRouting.modelSelection.configuredReasoningEfforts?.[request.session.providerTransport.activeProvider]
+        ? { reasoning: { effort: request.session.providerRouting.modelSelection.configuredReasoningEfforts[request.session.providerTransport.activeProvider] } }
+        : {}),
       ...(request.nativeInput !== undefined ? { input: request.nativeInput } : { input: request.prompt }),
       ...(request.instructions ? { instructions: request.instructions } : {}),
       ...(request.previousResponseId ? { previous_response_id: request.previousResponseId } : {}),

@@ -80,6 +80,9 @@ export async function invokeCodexChatGptHttpTransport(
     },
     body: JSON.stringify({
       model: model ?? "gpt-5.4",
+      ...(request.session.providerRouting.modelSelection.configuredReasoningEfforts?.[request.session.providerTransport.activeProvider]
+        ? { reasoning: { effort: request.session.providerRouting.modelSelection.configuredReasoningEfforts[request.session.providerTransport.activeProvider] } }
+        : {}),
       ...(request.nativeInput !== undefined
         ? { input: request.nativeInput }
         : { input: [{ role: "user", content: request.prompt }] }),

@@ -7,6 +7,7 @@ export type DiagnosticClass =
   | "provider.missing_evidence"
   | "tool.blocked"
   | "tool.failed"
+  | "tool.mcp_unavailable"
   | "command.failed"
   | "startup.bootstrap"
   | "compact.threshold"
@@ -44,6 +45,7 @@ export const DIAGNOSTIC_CLASS_METADATA: Record<DiagnosticClass, { severity: Diag
   "provider.missing_evidence": { severity: "error", summary: "provider response blocked by missing evidence" },
   "tool.blocked": { severity: "warning", summary: "tool execution blocked" },
   "tool.failed": { severity: "error", summary: "tool execution failed" },
+  "tool.mcp_unavailable": { severity: "warning", summary: "MCP tool unavailable" },
   "command.failed": { severity: "warning", summary: "runtime command failed" },
   "startup.bootstrap": { severity: "error", summary: "startup bootstrap failure" },
   "compact.threshold": { severity: "info", summary: "compaction threshold reached" },

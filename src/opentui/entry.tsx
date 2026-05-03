@@ -2,6 +2,7 @@ import { createCliRenderer } from "@opentui/core";
 import { createRoot } from "@opentui/react";
 
 import { loadPersistedPromptHistory, savePersistedPromptHistory } from "../runtime/persistence.js";
+import { shutdownMcpRegistry } from "../runtime/mcp.js";
 import type { RuntimeSession } from "../runtime/session.js";
 import { OpenTuiApp } from "./App.js";
 import { createOpenTuiKeyboardSource } from "./keyboard-source.js";
@@ -31,6 +32,7 @@ export async function runOpenTuiRuntime(session: RuntimeSession): Promise<void> 
       process.removeListener("SIGTERM", cleanup);
       try {
         keyboardSource.dispose();
+        shutdownMcpRegistry(session.mcpRegistry);
         renderer.destroy();
       } finally {
         resolve();

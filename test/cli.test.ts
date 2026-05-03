@@ -374,6 +374,15 @@ function createSession(provider = "codex"): RuntimeSession {
         preview: null,
       },
     },
+    lsp: {
+      enabled: false,
+      command: null,
+      args: [],
+      indexArchivist: false,
+    },
+    ui: {
+      logoMode: "full",
+    },
     action: {
       status: "ready",
       detail: "runtime baseline",
@@ -469,7 +478,9 @@ test("runRuntimeCommand exposes command catalog through help", async () => {
     "/provider [status|name|transport ...] [--verbose] - show or switch provider and transport mode",
     "/skill [name] [args...] - list skills or resolve and route a skill by name",
     "/mouse [status|mode <auto|scroll|select>] - show or set transcript mouse interaction mode",
-    "/memory [--verbose|--maintenance|save <text>|checkpoint [reason]|session [focus]] - inspect, maintain, or persist archivist memory/checkpoints",
+    "/config [status] | /config [set] <logo|lsp|lsp-index> <value> - inspect or mutate persisted runtime configuration",
+    "/lsp [status|mode <on|off>|symbols <path>|diagnostics <path>] - inspect disabled-by-default local LSP code intelligence",
+    "/memory [status|--verbose|--maintenance|save <text>|checkpoint [reason]|session [focus]] - inspect, maintain, or persist archivist memory/checkpoints",
     "/attach <image-path> - attach local image for next prompt (http transports only)",
     "/detach - clear queued image attachment",
     "!<command> - run guarded shell command and add output to transcript",
@@ -480,20 +491,120 @@ test("runRuntimeCommand exposes command catalog through help", async () => {
   assert.equal(result?.activity, "help");
 });
 
+test("runRuntimeCommand exposes and persists config and LSP settings", async () => {
+  const { runRuntimeCommand } = await import("../src/cli.js");
+  const { loadPersistedRuntimeState } = await import("../src/runtime/persistence.js");
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-cli-config-"));
+
+  try {
+    const session = createSession();
+    session.cwd = cwd;
+    session.repo.root = cwd;
+    session.toolPolicy.allowedRoots = [cwd];
+
+    const status = runRuntimeCommand(session, "/config");
+    assert.equal(status?.ok, true);
+    assert.match(status?.output ?? "", /^config$/m);
+    assert.match(status?.output ?? "", /^logoMode: full$/m);
+    assert.match(status?.output ?? "", /^enabled: false$/m);
+
+    const logo = runRuntimeCommand(session, "/config set logo condensed");
+    assert.equal(logo?.ok, true);
+    assert.equal(session.ui.logoMode, "condensed");
+
+    const directLogo = runRuntimeCommand(session, "/config logo full");
+    assert.equal(directLogo?.ok, true);
+    assert.equal(session.ui.logoMode, "full");
+
+    const lsp = runRuntimeCommand(session, "/config set lsp on");
+    assert.equal(lsp?.ok, true);
+    assert.equal(session.lsp.enabled, true);
+
+    const directLsp = runRuntimeCommand(session, "/config lsp off");
+    assert.equal(directLsp?.ok, true);
+    assert.equal(session.lsp.enabled, false);
+    assert.equal(runRuntimeCommand(session, "/config lsp on")?.ok, true);
+
+    const lspIndex = runRuntimeCommand(session, "/config set lsp-index on");
+    assert.equal(lspIndex?.ok, true);
+    assert.equal(session.lsp.indexArchivist, true);
+
+    const lspStatus = runRuntimeCommand(session, "/lsp");
+    assert.equal(lspStatus?.ok, true);
+    assert.match(lspStatus?.output ?? "", /^enabled: true$/m);
+    assert.match(lspStatus?.output ?? "", /no language server command configured/);
+
+    const persisted = await loadPersistedRuntimeState(cwd);
+    assert.equal(persisted?.ui?.logoMode, "full");
+    assert.equal(persisted?.lsp?.enabled, true);
+    assert.equal(persisted?.lsp?.indexArchivist, true);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("runRuntimeCommand accepts memory status alias", async () => {
+  const { runRuntimeCommand } = await import("../src/cli.js");
+  const session = createSession();
+
+  const base = runRuntimeCommand(session, "/memory");
+  const alias = runRuntimeCommand(session, "/memory status");
+
+  assert.equal(alias?.ok, true);
+  assert.equal(alias?.output, base?.output);
+  assert.equal(alias?.activity, "memory status");
+});
+
+test("runRuntimeCommand exposes LSP symbol and diagnostic slash commands", async () => {
+  const { runRuntimeCommand } = await import("../src/cli.js");
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-cli-lsp-"));
+  try {
+    await mkdir(path.join(cwd, "src"));
+    await writeFile(
+      path.join(cwd, "src", "sample.ts"),
+      "export function alpha() {}\n// TODO tighten diagnostics\nexport class Beta {}\n",
+      "utf8",
+    );
+    const session = createSession();
+    session.cwd = cwd;
+    session.repo.root = cwd;
+    session.lsp.enabled = true;
+
+    const symbols = runRuntimeCommand(session, "/lsp symbols src/sample.ts");
+    assert.equal(symbols?.ok, true);
+    assert.match(symbols?.output ?? "", /^lsp symbols$/m);
+    assert.match(symbols?.output ?? "", /function alpha line=1/);
+    assert.match(symbols?.output ?? "", /class Beta line=3/);
+
+    const diagnostics = runRuntimeCommand(session, "/lsp diagnostics src/sample.ts");
+    assert.equal(diagnostics?.ok, true);
+    assert.match(diagnostics?.output ?? "", /^lsp diagnostics$/m);
+    assert.match(diagnostics?.output ?? "", /TODO tighten diagnostics/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test("runRuntimeCommand shows and sets model for active provider", async () => {
   const { runRuntimeCommand } = await import("../src/cli.js");
   const session = createSession();
 
   assert.deepEqual(runRuntimeCommand(session, "/model"), {
     ok: true,
-    output: "provider: codex\ncurrent: gpt-5.4\navailable: gpt-5.4, gpt-5.5, gpt-5.4-mini, gpt-5.3-codex, gpt-5.3-codex-spark (needs websocket/realtime Codex adapter), gpt-5.2",
+    output: "provider: codex\ncurrent: gpt-5.4\neffort: medium\navailable: gpt-5.4, gpt-5.5, gpt-5.4-mini, gpt-5.3-codex, gpt-5.3-codex-spark (needs websocket/realtime Codex adapter), gpt-5.2\nefforts: low, medium, high, xhigh",
     activity: "model status · codex",
   });
 
-  assert.deepEqual(runRuntimeCommand(session, "/model gpt-5.5"), {
+  assert.deepEqual(runRuntimeCommand(session, "/model gpt-5.5 high"), {
     ok: true,
-    output: "provider: codex\ncurrent: gpt-5.5\navailable: gpt-5.4, gpt-5.5, gpt-5.4-mini, gpt-5.3-codex, gpt-5.3-codex-spark (needs websocket/realtime Codex adapter), gpt-5.2",
-    activity: "model set · gpt-5.5",
+    output: "provider: codex\ncurrent: gpt-5.5\neffort: high\navailable: gpt-5.4, gpt-5.5, gpt-5.4-mini, gpt-5.3-codex, gpt-5.3-codex-spark (needs websocket/realtime Codex adapter), gpt-5.2\nefforts: low, medium, high, xhigh",
+    activity: "model set · gpt-5.5 high",
+  });
+
+  assert.deepEqual(runRuntimeCommand(session, "/effort medium"), {
+    ok: true,
+    output: "provider: codex\nmodel: gpt-5.5\ncurrent: medium\navailable: low, medium, high, xhigh",
+    activity: "effort set · medium",
   });
 });
 
@@ -781,11 +892,11 @@ test("runRuntimeCommand compacts conversation manually", async () => {
   const result = runRuntimeCommand(session, "/compact");
 
   assert.equal(result?.ok, true);
-  assert.match(result?.output ?? "", /enabled: true/);
-  assert.match(result?.output ?? "", /preserveTurns: 4/);
-  assert.match(result?.output ?? "", /summary: present/);
-  assert.match(result?.output ?? "", /compacts: 1/);
-  assert.match(result?.output ?? "", /last-compact: 7 ->/);
+  assert.match(result?.output ?? "", /manual compaction completed/);
+  assert.match(result?.output ?? "", /summary=present/);
+  assert.match(result?.output ?? "", /turns=4/);
+  assert.match(result?.output ?? "", /tokens=7->/);
+  assert.doesNotMatch(result?.output ?? "", /preserveTurns/);
 });
 
 test("compactConversation preserves queued intent locally without event content", async () => {
@@ -825,8 +936,8 @@ test("runRuntimeCommand toggles caveman mode", async () => {
     activity: "caveman mode on",
   });
   assert.equal(session.commandModes.cavemanMode, true);
-  assert.match(session.promptV2Summary.style, /Compress user-visible prose/);
-  assert.match(session.promptV2Summary.style, /Drop articles, filler, and pleasantries/);
+  assert.match(session.promptV2Summary.style, /ultra-compressed caveman style/);
+  assert.match(session.promptV2Summary.style, /Drop articles .* filler .* pleasantries/);
 });
 
 test("runRuntimeCommand toggles deadpool mode", async () => {
@@ -842,7 +953,7 @@ test("runRuntimeCommand toggles deadpool mode", async () => {
     activity: "deadpool mode on",
   });
   assert.equal(session.commandModes.deadpoolMode, true);
-  assert.match(session.promptV2Summary.style, /brief snarky antihero flavor/);
+  assert.match(session.promptV2Summary.style, /recognizably Deadpool-flavored/);
   assert.match(session.promptV2Summary.style, /Technical accuracy, safety, and execution rules override style/);
 });
 
@@ -1509,6 +1620,13 @@ test("autocompletePromptBuffer completes repo paths", async () => {
 
     const selected = autocompletePromptBuffer(session, "/glob *.ts src/cl", 1);
     assert.equal(selected.value, "/glob *.ts src/clock.ts");
+
+    const lspSymbols = autocompletePromptBuffer(session, "/lsp symbols src/cl");
+    assert.equal(lspSymbols.value, "/lsp symbols src/cli.ts");
+    assert.match(lspSymbols.hint ?? "", /file src\/cli.ts/);
+
+    const lspDiagnostics = autocompletePromptBuffer(session, "/lsp diagnostics src/cl", 1);
+    assert.equal(lspDiagnostics.value, "/lsp diagnostics src/clock.ts");
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }

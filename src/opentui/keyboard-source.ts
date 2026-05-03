@@ -5,6 +5,7 @@ export interface OpenTuiKeyEvent {
   shift: boolean;
   option: boolean;
   sequence: string;
+  paste?: boolean;
 }
 
 export interface OpenTuiKeyboardSource {
@@ -126,15 +127,33 @@ function createMergedKeyboardSource(primary: OpenTuiKeyboardSource, fallback: Op
 }
 
 function normalizeOpenTuiKeyEvent(key: OpenTuiKeyEvent): OpenTuiKeyEvent {
-  const fallbackSequence = !key.ctrl && !key.meta && !key.option ? printableSequenceForNamedKey(key.name, key.shift) : "";
+  const normalizedName = normalizeKeyName(key.name, key.sequence);
+  const fallbackSequence = !key.ctrl && !key.meta && !key.option ? printableSequenceForNamedKey(normalizedName, key.shift) : "";
   return {
-    name: key.name,
-    ctrl: key.ctrl,
+    name: normalizedName,
+    ctrl: key.ctrl || isControlShortcutName(key.name),
     meta: key.meta,
     shift: key.shift,
     option: key.option,
     sequence: key.sequence && key.sequence.length > 0 ? key.sequence : fallbackSequence,
   };
+}
+
+function normalizeKeyName(name: string, sequence: string): string {
+  const normalized = name.toLowerCase();
+  if (normalized === "ctrl+g" || normalized === "c-g" || normalized === "^g" || sequence === "\x07") {
+    return "g";
+  }
+  if (normalized === "ctrl+v" || normalized === "c-v" || normalized === "^v" || sequence === "\x16") {
+    return "v";
+  }
+  return normalized;
+}
+
+function isControlShortcutName(name: string): boolean {
+  const normalized = name.toLowerCase();
+  return normalized === "ctrl+g" || normalized === "c-g" || normalized === "^g"
+    || normalized === "ctrl+v" || normalized === "c-v" || normalized === "^v";
 }
 
 function printableSequenceForNamedKey(name: string, shifted: boolean): string {
@@ -188,6 +207,13 @@ function printableSequenceForNamedKey(name: string, shifted: boolean): string {
 
 export function parseRawKeyboardInput(chunk: Buffer | string): OpenTuiKeyEvent[] {
   const input = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : chunk;
+  const bracketedPaste = parseBracketedPaste(input);
+  if (bracketedPaste) {
+    return [pasteKey(bracketedPaste)];
+  }
+  if (looksLikeRawMultilinePaste(input)) {
+    return [pasteKey(input)];
+  }
   const events: OpenTuiKeyEvent[] = [];
   for (let index = 0; index < input.length; index += 1) {
     const char = input[index] ?? "";
@@ -205,6 +231,29 @@ export function parseRawKeyboardInput(chunk: Buffer | string): OpenTuiKeyEvent[]
     }
   }
   return events;
+}
+
+function parseBracketedPaste(input: string): string | null {
+  const start = "\x1b[200~";
+  const end = "\x1b[201~";
+  if (!input.startsWith(start)) {
+    return null;
+  }
+  const endIndex = input.indexOf(end, start.length);
+  if (endIndex < 0) {
+    return null;
+  }
+  return input.slice(start.length, endIndex);
+}
+
+function looksLikeRawMultilinePaste(input: string): boolean {
+  if (input.startsWith("\x1b")) {
+    return false;
+  }
+  if (input.length <= 1 || (!input.includes("\n") && !input.includes("\r"))) {
+    return false;
+  }
+  return /[ -~]/.test(input);
 }
 
 function parseEscapeSequence(input: string, startIndex: number): { event: OpenTuiKeyEvent | null; nextIndex: number } {
@@ -295,6 +344,17 @@ function mapKittyStyleKeyCode(sequence: string): OpenTuiKeyEvent | null {
   if (code === 9) {
     return specialKey("tab", sequence, modifier);
   }
+  if (code >= 32 && code <= 126) {
+    const char = String.fromCharCode(code);
+    return {
+      name: char.toLowerCase(),
+      ctrl: modifier.ctrl === true,
+      meta: modifier.meta === true,
+      shift: modifier.shift === true || (char.toUpperCase() === char && char.toLowerCase() !== char),
+      option: modifier.option === true,
+      sequence,
+    };
+  }
   return null;
 }
 
@@ -352,6 +412,18 @@ function specialKey(name: string, sequence: string, overrides: Partial<OpenTuiKe
     option: false,
     sequence,
     ...overrides,
+  };
+}
+
+function pasteKey(value: string): OpenTuiKeyEvent {
+  return {
+    name: "paste",
+    ctrl: false,
+    meta: false,
+    shift: false,
+    option: false,
+    sequence: value,
+    paste: true,
   };
 }
 

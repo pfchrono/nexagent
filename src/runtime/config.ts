@@ -1,9 +1,10 @@
 import { execFile } from "node:child_process";
-import { readdir, readFile, stat } from "node:fs/promises";
+import { mkdir, readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 
 import { mergeProviderRegistryConfigs, type ProviderConfigInput, type ProviderRegistry } from "../provider/registry.js";
+import { readMcpConfigFile, writeMcpConfigFile } from "./mcp.js";
 import { resolveNexagentHome, resolvePathFromBase } from "./paths.js";
 
 const execFileAsync = promisify(execFile);
@@ -23,6 +24,8 @@ export interface HarnessConfig {
   toolPolicy: ToolPolicy;
   hooks?: HooksConfig;
   archivist: ArchivistConfig;
+  lsp: LspConfig;
+  ui: UiConfig;
   compaction?: CompactionConfig;
 }
 
@@ -66,6 +69,17 @@ export interface ArchivistConfig {
   retrieval: ArchivistRetrievalState;
   writes: ArchivistWriteState;
   diagnostics?: ArchivistDiagnosticsState;
+}
+
+export interface LspConfig {
+  enabled: boolean;
+  command: string | null;
+  args: string[];
+  indexArchivist: boolean;
+}
+
+export interface UiConfig {
+  logoMode: "full" | "condensed" | "off";
 }
 
 export interface ArchivistDiagnosticsState {
@@ -115,6 +129,7 @@ export interface ProviderFallbackPolicy {
 export interface ProviderModelSelection {
   activeProvider: string;
   configuredModels: ProviderModelMatrix;
+  configuredReasoningEfforts?: ProviderReasoningEffortMatrix;
 }
 
 export interface ProviderTransportConfig {
@@ -124,6 +139,12 @@ export interface ProviderTransportConfig {
 export interface ProviderModelMatrix {
   codex?: string;
   openai?: string;
+}
+
+export interface ProviderReasoningEffortMatrix {
+  codex?: string;
+  openai?: string;
+  [provider: string]: string | undefined;
 }
 
 export interface RepoInstructionSource {
@@ -180,6 +201,8 @@ interface NexagentSettings {
     enabledServers?: string[];
   };
   archivist?: ArchivistSettings;
+  lsp?: Partial<LspConfig>;
+  ui?: Partial<UiConfig>;
   compaction?: Partial<CompactionConfig>;
   imports?: {
     claude?: {
@@ -200,13 +223,17 @@ interface ResolvedConfigSource {
   enabledMcpServers?: string[];
   hooks?: HooksConfig;
   archivist?: ArchivistSettings;
+  lsp?: Partial<LspConfig>;
+  ui?: Partial<UiConfig>;
   compaction?: Partial<CompactionConfig>;
 }
 
 const DEFAULT_PRODUCT_NAME = "nexagent";
 const DEFAULT_PROVIDER = "codex";
-const DEFAULT_MCP_CONFIG_FILE = ".mcp.json";
 const NEXAGENT_SETTINGS_DIR = ".nexagent";
+const DEFAULT_MCP_CONFIG_FILE = path.join(NEXAGENT_SETTINGS_DIR, "mcp.json");
+const LEGACY_MCP_CONFIG_FILE = ".mcp.json";
+const CODEX_CONFIG_FILE = ".codex/config.toml";
 const NEXAGENT_CONFIG_BASENAME = "config.json";
 const NEXAGENT_SETTINGS_BASENAME = "settings.json";
 const NEXAGENT_LOCAL_SETTINGS_BASENAME = "settings.local.json";
@@ -222,6 +249,7 @@ const REPO_INSTRUCTION_SOURCE_CANDIDATES = [
   { kind: "AGENTS.md", relativePath: "AGENTS.md" },
   { kind: "CLAUDE.md", relativePath: "CLAUDE.md" },
   { kind: ".claude", relativePath: ".claude" },
+  { kind: ".nexagent/mcp.json", relativePath: DEFAULT_MCP_CONFIG_FILE },
   { kind: ".mcp.json", relativePath: ".mcp.json" },
   { kind: "openspec", relativePath: "openspec" },
 ] as const;
@@ -275,7 +303,7 @@ export async function loadHarnessConfig(cwd: string): Promise<HarnessConfig> {
       },
       transport: mergedConfig.transport ?? {},
     },
-    mcpConfigPath: resolveConfigFilePath(cwd, mergedConfig.mcpConfigPath),
+    mcpConfigPath: await resolveMcpConfigPath(cwd, nexagentHome, mergedConfig.mcpConfigPath),
     enabledMcpServers: normalizeServerNames(mergedConfig.enabledMcpServers),
     imports: {
       claude: importedClaude?.metadata ?? null,
@@ -285,6 +313,8 @@ export async function loadHarnessConfig(cwd: string): Promise<HarnessConfig> {
     toolPolicy: createToolPolicy(cwd),
     hooks: mergedConfig.hooks ?? createEmptyHooksConfig(),
     archivist: await resolveArchivistConfig(cwd, mergedConfig.archivist),
+    lsp: resolveLspConfig(mergedConfig.lsp),
+    ui: resolveUiConfig(mergedConfig.ui),
     compaction: resolveCompactionConfig(mergedConfig.compaction),
   };
 }
@@ -348,6 +378,8 @@ function mapNexagentSettings(settings: NexagentSettings | null, settingsDir: str
     mcpConfigPath: settings.mcp?.configPath ? resolvePathFromBase(settingsDir, settings.mcp.configPath) : undefined,
     enabledMcpServers: settings.mcp?.enabledServers,
     archivist: settings.archivist ? mapArchivistSettings(settings.archivist, settingsDir) : undefined,
+    lsp: settings.lsp,
+    ui: settings.ui,
     compaction: settings.compaction,
   };
 }
@@ -393,9 +425,11 @@ function mergeConfigSources(...sources: ResolvedConfigSource[]): ResolvedConfigS
     transport: mergeProviderTransport(resolved.transport, source.transport),
     prompt: source.prompt ?? resolved.prompt,
     mcpConfigPath: source.mcpConfigPath ?? resolved.mcpConfigPath,
-    enabledMcpServers: source.enabledMcpServers ?? resolved.enabledMcpServers,
+    enabledMcpServers: mergeServerNames(resolved.enabledMcpServers, source.enabledMcpServers),
     hooks: source.hooks ?? resolved.hooks,
     archivist: mergeArchivistSettings(resolved.archivist, source.archivist),
+    lsp: mergeLspSettings(resolved.lsp, source.lsp),
+    ui: mergeUiSettings(resolved.ui, source.ui),
     compaction: mergeCompactionSettings(resolved.compaction, source.compaction),
   }), {});
 }
@@ -438,17 +472,117 @@ function getImportedKeys(source: ResolvedConfigSource): string[] {
   if (source.archivist && Object.keys(source.archivist).length > 0) {
     importedKeys.push("archivist");
   }
+  if (source.lsp && Object.keys(source.lsp).length > 0) {
+    importedKeys.push("lsp");
+  }
+  if (source.ui && Object.keys(source.ui).length > 0) {
+    importedKeys.push("ui");
+  }
 
   return importedKeys;
 }
 
 function normalizeServerNames(serverNames?: string[]): string[] {
-  return [...new Set((serverNames ?? []).filter((name) => name.length > 0))].sort();
+  return [...new Set((serverNames ?? []).map((name) => name.trim()).filter((name) => name.length > 0))].sort();
+}
+
+function mergeServerNames(base?: string[], overlay?: string[]): string[] {
+  return normalizeServerNames([...(base ?? []), ...(overlay ?? [])]);
 }
 
 function resolveConfigFilePath(cwd: string, configPath?: string): string {
   const resolvedPath = configPath?.trim().length ? configPath : DEFAULT_MCP_CONFIG_FILE;
   return path.isAbsolute(resolvedPath) ? resolvedPath : path.join(cwd, resolvedPath);
+}
+
+async function resolveMcpConfigPath(cwd: string, nexagentHome: string, configPath?: string): Promise<string> {
+  const explicitPath = configPath?.trim();
+  const globalMcpPath = path.join(nexagentHome, "mcp.json");
+  if (explicitPath && explicitPath !== DEFAULT_MCP_CONFIG_FILE) {
+    const resolvedExplicitPath = resolveConfigFilePath(cwd, explicitPath);
+    if (resolvedExplicitPath === globalMcpPath) {
+      const codexPath = path.join(path.dirname(nexagentHome), CODEX_CONFIG_FILE);
+      const legacyRepoPath = path.join(cwd, LEGACY_MCP_CONFIG_FILE);
+      if (await pathExists(codexPath)) {
+        if (await pathExists(globalMcpPath)) {
+          await mergeMissingMcpServers(codexPath, globalMcpPath);
+        } else {
+          await migrateMcpConfigOnce(codexPath, globalMcpPath);
+        }
+      }
+      if (await pathExists(legacyRepoPath)) {
+        if (await pathExists(globalMcpPath)) {
+          await mergeMissingMcpServers(legacyRepoPath, globalMcpPath);
+        } else {
+          await migrateMcpConfigOnce(legacyRepoPath, globalMcpPath);
+        }
+      }
+    }
+    return resolvedExplicitPath;
+  }
+
+  const repoMcpPath = path.join(cwd, DEFAULT_MCP_CONFIG_FILE);
+  if (await pathExists(repoMcpPath)) {
+    return repoMcpPath;
+  }
+
+  if (await pathExists(globalMcpPath)) {
+    const codexPath = path.join(path.dirname(nexagentHome), CODEX_CONFIG_FILE);
+    const legacyRepoPath = path.join(cwd, LEGACY_MCP_CONFIG_FILE);
+    if (await pathExists(codexPath)) {
+      await mergeMissingMcpServers(codexPath, globalMcpPath);
+    }
+    if (await pathExists(legacyRepoPath)) {
+      await mergeMissingMcpServers(legacyRepoPath, globalMcpPath);
+    }
+    return globalMcpPath;
+  }
+
+  const legacyRepoPath = path.join(cwd, LEGACY_MCP_CONFIG_FILE);
+  if (await pathExists(legacyRepoPath)) {
+    await migrateMcpConfigOnce(legacyRepoPath, repoMcpPath);
+    return repoMcpPath;
+  }
+
+  const codexPath = path.join(path.dirname(nexagentHome), CODEX_CONFIG_FILE);
+  if (await pathExists(codexPath)) {
+    await migrateMcpConfigOnce(codexPath, globalMcpPath);
+    return globalMcpPath;
+  }
+
+  return repoMcpPath;
+}
+
+async function migrateMcpConfigOnce(sourcePath: string, targetPath: string): Promise<void> {
+  if (await pathExists(targetPath)) {
+    return;
+  }
+  const parsed = await readMcpConfigFile(sourcePath);
+  if (!parsed?.mcpServers || Object.keys(parsed.mcpServers).length === 0) {
+    return;
+  }
+  await mkdir(path.dirname(targetPath), { recursive: true });
+  await writeMcpConfigFile(targetPath, parsed);
+}
+
+async function mergeMissingMcpServers(sourcePath: string, targetPath: string): Promise<void> {
+  const [source, target] = await Promise.all([
+    readMcpConfigFile(sourcePath),
+    readMcpConfigFile(targetPath),
+  ]);
+  const sourceServers = source?.mcpServers ?? {};
+  const targetServers = target?.mcpServers ?? {};
+  const missingEntries = Object.entries(sourceServers).filter(([name]) => !Object.hasOwn(targetServers, name));
+  if (missingEntries.length === 0) {
+    return;
+  }
+
+  await writeMcpConfigFile(targetPath, {
+    mcpServers: {
+      ...targetServers,
+      ...Object.fromEntries(missingEntries),
+    },
+  });
 }
 
 function mapProviderModels(env?: ProviderModelEnv): ProviderModelMatrix | undefined {
@@ -594,6 +728,43 @@ function mergeCompactionSettings(
       ...(resolved?.modelThresholdOverrides ?? {}),
       ...(source?.modelThresholdOverrides ?? {}),
     },
+  };
+}
+
+function mergeLspSettings(resolved?: Partial<LspConfig>, source?: Partial<LspConfig>): Partial<LspConfig> | undefined {
+  if (!resolved && !source) {
+    return undefined;
+  }
+  return {
+    ...resolved,
+    ...source,
+    args: source?.args ?? resolved?.args,
+  };
+}
+
+function mergeUiSettings(resolved?: Partial<UiConfig>, source?: Partial<UiConfig>): Partial<UiConfig> | undefined {
+  if (!resolved && !source) {
+    return undefined;
+  }
+  return {
+    ...resolved,
+    ...source,
+  };
+}
+
+function resolveLspConfig(settings?: Partial<LspConfig>): LspConfig {
+  return {
+    enabled: settings?.enabled === true,
+    command: typeof settings?.command === "string" && settings.command.trim().length > 0 ? settings.command.trim() : null,
+    args: Array.isArray(settings?.args) ? settings.args.filter((arg): arg is string => typeof arg === "string").slice(0, 20) : [],
+    indexArchivist: settings?.indexArchivist === true,
+  };
+}
+
+function resolveUiConfig(settings?: Partial<UiConfig>): UiConfig {
+  const logoMode = settings?.logoMode;
+  return {
+    logoMode: logoMode === "condensed" || logoMode === "off" || logoMode === "full" ? logoMode : "full",
   };
 }
 
@@ -940,6 +1111,7 @@ async function summarizeInstructionSource(kind: string, absolutePath: string): P
       return summarizeTextInstruction(kind, absolutePath, "Repo Claude instructions");
     case ".claude":
       return summarizeDirectoryInstruction(kind, absolutePath, ".claude settings and command files");
+    case ".nexagent/mcp.json":
     case ".mcp.json":
       return summarizeMcpRegistry(absolutePath);
     case "openspec":
@@ -954,7 +1126,7 @@ async function readInstructionDetail(kind: string, absolutePath: string): Promis
     return await summarizeDirectory(kind, absolutePath);
   }
 
-  if (kind === ".mcp.json") {
+  if (kind === ".nexagent/mcp.json" || kind === ".mcp.json") {
     return await summarizeMcpRegistryDetail(absolutePath);
   }
 
@@ -999,14 +1171,14 @@ async function summarizeTextInstruction(kind: string, filePath: string, fallback
 }
 
 async function summarizeMcpRegistry(filePath: string): Promise<string> {
-  const parsed = await readJsonIfExists<{ mcpServers?: Record<string, unknown> }>(filePath);
+  const parsed = await readMcpConfigFile(filePath);
   const serverNames = parsed?.mcpServers ? Object.keys(parsed.mcpServers).sort() : [];
 
   return serverNames.length > 0 ? `MCP registry: ${serverNames.join(", ")}` : "MCP registry: no servers declared";
 }
 
 async function summarizeMcpRegistryDetail(filePath: string): Promise<string | null> {
-  const parsed = await readJsonIfExists<{ mcpServers?: Record<string, unknown> }>(filePath);
+  const parsed = await readMcpConfigFile(filePath);
   const serverNames = parsed?.mcpServers ? Object.keys(parsed.mcpServers).sort() : [];
 
   return serverNames.length > 0 ? `Configured MCP servers: ${serverNames.join(", ")}` : "Configured MCP servers: none";

@@ -4,13 +4,19 @@ import path from "node:path";
 
 import type { RuntimeSession } from "./session.js";
 
-interface ArchivistEntry {
+export interface ArchivistEntry {
   type: string;
   content: string;
   summary?: string;
   tags?: string[];
   projectPath?: string;
   createdAt?: string;
+  updatedAt?: string;
+  fingerprint?: string;
+  seenCount?: number;
+  firstSeen?: string;
+  lastSeen?: string;
+  sourceCategory?: string;
 }
 
 interface ArchivistStore {
@@ -36,6 +42,25 @@ export interface ArchivistMaintenanceResult {
   persisted: boolean;
 }
 
+export interface ArchivistLifecycleResult {
+  entryCount: number;
+  preview: string;
+  matchedExisting: boolean;
+  fingerprint: string;
+}
+
+export interface ArchivistSearchResult {
+  entries: ArchivistEntry[];
+  preview: string;
+}
+
+export interface ArchivistFailureInput {
+  toolName: string;
+  failureClass: string;
+  message: string;
+  recoveryHint?: string;
+}
+
 const ARCHIVIST_STORE_VERSION = "1.0.0";
 const ARCHIVIST_MAX_ENTRIES = 200;
 const ARCHIVIST_MAX_SUMMARY = 240;
@@ -58,7 +83,19 @@ export async function applyArchivistRetrieval(session: RuntimeSession, prompt: s
 export async function saveArchivistMemory(
   session: RuntimeSession,
   input: { summary: string; content?: string; tags?: string[]; type?: string },
-): Promise<{ entryCount: number; preview: string }> {
+): Promise<ArchivistLifecycleResult> {
+  return await addArchivistMemory(session, {
+    ...input,
+    type: input.type?.trim() || "memory",
+    sourceCategory: "memory-save",
+    action: "save",
+  });
+}
+
+export async function addArchivistMemory(
+  session: RuntimeSession,
+  input: { summary: string; content?: string; tags?: string[]; type?: string; sourceCategory?: string; action?: "save" | "checkpoint" },
+): Promise<ArchivistLifecycleResult> {
   const storagePath = getWritableArchivistPath(session);
   const summary = truncate(normalizeText(input.summary), ARCHIVIST_MAX_SUMMARY);
   if (!summary) {
@@ -77,65 +114,105 @@ export async function saveArchivistMemory(
     tags,
     projectPath: session.repo.root ?? session.cwd,
     createdAt,
+    updatedAt: createdAt,
+    firstSeen: createdAt,
+    lastSeen: createdAt,
+    seenCount: 1,
+    sourceCategory: input.sourceCategory ?? "memory-save",
   };
+  entry.fingerprint = createArchivistDedupKey(entry);
 
-  store.entries.push(entry);
+  const merged = upsertArchivistEntry(store.entries, entry);
+  store.entries = merged.entries;
   store.entries = store.entries.slice(-ARCHIVIST_MAX_ENTRIES);
   await persistArchivistStore(storagePath, store);
 
   session.archivist.storageExists = true;
   session.archivist.writes = {
     used: true,
-    action: "save",
-    sourceCategory: "memory-save",
+    action: input.action ?? "save",
+    sourceCategory: input.sourceCategory ?? "memory-save",
     savedAt: createdAt,
     entryCount: store.entries.length,
-    preview: `- [${type}] ${summary}`,
+    preview: formatArchivistEntryPreview(merged.entry),
   };
   updateArchivistDiagnostics(session, store.entries);
 
   return {
     entryCount: store.entries.length,
-    preview: session.archivist.writes.preview ?? `- [${type}] ${summary}`,
+    preview: session.archivist.writes.preview ?? formatArchivistEntryPreview(merged.entry),
+    matchedExisting: merged.matchedExisting,
+    fingerprint: merged.entry.fingerprint ?? entry.fingerprint,
+  };
+}
+
+export function addArchivistMemorySync(
+  session: RuntimeSession,
+  input: { summary: string; content?: string; tags?: string[]; type?: string; sourceCategory?: string; action?: "save" | "checkpoint" },
+): ArchivistLifecycleResult {
+  const storagePath = getWritableArchivistPath(session);
+  const summary = truncate(normalizeText(input.summary), ARCHIVIST_MAX_SUMMARY);
+  if (!summary) {
+    throw new Error("summary required");
+  }
+
+  const content = truncate(normalizeText(input.content ?? summary), ARCHIVIST_MAX_CONTENT);
+  const tags = normalizeTags(input.tags);
+  const type = input.type?.trim() || "memory";
+  const createdAt = new Date().toISOString();
+  const store = loadArchivistStoreSync(storagePath);
+  const entry: ArchivistEntry = {
+    type,
+    summary,
+    content,
+    tags,
+    projectPath: session.repo.root ?? session.cwd,
+    createdAt,
+    updatedAt: createdAt,
+    firstSeen: createdAt,
+    lastSeen: createdAt,
+    seenCount: 1,
+    sourceCategory: input.sourceCategory ?? "memory-save",
+  };
+  entry.fingerprint = createArchivistDedupKey(entry);
+
+  const merged = upsertArchivistEntry(store.entries, entry);
+  store.entries = merged.entries.slice(-ARCHIVIST_MAX_ENTRIES);
+  persistArchivistStoreSync(storagePath, store);
+
+  session.archivist.storageExists = true;
+  session.archivist.writes = {
+    used: true,
+    action: input.action ?? "save",
+    sourceCategory: input.sourceCategory ?? "memory-save",
+    savedAt: createdAt,
+    entryCount: store.entries.length,
+    preview: formatArchivistEntryPreview(merged.entry),
+  };
+  updateArchivistDiagnostics(session, store.entries);
+
+  return {
+    entryCount: store.entries.length,
+    preview: session.archivist.writes.preview ?? formatArchivistEntryPreview(merged.entry),
+    matchedExisting: merged.matchedExisting,
+    fingerprint: merged.entry.fingerprint ?? entry.fingerprint,
   };
 }
 
 export async function checkpointArchivistSession(
   session: RuntimeSession,
   reason?: string,
-): Promise<{ entryCount: number; preview: string }> {
-  const storagePath = getWritableArchivistPath(session);
+): Promise<ArchivistLifecycleResult> {
   const createdAt = new Date().toISOString();
   const snapshot = summarizeCheckpointState(session, reason);
-  const store = await loadArchivistStore(storagePath);
-  const entry: ArchivistEntry = {
+  return await addArchivistMemory(session, {
     type: "checkpoint",
     summary: snapshot.summary,
     content: snapshot.content,
     tags: ["checkpoint", session.provider],
-    projectPath: session.repo.root ?? session.cwd,
-    createdAt,
-  };
-
-  store.entries.push(entry);
-  store.entries = store.entries.slice(-ARCHIVIST_MAX_ENTRIES);
-  await persistArchivistStore(storagePath, store);
-
-  session.archivist.storageExists = true;
-  session.archivist.writes = {
-    used: true,
-    action: "checkpoint",
     sourceCategory: "session-checkpoint",
-    savedAt: createdAt,
-    entryCount: store.entries.length,
-    preview: `- [checkpoint] ${snapshot.summary}`,
-  };
-  updateArchivistDiagnostics(session, store.entries);
-
-  return {
-    entryCount: store.entries.length,
-    preview: session.archivist.writes.preview ?? `- [checkpoint] ${snapshot.summary}`,
-  };
+    action: "checkpoint",
+  });
 }
 
 export function maintainArchivistMemorySync(session: RuntimeSession): ArchivistMaintenanceResult {
@@ -145,10 +222,8 @@ export function maintainArchivistMemorySync(session: RuntimeSession): ArchivistM
   const deduped = dedupeArchivistEntries(store.entries);
   store.entries = deduped.entries;
 
-  if (deduped.removedDuplicates > 0) {
-    persistArchivistStoreSync(storagePath, store);
-    session.archivist.storageExists = true;
-  }
+  persistArchivistStoreSync(storagePath, store);
+  session.archivist.storageExists = true;
 
   updateArchivistDiagnostics(session, store.entries);
 
@@ -160,7 +235,85 @@ export function maintainArchivistMemorySync(session: RuntimeSession): ArchivistM
     duplicateSuspects: countDuplicateSuspectSummaries(store.entries),
     stale: store.entries.filter((entry) => isStaleArchivistEntry(entry.createdAt)).length,
     noisy: store.entries.filter((entry) => tokenize(entry.summary ?? entry.content).length < 3).length,
-    persisted: deduped.removedDuplicates > 0,
+    persisted: true,
+  };
+}
+
+export async function searchArchivistMemory(session: RuntimeSession, query: string): Promise<ArchivistSearchResult> {
+  const storagePath = getWritableArchivistPath(session);
+  const entries = await loadArchivistEntries(storagePath);
+  const recall = selectRelevantArchivistEntries(entries, session, query);
+  if (!recall.used) {
+    return { entries: [], preview: "(no matching memories)" };
+  }
+  const selected = entries
+    .filter((entry) => recall.preview?.includes(truncate(entry.summary ?? entry.content, 180)))
+    .slice(0, ARCHIVIST_RETRIEVAL_MAX_MATCHES);
+  return {
+    entries: selected,
+    preview: recall.preview ?? "(no matching memories)",
+  };
+}
+
+export async function getArchivistMemory(session: RuntimeSession, fingerprint: string): Promise<ArchivistEntry | null> {
+  const storagePath = getWritableArchivistPath(session);
+  const entries = await loadArchivistEntries(storagePath);
+  return entries.find((entry) => entry.fingerprint === fingerprint) ?? null;
+}
+
+export async function rememberArchivistFailure(session: RuntimeSession, input: ArchivistFailureInput): Promise<ArchivistLifecycleResult | null> {
+  if (!session.archivist.enabled || !session.archivist.storagePath) {
+    return null;
+  }
+  const toolName = normalizeText(input.toolName || "unknown-tool");
+  const failureClass = normalizeText(input.failureClass || "tool-failure");
+  const message = truncate(normalizeText(input.message || "unknown failure"), 180);
+  const recoveryHint = truncate(normalizeText(input.recoveryHint ?? defaultRecoveryHint(toolName, failureClass)), 220);
+  return await addArchivistMemory(session, {
+    type: "failure-playbook",
+    summary: `${toolName} failed: ${failureClass}`,
+    content: [
+      `Tool: ${toolName}`,
+      `Failure: ${failureClass}`,
+      `Observed: ${message}`,
+      `Recovery: ${recoveryHint}`,
+    ].join("\n"),
+    tags: ["failure", "recovery", toolName, failureClass],
+    sourceCategory: "failure-playbook",
+  });
+}
+
+export async function rememberArchivistRecovery(
+  session: RuntimeSession,
+  input: { toolName: string; priorFailure: string; recovery: string },
+): Promise<ArchivistLifecycleResult | null> {
+  if (!session.archivist.enabled || !session.archivist.storagePath) {
+    return null;
+  }
+  const toolName = normalizeText(input.toolName || "unknown-tool");
+  return await addArchivistMemory(session, {
+    type: "failure-recovery",
+    summary: `${toolName} recovered after ${truncate(normalizeText(input.priorFailure), 120)}`,
+    content: [
+      `Tool: ${toolName}`,
+      `Prior failure: ${truncate(normalizeText(input.priorFailure), 180)}`,
+      `Recovery: ${truncate(normalizeText(input.recovery), 220)}`,
+    ].join("\n"),
+    tags: ["failure", "recovery", toolName],
+    sourceCategory: "failure-playbook",
+  });
+}
+
+export async function deleteArchivistMemory(session: RuntimeSession, fingerprint: string): Promise<{ deleted: boolean; entryCount: number }> {
+  const storagePath = getWritableArchivistPath(session);
+  const store = await loadArchivistStore(storagePath);
+  const before = store.entries.length;
+  store.entries = store.entries.filter((entry) => entry.fingerprint !== fingerprint);
+  await persistArchivistStore(storagePath, store);
+  updateArchivistDiagnostics(session, store.entries);
+  return {
+    deleted: store.entries.length !== before,
+    entryCount: store.entries.length,
   };
 }
 
@@ -258,17 +411,16 @@ function dedupeArchivistEntries(entries: ArchivistEntry[]): { entries: Archivist
   let removedDuplicates = 0;
 
   entries.forEach((entry, index) => {
-    const key = createArchivistDedupKey(entry);
+    const normalizedEntry = normalizeArchivistEntryRecord(entry);
+    const key = normalizedEntry.fingerprint ?? createArchivistDedupKey(normalizedEntry);
     const existing = selected.get(key);
     if (!existing) {
-      selected.set(key, { entry, index });
+      selected.set(key, { entry: normalizedEntry, index });
       return;
     }
 
     removedDuplicates += 1;
-    if (compareArchivistRecency(entry.createdAt, existing.entry.createdAt) > 0) {
-      selected.set(key, { entry, index });
-    }
+    existing.entry = mergeArchivistEntries(existing.entry, normalizedEntry);
   });
 
   return {
@@ -291,6 +443,82 @@ function createArchivistDedupKey(entry: ArchivistEntry): string {
     normalizeText(entry.projectPath ?? "").toLowerCase(),
     tags,
   ].join("\u0000");
+}
+
+function upsertArchivistEntry(entries: ArchivistEntry[], entry: ArchivistEntry): { entries: ArchivistEntry[]; entry: ArchivistEntry; matchedExisting: boolean } {
+  const normalizedEntry = normalizeArchivistEntryRecord(entry);
+  const fingerprint = normalizedEntry.fingerprint ?? createArchivistDedupKey(normalizedEntry);
+  const index = entries.findIndex((candidate) => (candidate.fingerprint ?? createArchivistDedupKey(candidate)) === fingerprint);
+  if (index < 0) {
+    return {
+      entries: [...entries, normalizedEntry],
+      entry: normalizedEntry,
+      matchedExisting: false,
+    };
+  }
+
+  const merged = mergeArchivistEntries(entries[index], normalizedEntry);
+  const next = [...entries];
+  next[index] = merged;
+  return {
+    entries: next,
+    entry: merged,
+    matchedExisting: true,
+  };
+}
+
+function mergeArchivistEntries(existing: ArchivistEntry, incoming: ArchivistEntry): ArchivistEntry {
+  const existingSeen = normalizeSeenCount(existing.seenCount);
+  const incomingSeen = normalizeSeenCount(incoming.seenCount);
+  const firstSeen = minIsoDate(existing.firstSeen ?? existing.createdAt, incoming.firstSeen ?? incoming.createdAt);
+  const lastSeen = maxIsoDate(existing.lastSeen ?? existing.updatedAt ?? existing.createdAt, incoming.lastSeen ?? incoming.updatedAt ?? incoming.createdAt);
+  const newer = compareArchivistRecency(incoming.updatedAt ?? incoming.createdAt, existing.updatedAt ?? existing.createdAt) >= 0 ? incoming : existing;
+  return normalizeArchivistEntryRecord({
+    ...newer,
+    fingerprint: existing.fingerprint ?? incoming.fingerprint ?? createArchivistDedupKey(incoming),
+    firstSeen,
+    lastSeen,
+    createdAt: newer.createdAt ?? lastSeen,
+    updatedAt: lastSeen,
+    seenCount: existingSeen + incomingSeen,
+    tags: normalizeTags([...(existing.tags ?? []), ...(incoming.tags ?? [])]),
+    sourceCategory: incoming.sourceCategory ?? existing.sourceCategory,
+  });
+}
+
+function normalizeArchivistEntryRecord(entry: ArchivistEntry): ArchivistEntry {
+  const summary = entry.summary ? truncate(normalizeText(entry.summary), ARCHIVIST_MAX_SUMMARY) : undefined;
+  const content = truncate(normalizeText(entry.content), ARCHIVIST_MAX_CONTENT);
+  const createdAt = entry.createdAt ?? new Date().toISOString();
+  const firstSeen = entry.firstSeen ?? createdAt;
+  const lastSeen = entry.lastSeen ?? entry.updatedAt ?? createdAt;
+  const normalized: ArchivistEntry = {
+    ...entry,
+    type: normalizeText(entry.type || "memory") || "memory",
+    content,
+    summary,
+    tags: normalizeTags(entry.tags),
+    createdAt,
+    updatedAt: entry.updatedAt ?? lastSeen,
+    firstSeen,
+    lastSeen,
+    seenCount: normalizeSeenCount(entry.seenCount),
+    sourceCategory: entry.sourceCategory,
+  };
+  normalized.fingerprint = entry.fingerprint ?? createArchivistDedupKey(normalized);
+  return normalized;
+}
+
+function normalizeSeenCount(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : 1;
+}
+
+function minIsoDate(left?: string, right?: string): string {
+  return compareArchivistRecency(left, right) <= 0 ? (left ?? right ?? new Date().toISOString()) : (right ?? left ?? new Date().toISOString());
+}
+
+function maxIsoDate(left?: string, right?: string): string {
+  return compareArchivistRecency(left, right) >= 0 ? (left ?? right ?? new Date().toISOString()) : (right ?? left ?? new Date().toISOString());
 }
 
 function normalizeArchivistStore(value: unknown): ArchivistStore {
@@ -341,7 +569,13 @@ function normalizeArchivistEntry(value: unknown): ArchivistEntry[] {
     tags: Array.isArray(record.tags) ? record.tags.filter((tag): tag is string => typeof tag === "string").slice(0, ARCHIVIST_MAX_TAGS) : undefined,
     projectPath: typeof record.projectPath === "string" ? record.projectPath : undefined,
     createdAt: typeof record.createdAt === "string" ? record.createdAt : undefined,
-  }];
+    updatedAt: typeof record.updatedAt === "string" ? record.updatedAt : undefined,
+    fingerprint: typeof record.fingerprint === "string" ? record.fingerprint : undefined,
+    seenCount: typeof record.seenCount === "number" ? record.seenCount : undefined,
+    firstSeen: typeof record.firstSeen === "string" ? record.firstSeen : undefined,
+    lastSeen: typeof record.lastSeen === "string" ? record.lastSeen : undefined,
+    sourceCategory: typeof record.sourceCategory === "string" ? record.sourceCategory : undefined,
+  }].map(normalizeArchivistEntryRecord);
 }
 
 function selectRelevantArchivistEntries(entries: ArchivistEntry[], session: RuntimeSession, prompt: string): ArchivistRecallResult {
@@ -368,10 +602,20 @@ function selectRelevantArchivistEntries(entries: ArchivistEntry[], session: Runt
 
   return {
     used: true,
-    sourceCategory: scored.some(({ entry }) => entry.projectPath && repoRoot.startsWith(entry.projectPath)) ? "project-memory" : "user-memory",
+    sourceCategory: scored.some(({ entry }) => isFailurePlaybookEntry(entry))
+      ? "failure-playbook"
+      : scored.some(({ entry }) => entry.projectPath && repoRoot.startsWith(entry.projectPath))
+        ? "project-memory"
+        : "user-memory",
     matchCount: scored.length,
-    preview: scored.map(({ entry }) => `- [${entry.type ?? "memory"}] ${truncate(entry.summary ?? entry.content, 180)}`).join("\n"),
+    preview: scored.map(({ entry }) => formatArchivistEntryPreview(entry)).join("\n"),
   };
+}
+
+function formatArchivistEntryPreview(entry: ArchivistEntry): string {
+  const seen = normalizeSeenCount(entry.seenCount);
+  const recurrence = seen > 1 ? ` · seen=${String(seen)} · last=${entry.lastSeen ?? entry.updatedAt ?? "unknown"}` : "";
+  return `- [${entry.type ?? "memory"}] ${truncate(entry.summary ?? entry.content, 180)}${recurrence}`;
 }
 
 function idleRecall(): ArchivistRecallResult {
@@ -453,9 +697,33 @@ function scoreArchivistEntry(entry: ArchivistEntry, keywords: string[], repoRoot
     score -= 2;
   }
 
+  if (isFailurePlaybookEntry(entry) && keywords.some((keyword) => ["fail", "failed", "failure", "error", "recover", "retry", "tool"].includes(keyword))) {
+    score += 6;
+  }
+
   score += getArchivistRecencyBonus(entry.createdAt);
 
   return score;
+}
+
+function isFailurePlaybookEntry(entry: ArchivistEntry): boolean {
+  const type = (entry.type ?? "").toLowerCase();
+  const sourceCategory = (entry.sourceCategory ?? "").toLowerCase();
+  const tags = (entry.tags ?? []).map((tag) => tag.toLowerCase());
+  return type === "failure-playbook" || type === "failure-recovery" || sourceCategory === "failure-playbook" || tags.includes("failure");
+}
+
+function defaultRecoveryHint(toolName: string, failureClass: string): string {
+  if (failureClass.includes("missing_evidence") || failureClass.includes("required write evidence")) {
+    return "Run the required write/edit tool, verify the tool completed, then answer from that evidence.";
+  }
+  if (failureClass.includes("malformed") || failureClass.includes("tool call")) {
+    return "Retry with one valid nexagent tool-call XML block and JSON arguments matching the tool schema.";
+  }
+  if (toolName.includes("lsp")) {
+    return "Check /lsp status, confirm LSP is enabled/configured, then retry with a project-local file path.";
+  }
+  return "Inspect the failure, retry with a smaller valid tool call, and keep output summary-first.";
 }
 
 function getArchivistRecencyBonus(createdAt?: string): number {

@@ -58,6 +58,10 @@ test("prompt v3 appends runtime contract section and keeps v2 payload", () => {
   assert.match(result.prompt, /__NEXAGENT_PROMPT_V3_DYNAMIC_BOUNDARY__/);
   assert.match(result.contractSection, /Required write evidence: yes/);
   assert.match(result.contractSection, /Required Nexsight evidence: yes/);
+  assert.match(result.contractSection, /Evidence contract:/);
+  assert.match(result.contractSection, /Label user-facing claims as observed, verified, inferred, assumption, or unknown/);
+  assert.match(result.contractSection, /Loop safety: evidence labels guide claims, not loop termination/);
+  assert.match(result.contractSection, /Hard stops only: verified completion/);
   assert.match(result.contractSection, /Tool contracts:/);
   assert.ok(result.v2.sections.length > 0);
 });

@@ -6,6 +6,8 @@ import path from "node:path";
 
 import { checkpointArchivistSession, saveArchivistMemory } from "./archivist.js";
 import { buildPatchPreview, searchFilesWithIgnore } from "./core-helpers.js";
+import { formatLspStatus, summarizeLspDiagnostics, summarizeLspSymbols } from "./lsp.js";
+import { callMcpTool, listMcpTools } from "./mcp.js";
 import { batchIndexNexsight, executeNexsight, indexNexsight, indexNexsightFile, searchNexsight } from "./nexsight.js";
 import {
   findBlockedShellPattern,
@@ -34,7 +36,12 @@ export type InternalToolName =
   | "nexsight_batch"
   | "nexsight_search"
   | "archivist_save"
-  | "archivist_checkpoint";
+  | "archivist_checkpoint"
+  | "mcp_list_tools"
+  | "mcp_call"
+  | "lsp_status"
+  | "lsp_symbols"
+  | "lsp_diagnostics";
 
 export interface InternalToolCall {
   name: InternalToolName;
@@ -53,7 +60,9 @@ export interface InternalToolResult {
   output: string;
 }
 
-const SHELL_TIMEOUT_MS = 5_000;
+const DEFAULT_SHELL_TIMEOUT_MS = 30_000;
+const MAX_SHELL_TIMEOUT_MS = 30_000;
+const MIN_SHELL_TIMEOUT_MS = 500;
 const SHELL_MAX_LINES = 120;
 const SHELL_MAX_CHARS = 12_000;
 const DIFF_MAX_LINES = 400;
@@ -312,6 +321,62 @@ export function getInternalToolDefinitions(): readonly InternalToolDefinition[] 
         additionalProperties: false,
       },
     },
+    {
+      name: "mcp_list_tools",
+      description: "List hydrated MCP tools from configured MCP servers.",
+      inputSchema: {
+        type: "object",
+        properties: {},
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "mcp_call",
+      description: "Call a hydrated MCP tool by server and tool name.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          server: { type: "string", description: "MCP server name." },
+          tool: { type: "string", description: "MCP tool name on that server." },
+          arguments: { type: "object", description: "Tool arguments matching the MCP tool schema." },
+        },
+        required: ["server", "tool"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "lsp_status",
+      description: "Report safe local LSP status. Disabled by default; never auto-downloads language servers.",
+      inputSchema: {
+        type: "object",
+        properties: {},
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "lsp_symbols",
+      description: "Return bounded symbol summaries for a project file and optionally index summaries into Archivist.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Project file path to summarize." },
+        },
+        required: ["path"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "lsp_diagnostics",
+      description: "Return bounded diagnostics summaries for a project file and optionally index summaries into Archivist.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Project file path to inspect." },
+        },
+        required: ["path"],
+        additionalProperties: false,
+      },
+    },
   ] as const;
 }
 
@@ -373,7 +438,7 @@ export function executeInternalTool(session: RuntimeSession, call: InternalToolC
     case "git_diff":
       return executeGitDiffTool(session, asOptionalString(call.arguments?.path));
     case "shell_command":
-      return executeShellCommandTool(session, asString(call.arguments?.command, ""));
+      return executeShellCommandTool(session, asString(call.arguments?.command, ""), call.arguments ?? {});
     case "nexsight_execute":
       return executeNexsightExecuteTool(session, call.arguments ?? {});
     case "nexsight_index":
@@ -389,6 +454,14 @@ export function executeInternalTool(session: RuntimeSession, call: InternalToolC
       return pending("archivist_save", "async");
     case "archivist_checkpoint":
       return pending("archivist_checkpoint", "async");
+    case "mcp_list_tools":
+    case "mcp_call":
+      return pending(call.name, "async");
+    case "lsp_status":
+      return ok("lsp_status", formatLspStatus(session));
+    case "lsp_symbols":
+    case "lsp_diagnostics":
+      return pending(call.name, "async");
   }
 }
 
@@ -408,6 +481,14 @@ export async function executeInternalToolAsync(session: RuntimeSession, call: In
       );
     case "archivist_checkpoint":
       return await executeArchivistCheckpointTool(session, asOptionalString(call.arguments?.reason));
+    case "mcp_list_tools":
+      return ok("mcp_list_tools", listMcpTools(session.mcpRegistry));
+    case "mcp_call":
+      return await executeMcpCallTool(session, call.arguments ?? {});
+    case "lsp_symbols":
+      return await executeLspSymbolsTool(session, asString(call.arguments?.path, ""));
+    case "lsp_diagnostics":
+      return await executeLspDiagnosticsTool(session, asString(call.arguments?.path, ""));
     default:
       return executeInternalTool(session, call);
   }
@@ -425,12 +506,31 @@ export function classifyInternalToolRisk(call: InternalToolCall): "low" | "guard
     || call.name === "preview_patch"
     || call.name === "web_fetch"
     || call.name === "web_search"
+    || call.name === "mcp_call"
     || call.name === "nexsight_index"
     || call.name === "nexsight_batch"
     || call.name === "archivist_save"
     || call.name === "archivist_checkpoint"
+    || call.name === "lsp_symbols"
+    || call.name === "lsp_diagnostics"
     ? "guarded"
     : "low";
+}
+
+async function executeMcpCallTool(session: RuntimeSession, args: Record<string, unknown>): Promise<InternalToolResult> {
+  const server = asString(args.server, "");
+  const tool = asString(args.tool, "");
+  const toolArgs = isRecord(args.arguments) ? args.arguments : {};
+
+  if (!server || !tool) {
+    return fail("mcp_call", "server and tool are required");
+  }
+
+  try {
+    return ok("mcp_call", await callMcpTool(session.mcpRegistry, server, tool, toolArgs));
+  } catch (error) {
+    return fail("mcp_call", error instanceof Error ? error.message : String(error));
+  }
 }
 
 export function resolveRepoPath(session: RuntimeSession, inputPath?: string): string {
@@ -510,9 +610,10 @@ function executeWriteFileTool(session: RuntimeSession, inputPath: string, conten
   }
 
   try {
+    const current = readExistingFileForDiff(targetPath);
     mkdirSync(path.dirname(targetPath), { recursive: true });
     writeFileSync(targetPath, content, "utf8");
-    return ok("write_file", `wrote ${formatToolPath(session, targetPath)} (${String(content.length)} chars)`);
+    return ok("write_file", formatEditToolOutput(session, targetPath, current, content, `wrote ${formatToolPath(session, targetPath)} (${String(content.length)} chars)`));
   } catch (error) {
     return fail("write_file", formatToolError(targetPath, error));
   }
@@ -552,7 +653,7 @@ function executeApplyPatchTool(
 
     const next = replaceAll ? current.split(find).join(replace) : current.replace(find, replace);
     writeFileSync(targetPath, next, "utf8");
-    return ok("apply_patch", `patched ${formatToolPath(session, targetPath)} (${String(occurrences)} match${occurrences === 1 ? "" : "es"})`);
+    return ok("apply_patch", formatEditToolOutput(session, targetPath, current, next, `patched ${formatToolPath(session, targetPath)} (${String(occurrences)} match${occurrences === 1 ? "" : "es"})`));
   } catch (error) {
     return fail("apply_patch", formatToolError(targetPath, error));
   }
@@ -614,6 +715,7 @@ function executeBatchEditTool(session: RuntimeSession, args: Record<string, unkn
     `batch edited ${String(nextByPath.size)} file${nextByPath.size === 1 ? "" : "s"} with ${String(edits.value.length)} operation${edits.value.length === 1 ? "" : "s"}`,
     ...summaries.slice(0, 20),
     summaries.length > 20 ? `... ${String(summaries.length - 20)} more operations` : "",
+    formatBatchEditDiff(session, currentByPath, nextByPath),
   ].filter(Boolean).join("\n"));
 }
 
@@ -878,11 +980,12 @@ function executeGitDiffTool(session: RuntimeSession, inputPath?: string): Intern
   }
 }
 
-function executeShellCommandTool(session: RuntimeSession, command: string): InternalToolResult {
+function executeShellCommandTool(session: RuntimeSession, command: string, args: Record<string, unknown> = {}): InternalToolResult {
   const normalized = command.trim();
   if (!normalized) {
     return fail("shell_command", "command required");
   }
+  const timeoutMs = Math.max(MIN_SHELL_TIMEOUT_MS, Math.min(asNumber(args.timeoutMs, DEFAULT_SHELL_TIMEOUT_MS), MAX_SHELL_TIMEOUT_MS));
 
   const blockedPattern = findBlockedShellPattern(normalized);
   if (blockedPattern) {
@@ -896,10 +999,18 @@ function executeShellCommandTool(session: RuntimeSession, command: string): Inte
       env: {
         ...process.env,
       },
-      timeout: SHELL_TIMEOUT_MS,
+      timeout: timeoutMs,
     });
 
     if (result.error) {
+      if ((result.error as NodeJS.ErrnoException).code === "ETIMEDOUT") {
+        const transcript = [
+          result.stdout?.trimEnd() ?? "",
+          result.stderr?.trimEnd() ?? "",
+        ].filter((value) => value.length > 0).join("\n");
+        const capped = capShellOutput(transcript.length > 0 ? transcript : "(no output)");
+        return fail("shell_command", `shell timed out after ${String(timeoutMs)}ms\n${capped}`);
+      }
       return fail("shell_command", `shell failed: ${result.error.message}`);
     }
 
@@ -910,7 +1021,7 @@ function executeShellCommandTool(session: RuntimeSession, command: string): Inte
     const capped = capShellOutput(transcript.length > 0 ? transcript : "(no output)");
 
     if (result.signal === "SIGTERM") {
-      return fail("shell_command", `shell timed out after ${String(SHELL_TIMEOUT_MS)}ms\n${capped}`);
+      return fail("shell_command", `shell timed out after ${String(timeoutMs)}ms\n${capped}`);
     }
 
     if ((result.status ?? 0) !== 0) {
@@ -1114,6 +1225,24 @@ async function executeArchivistCheckpointTool(session: RuntimeSession, reason?: 
   }
 }
 
+async function executeLspSymbolsTool(session: RuntimeSession, inputPath: string): Promise<InternalToolResult> {
+  try {
+    const result = await summarizeLspSymbols(session, inputPath);
+    return ok("lsp_symbols", result.output);
+  } catch (error) {
+    return fail("lsp_symbols", error instanceof Error ? error.message : String(error));
+  }
+}
+
+async function executeLspDiagnosticsTool(session: RuntimeSession, inputPath: string): Promise<InternalToolResult> {
+  try {
+    const result = await summarizeLspDiagnostics(session, inputPath);
+    return ok("lsp_diagnostics", result.output);
+  } catch (error) {
+    return fail("lsp_diagnostics", error instanceof Error ? error.message : String(error));
+  }
+}
+
 function findContentMatches(rootPath: string, pattern: string): string[] {
   const matches: string[] = [];
   const queue = [rootPath];
@@ -1277,6 +1406,53 @@ function capDiffOutput(output: string): string {
   return capped;
 }
 
+function readExistingFileForDiff(targetPath: string): string {
+  try {
+    const stats = statSync(targetPath);
+    return stats.isFile() ? readFileSync(targetPath, "utf8") : "";
+  } catch {
+    return "";
+  }
+}
+
+function formatEditToolOutput(session: RuntimeSession, targetPath: string, current: string, next: string, summary: string): string {
+  const preview = buildPatchPreview(formatToolPath(session, targetPath), current, next);
+  if (preview.trim().length === 0) {
+    return summary;
+  }
+  const stats = countDiffLines(preview);
+  return `${summary}\nEdited ${formatToolPath(session, targetPath)} (+${String(stats.added)} -${String(stats.removed)})\n${capDiffOutput(preview)}`;
+}
+
+function formatBatchEditDiff(session: RuntimeSession, currentByPath: Map<string, string>, nextByPath: Map<string, string>): string {
+  const previews: string[] = [];
+  for (const [targetPath, next] of nextByPath) {
+    const current = currentByPath.get(targetPath) ?? "";
+    const preview = buildPatchPreview(formatToolPath(session, targetPath), current, next);
+    if (preview.trim().length > 0) {
+      const stats = countDiffLines(preview);
+      previews.push(`Edited ${formatToolPath(session, targetPath)} (+${String(stats.added)} -${String(stats.removed)})\n${preview}`);
+    }
+  }
+  return previews.length > 0 ? capDiffOutput(previews.join("\n")) : "";
+}
+
+function countDiffLines(diff: string): { added: number; removed: number } {
+  let added = 0;
+  let removed = 0;
+  for (const line of diff.split(/\r?\n/)) {
+    if (line.startsWith("+++") || line.startsWith("---")) {
+      continue;
+    }
+    if (line.startsWith("+")) {
+      added += 1;
+    } else if (line.startsWith("-")) {
+      removed += 1;
+    }
+  }
+  return { added, removed };
+}
+
 function capWebOutput(output: string): string {
   const normalized = output.replace(/\r/g, "").replace(/\n{3,}/g, "\n\n").trim();
   return normalized.length > WEB_MAX_CHARS ? `${normalized.slice(0, WEB_MAX_CHARS)}\n... web output truncated ...` : normalized;
@@ -1389,6 +1565,10 @@ function toToolResult(tool: InternalToolName, result: { ok: boolean; output: str
 
 function pending(tool: InternalToolName, detail: string): InternalToolResult {
   return { ok: false, tool, output: `${tool} requires ${detail} execution path` };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function formatToolError(targetPath: string, error: unknown): string {

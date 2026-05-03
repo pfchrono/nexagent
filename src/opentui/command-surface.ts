@@ -1,5 +1,6 @@
 import { autocompletePromptBuffer, describePromptHint, type PromptCompletionResult, type PromptCompletionSuggestion } from "../cli/autocomplete.js";
 import { COMMAND_CATALOG } from "../cli/catalog.js";
+import { CODEX_MODEL_CATALOG } from "../models.js";
 import {
   discoverSkills,
   normalizeSkillToken,
@@ -41,7 +42,7 @@ export function createCommandSurface(cwd: string, input: string, selectedIndex =
   const trimmed = input.trimStart();
   const rows = rowsForInput(cwd, trimmed, completion, selectedIndex);
   return {
-    title: surfaceTitle(trimmed),
+    title: surfaceTitle(trimmed, completion),
     query: trimmed,
     rows,
     completion,
@@ -125,6 +126,33 @@ function rowsForInput(
     }));
   }
 
+  if (/^\/model\s+\S*$/.test(trimmed)) {
+    const query = trimmed.replace(/^\/model\s+/, "").toLowerCase();
+    const matches = CODEX_MODEL_CATALOG.filter((entry) => entry.id.includes(query) || entry.label.toLowerCase().includes(query));
+    const selected = clampIndex(selectedIndex, matches.length);
+    return matches.map((entry, index) => ({
+      label: entry.id,
+      hint: `${entry.description} · effort: ${entry.supportedReasoningEfforts.join("/")}`,
+      value: `/model ${entry.id} `,
+      selected: index === selected,
+    }));
+  }
+
+  if (/^\/effort\s+\S*$/.test(trimmed) || /^\/model\s+\S+\s+\S*$/.test(trimmed)) {
+    const modelMatch = trimmed.match(/^\/model\s+(\S+)\s+(\S*)$/);
+    const commandPrefix = modelMatch ? `/model ${modelMatch[1]} ` : "/effort ";
+    const query = (modelMatch?.[2] ?? trimmed.replace(/^\/effort\s+/, "")).toLowerCase();
+    const efforts = ["low", "medium", "high", "xhigh"];
+    const matches = efforts.filter((effort) => effort.includes(query));
+    const selected = clampIndex(selectedIndex, matches.length);
+    return matches.map((effort, index) => ({
+      label: effort,
+      hint: effortHint(effort),
+      value: `${commandPrefix}${effort}`,
+      selected: index === selected,
+    }));
+  }
+
   const skill = resolveSkillPreview(cwd, trimmed, selectedIndex);
   if (skill.status !== "none") {
     return skill.rows;
@@ -147,14 +175,27 @@ function skillPaletteHint(skill: RuntimeSkillDefinition): string {
   return description ? `${description} (${skill.source})` : skill.source;
 }
 
-function surfaceTitle(trimmed: string): string {
+function effortHint(effort: string): string {
+  if (effort === "low") {
+    return "fastest, lighter reasoning";
+  }
+  if (effort === "medium") {
+    return "balanced default";
+  }
+  if (effort === "high") {
+    return "deeper reasoning";
+  }
+  return "extra high reasoning";
+}
+
+function surfaceTitle(trimmed: string, completion: PromptCompletionResult): string {
   if (trimmed.startsWith("$") || trimmed.startsWith("/skill")) {
     return "$ Skills";
   }
   if (trimmed.startsWith("/") && !trimmed.includes(" ")) {
     return "/ Commands";
   }
-  if (completionLooksLikePath(trimmed)) {
+  if (completionLooksLikePath(trimmed) || completion.suggestions.some((row) => row.hint === "file" || row.hint === "directory")) {
     return "Files";
   }
   return "Suggestions";

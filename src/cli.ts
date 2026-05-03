@@ -14,10 +14,11 @@ import { bootstrapRuntime } from "./runtime/bootstrap.js";
 import { initializeRuntimeDebug, writeDebugLog, type RuntimeDebugOptions } from "./runtime/debug.js";
 import { buildPromptV2, summarizePromptV2 } from "./runtime/prompt-v2.js";
 import { checkpointNexsightSession, getNexsightStats, purgeNexsight, searchNexsight } from "./runtime/nexsight.js";
+import { formatLspStatus, summarizeLspDiagnosticsSync, summarizeLspSymbolsSync } from "./runtime/lsp.js";
 import { toDiagnosticRuntimeEvent } from "./runtime/diagnostics.js";
 import { savePersistedRuntimeState } from "./runtime/persistence.js";
 import { executeInternalTool, getInternalToolDefinitions } from "./runtime/tools.js";
-import { DEFAULT_CODEX_MODEL, getCodexModelDefinition, normalizeCodexModel } from "./models.js";
+import { DEFAULT_CODEX_MODEL, DEFAULT_CODEX_REASONING_EFFORT, getCodexModelDefinition, normalizeCodexModel, normalizeCodexReasoningEffort, type CodexReasoningEffort } from "./models.js";
 import { getProviderDefinition, getProviderModelOptions, type ProviderModelOption } from "./provider/registry.js";
 import { ANSI, padLine, padVisibleLine, renderRule, renderScreen, resetScreenRenderer, tintLine, truncateLine, wrapText } from "./tui/primitives.js";
 import { autocompletePromptBuffer, describePromptHint, type PromptCompletionResult } from "./cli/autocomplete.js";
@@ -681,6 +682,8 @@ export function createRuntimeTuiView(session: RuntimeSession): RuntimeTuiView {
     mcp: [
       ["enabled", formatList(session.enabledMcpServers)],
       ["loaded", formatList(session.mcpServers)],
+      ["hydrated", String(session.mcpRegistry?.tools?.length ?? 0)],
+      ["status", formatMcpRuntimeStatus(session)],
     ],
     hooks: [
       ["status", session.hooks.status],
@@ -713,7 +716,7 @@ function renderStartupTui(): () => void {
       "",
       `${SPINNER_FRAMES[frame % SPINNER_FRAMES.length]} loading runtime`,
       "  config  reading .nexagent/.claude settings",
-      "  mcp     loading enabled registry summary",
+      "  mcp     loading registry and hydrating stdio tools",
       "  session waiting for runtime state",
       "",
       "Press Ctrl+C to exit.",
@@ -1030,6 +1033,8 @@ function dispatchRuntimeCommand(session: RuntimeSession, input: string): Runtime
       return handleProviderCommand(session, args);
     case "/model":
       return handleModelCommand(session, args);
+    case "/effort":
+      return handleEffortCommand(session, args);
     case "/skill":
       return handleSkillCommand(session, args);
     case "/mouse":
@@ -1070,6 +1075,10 @@ function dispatchRuntimeCommand(session: RuntimeSession, input: string): Runtime
       return handleDiffCommand(session, args);
     case "/memory":
       return handleMemoryCommand(session, args);
+    case "/config":
+      return handleConfigCommand(session, args);
+    case "/lsp":
+      return handleLspCommand(session, args);
     case "/hooks":
       return handleHooksCommand(session, args);
     case "/attach":
@@ -1432,6 +1441,13 @@ function handleCodexCommand(session: RuntimeSession, args: string[]): RuntimeCom
 
 function handleMemoryCommand(session: RuntimeSession, args: string[]): RuntimeCommandResult {
   const { detailMode, args: normalizedArgs } = splitVerboseArg(args);
+  if (normalizedArgs.length === 1 && STATUS_ARGS.has(normalizedArgs[0]?.toLowerCase() ?? "")) {
+    return {
+      ok: true,
+      output: formatMemoryStatus(session, detailMode),
+      activity: "memory status",
+    };
+  }
   if (normalizedArgs.length === 1 && isMemoryMaintenanceArg(normalizedArgs[0] ?? "")) {
     try {
       return {
@@ -1451,7 +1467,7 @@ function handleMemoryCommand(session: RuntimeSession, args: string[]): RuntimeCo
   if (normalizedArgs.length !== 0) {
     return {
       ok: false,
-      message: "usage: /memory [--verbose|--maintenance] | /memory save <text> | /memory checkpoint [reason] | /memory session [focus]",
+      message: "usage: /memory [status|--verbose|--maintenance] | /memory save <text> | /memory checkpoint [reason] | /memory session [focus]",
       activity: "command failed · /memory usage",
     };
   }
@@ -1460,6 +1476,130 @@ function handleMemoryCommand(session: RuntimeSession, args: string[]): RuntimeCo
     ok: true,
     output: formatMemoryStatus(session, detailMode),
     activity: "memory status",
+  };
+}
+
+function handleLspCommand(session: RuntimeSession, args: string[]): RuntimeCommandResult {
+  if (args.length === 0 || (args.length === 1 && STATUS_ARGS.has(args[0]?.toLowerCase() ?? ""))) {
+    return {
+      ok: true,
+      output: formatLspStatus(session),
+      activity: "lsp status",
+    };
+  }
+  if (args.length === 2 && args[0] === "mode") {
+    const next = args[1]?.toLowerCase();
+    if (!ENABLE_ARGS.has(next ?? "") && !DISABLE_ARGS.has(next ?? "")) {
+      return {
+        ok: false,
+        message: "usage: /lsp [status|mode <on|off>|symbols <path>|diagnostics <path>]",
+        activity: "command failed · /lsp usage",
+      };
+    }
+    session.lsp = session.lsp ?? { enabled: false, command: null, args: [], indexArchivist: false };
+    session.lsp.enabled = ENABLE_ARGS.has(next ?? "");
+    savePersistedRuntimeState(session);
+    return {
+      ok: true,
+      output: formatLspStatus(session),
+      activity: `lsp ${session.lsp.enabled ? "on" : "off"}`,
+    };
+  }
+  if (args.length === 2 && args[0] === "symbols") {
+    try {
+      return {
+        ok: true,
+        output: summarizeLspSymbolsSync(session, args[1] ?? "").output,
+        activity: "lsp symbols",
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        message: error instanceof Error ? error.message : String(error),
+        activity: "command failed · /lsp symbols",
+      };
+    }
+  }
+  if (args.length === 2 && args[0] === "diagnostics") {
+    try {
+      return {
+        ok: true,
+        output: summarizeLspDiagnosticsSync(session, args[1] ?? "").output,
+        activity: "lsp diagnostics",
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        message: error instanceof Error ? error.message : String(error),
+        activity: "command failed · /lsp diagnostics",
+      };
+    }
+  }
+  return {
+    ok: false,
+    message: "usage: /lsp [status|mode <on|off>|symbols <path>|diagnostics <path>]",
+    activity: "command failed · /lsp usage",
+  };
+}
+
+const CONFIG_USAGE = "usage: /config [status] | /config [set] logo <full|condensed|off> | /config [set] lsp <on|off> | /config [set] lsp-index <on|off>";
+
+function handleConfigCommand(session: RuntimeSession, args: string[]): RuntimeCommandResult {
+  if (args.length === 0 || (args.length === 1 && STATUS_ARGS.has(args[0]?.toLowerCase() ?? ""))) {
+    return {
+      ok: true,
+      output: formatConfigStatus(session),
+      activity: "config status",
+    };
+  }
+  const mutationArgs = args[0]?.toLowerCase() === "set" ? args.slice(1) : args;
+  if (mutationArgs.length === 2) {
+    const section = mutationArgs[0]?.toLowerCase();
+    const value = mutationArgs[1]?.toLowerCase() ?? "";
+    if (section === "logo") {
+      if (value !== "full" && value !== "condensed" && value !== "off") {
+        return {
+          ok: false,
+          message: CONFIG_USAGE,
+          activity: "command failed · /config usage",
+        };
+      }
+      session.ui = session.ui ?? { logoMode: "full" };
+      session.ui.logoMode = value;
+      savePersistedRuntimeState(session);
+      return {
+        ok: true,
+        output: formatConfigStatus(session),
+        activity: `config logo · ${value}`,
+      };
+    }
+    if (section === "lsp" || section === "lsp-index") {
+      if (!ENABLE_ARGS.has(value) && !DISABLE_ARGS.has(value)) {
+        return {
+          ok: false,
+          message: CONFIG_USAGE,
+          activity: "command failed · /config usage",
+        };
+      }
+      const enabled = ENABLE_ARGS.has(value);
+      session.lsp = session.lsp ?? { enabled: false, command: null, args: [], indexArchivist: false };
+      if (section === "lsp") {
+        session.lsp.enabled = enabled;
+      } else {
+        session.lsp.indexArchivist = enabled;
+      }
+      savePersistedRuntimeState(session);
+      return {
+        ok: true,
+        output: formatConfigStatus(session),
+        activity: `config ${section} · ${enabled ? "on" : "off"}`,
+      };
+    }
+  }
+  return {
+    ok: false,
+    message: CONFIG_USAGE,
+    activity: "command failed · /config usage",
   };
 }
 
@@ -1726,7 +1866,10 @@ function handleCompactCommand(session: RuntimeSession, args: string[]): RuntimeC
   const afterTokens = compactConversation(session, "manual");
   return {
     ok: true,
-    output: `${formatCompactionStatus(session)}\nlast-compact: ${beforeTokens} -> ${afterTokens}`,
+    output: [
+      "manual compaction completed",
+      `summary=${session.compaction.summary ? "present" : "none"} · turns=${String(session.conversation.length)} · tokens=${String(beforeTokens)}->${String(afterTokens)}`,
+    ].join("\n"),
     activity: `compact manual · ${beforeTokens} -> ${afterTokens}`,
   };
 }
@@ -2059,10 +2202,10 @@ function handleModelCommand(session: RuntimeSession, args: string[]): RuntimeCom
     };
   }
 
-  if (args.length !== 1) {
+  if (args.length > 2) {
     return {
       ok: false,
-      message: "usage: /model [status|list|name]",
+      message: "usage: /model [status|list|name [effort]]",
       activity: "command failed · /model usage",
     };
   }
@@ -2071,7 +2214,7 @@ function handleModelCommand(session: RuntimeSession, args: string[]): RuntimeCom
   if (!requestedModel) {
     return {
       ok: false,
-      message: "usage: /model [status|list|name]",
+      message: "usage: /model [status|list|name [effort]]",
       activity: "command failed · /model usage",
     };
   }
@@ -2087,12 +2230,50 @@ function handleModelCommand(session: RuntimeSession, args: string[]): RuntimeCom
 
   const configuredModels = session.providerRouting.modelSelection.configuredModels as Record<string, string | undefined>;
   configuredModels[provider] = normalizedModel;
+  if (args[1]) {
+    const effortResult = setReasoningEffortForProvider(session, provider, normalizedModel, args[1]);
+    if (!effortResult.ok) {
+      return effortResult;
+    }
+  } else {
+    ensureReasoningEffortSupported(session, provider, normalizedModel);
+  }
   refreshInstructionState(session);
   savePersistedRuntimeState(session);
   return {
     ok: true,
     output: formatModelStatus(session),
-    activity: `model set · ${normalizedModel}`,
+    activity: `model set · ${normalizedModel} ${getCurrentProviderReasoningEffort(session)}`,
+  };
+}
+
+function handleEffortCommand(session: RuntimeSession, args: string[]): RuntimeCommandResult {
+  const provider = session.providerTransport.activeProvider;
+  const model = getCurrentProviderModel(session);
+  if (args.length === 0 || (args.length === 1 && args[0] === "status")) {
+    return {
+      ok: true,
+      output: formatEffortStatus(session),
+      activity: `effort status · ${provider}`,
+    };
+  }
+  if (args.length !== 1) {
+    return {
+      ok: false,
+      message: "usage: /effort [status|low|medium|high|xhigh]",
+      activity: "command failed · /effort usage",
+    };
+  }
+  const result = setReasoningEffortForProvider(session, provider, model, args[0]);
+  if (!result.ok) {
+    return result;
+  }
+  refreshInstructionState(session);
+  savePersistedRuntimeState(session);
+  return {
+    ok: true,
+    output: formatEffortStatus(session),
+    activity: `effort set · ${getCurrentProviderReasoningEffort(session)}`,
   };
 }
 
@@ -2137,7 +2318,20 @@ function formatModelStatus(session: RuntimeSession): string {
   return [
     `provider: ${provider}`,
     `current: ${getCurrentProviderModel(session)}`,
+    `effort: ${getCurrentProviderReasoningEffort(session)}`,
     `available: ${formatAvailableModels(session, provider)}`,
+    `efforts: ${formatAvailableReasoningEfforts(session, provider, getCurrentProviderModel(session))}`,
+  ].join("\n");
+}
+
+function formatEffortStatus(session: RuntimeSession): string {
+  const provider = session.providerTransport.activeProvider;
+  const model = getCurrentProviderModel(session);
+  return [
+    `provider: ${provider}`,
+    `model: ${model}`,
+    `current: ${getCurrentProviderReasoningEffort(session)}`,
+    `available: ${formatAvailableReasoningEfforts(session, provider, model)}`,
   ].join("\n");
 }
 
@@ -2273,6 +2467,28 @@ function formatMemoryMaintenanceStatus(result: ReturnType<typeof maintainArchivi
     `stale: ${String(result.stale)}`,
     `noisy: ${String(result.noisy)}`,
     `persisted: ${String(result.persisted)}`,
+  ].join("\n");
+}
+
+function formatConfigStatus(session: RuntimeSession): string {
+  return [
+    "config",
+    "provider",
+    `active: ${session.provider}`,
+    `transport: ${session.providerTransport.mode}`,
+    "ui",
+    `logoMode: ${session.ui?.logoMode ?? "full"}`,
+    `mouseMode: ${session.commandModes.mouseMode}`,
+    "memory",
+    `archivist: ${session.archivist.enabled ? "on" : "off"}`,
+    `storage: ${session.archivist.storagePath ?? "disabled"}`,
+    "lsp",
+    `enabled: ${String(session.lsp?.enabled === true)}`,
+    `configured: ${String(Boolean(session.lsp?.command))}`,
+    `indexArchivist: ${String(session.lsp?.indexArchivist === true)}`,
+    "diagnostics",
+    "sentry: /status --sentry",
+    "redaction: tags-only",
   ].join("\n");
 }
 
@@ -2491,6 +2707,19 @@ function getCurrentProviderModel(session: RuntimeSession): string {
   return "unset";
 }
 
+export function getCurrentProviderReasoningEffort(session: RuntimeSession): CodexReasoningEffort {
+  const provider = session.providerTransport.activeProvider;
+  const model = getCurrentProviderModel(session);
+  const configuredEfforts = session.providerRouting.modelSelection.configuredReasoningEfforts as Record<string, string | undefined> | undefined;
+  const configured = normalizeCodexReasoningEffort(configuredEfforts?.[provider]);
+  const modelDefinition = getAvailableModelsForProvider(session, provider).find((entry) => entry.id === model);
+  if (configured && modelDefinition?.supportedReasoningEfforts.includes(configured)) {
+    return configured;
+  }
+  const defaultEffort = modelDefinition?.defaultReasoningEffort ?? getCodexModelDefinition(model)?.defaultReasoningEffort ?? DEFAULT_CODEX_REASONING_EFFORT;
+  return defaultEffort;
+}
+
 function formatAvailableModels(session: RuntimeSession, provider: string): string {
   const models = getAvailableModelsForProvider(session, provider);
   if (models.length === 0) {
@@ -2499,6 +2728,11 @@ function formatAvailableModels(session: RuntimeSession, provider: string): strin
   return models
     .map((definition) => definition.disabledReason ? `${definition.id} (${definition.disabledReason})` : definition.id)
     .join(", ");
+}
+
+function formatAvailableReasoningEfforts(session: RuntimeSession, provider: string, model: string): string {
+  const modelDefinition = getAvailableModelsForProvider(session, provider).find((entry) => entry.id === model);
+  return (modelDefinition?.supportedReasoningEfforts ?? ["low", "medium", "high", "xhigh"]).join(", ");
 }
 
 function getAvailableModelsForProvider(session: RuntimeSession, provider: string): ProviderModelOption[] {
@@ -2534,6 +2768,41 @@ function normalizeModelForProvider(session: RuntimeSession, provider: string, re
   }
   const match = getAvailableModelsForProvider(session, provider).find((model) => model.id === requested);
   return match && !match.disabledReason ? match.id : null;
+}
+
+function setReasoningEffortForProvider(
+  session: RuntimeSession,
+  provider: string,
+  model: string,
+  requestedEffort: string,
+): RuntimeCommandResult {
+  const normalizedEffort = normalizeCodexReasoningEffort(requestedEffort);
+  const modelDefinition = getAvailableModelsForProvider(session, provider).find((entry) => entry.id === model);
+  const supportedEfforts = modelDefinition?.supportedReasoningEfforts ?? ["low", "medium", "high", "xhigh"];
+  if (!normalizedEffort || !supportedEfforts.includes(normalizedEffort)) {
+    return {
+      ok: false,
+      message: `effort ${requestedEffort} is not available for ${model}`,
+      activity: `effort rejected · ${requestedEffort}`,
+    };
+  }
+  const configuredEfforts = session.providerRouting.modelSelection.configuredReasoningEfforts ?? {};
+  configuredEfforts[provider as keyof typeof configuredEfforts] = normalizedEffort;
+  session.providerRouting.modelSelection.configuredReasoningEfforts = configuredEfforts;
+  return { ok: true, output: "", activity: `effort set · ${normalizedEffort}` };
+}
+
+function ensureReasoningEffortSupported(session: RuntimeSession, provider: string, model: string): void {
+  const configuredEfforts = session.providerRouting.modelSelection.configuredReasoningEfforts as Record<string, string | undefined> | undefined;
+  const configured = normalizeCodexReasoningEffort(configuredEfforts?.[provider]);
+  if (!configured) {
+    return;
+  }
+  const modelDefinition = getAvailableModelsForProvider(session, provider).find((entry) => entry.id === model);
+  if (!modelDefinition || modelDefinition.supportedReasoningEfforts.includes(configured)) {
+    return;
+  }
+  configuredEfforts![provider] = modelDefinition.defaultReasoningEffort;
 }
 
 function toolResultToCommandResult(command: string, detail: string, result: ReturnType<typeof executeInternalTool>): RuntimeCommandResult {
@@ -4723,6 +4992,14 @@ function restoreTerminal(): void {
 
 function formatList(values: string[]): string {
   return values.length > 0 ? values.join(", ") : "none";
+}
+
+function formatMcpRuntimeStatus(session: RuntimeSession): string {
+  const statuses = (session.mcpRegistry?.statuses ?? []).map((status) => {
+    const message = status.message ? `:${status.message}` : "";
+    return `${status.name}=${status.status}/${status.toolCount}${message}`;
+  });
+  return statuses.length > 0 ? statuses.join(", ") : "none";
 }
 
 function formatClaudeImport(claudeImport: RuntimeSession["imports"]["claude"]): string {

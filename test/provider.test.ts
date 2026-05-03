@@ -72,6 +72,13 @@ function createSession(provider = "codex", model: string | null = "gpt-5.4"): Ru
     },
     mcpServers: [],
     enabledMcpServers: [],
+    mcpRegistry: {
+      serverNames: [],
+      servers: {},
+      tools: [],
+      statuses: [],
+      clients: new Map(),
+    },
     imports: { claude: null },
     hooks: {
       sourcePath: null,
@@ -642,6 +649,59 @@ test("executeProviderRequest accepts generic tool_call XML with argument childre
   );
 });
 
+test("executeProviderRequest accepts generic tool_call JSON body and ignores adjacent extra calls", async () => {
+  const session = createSession();
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-provider-generic-json-tool-"));
+  session.cwd = cwd;
+  session.repo.root = cwd;
+  session.toolPolicy.allowedRoots = [cwd];
+  const targetPath = path.join(cwd, "target.txt");
+  await writeFile(targetPath, "ok\n", "utf8");
+  const outputs = [
+    `<tool_call>{"name":"read_file","arguments":{"path":${JSON.stringify(targetPath)}}}</tool_call><tool_call>{"name":"list_dir","arguments":{"path":"."}}</tool_call>`,
+    "done",
+  ];
+  const prompts: string[] = [];
+
+  try {
+    const result = await executeProviderRequest(
+      {
+        session,
+        prompt: "read target file",
+      },
+      {
+        exec: async (request) => {
+          prompts.push(request.prompt);
+          return {
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            output: outputs.shift() ?? "done",
+          };
+        },
+        http: async () => {
+          throw new Error("http should not be used");
+        },
+        codexHttp: async () => {
+          throw new Error("codex-http should not be used");
+        },
+      },
+    );
+
+    assert.equal(result.ok, true);
+    assert.equal(result.output, "done");
+    assert.equal(prompts.length, 2);
+    assert.match(prompts[1] ?? "", /Internal tool transcript:/);
+    assert.match(prompts[1] ?? "", /"name":"read_file"/);
+    assert.equal(
+      session.events.some((event) => event.kind === "control" && event.summary === "malformed tool call nudge applied"),
+      false,
+    );
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test("executeProviderRequest accepts bare internal tool XML tags", async () => {
   const session = createSession();
   const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-provider-bare-tool-"));
@@ -692,6 +752,117 @@ test("executeProviderRequest accepts bare internal tool XML tags", async () => {
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }
+});
+
+test("executeProviderRequest records safe tool failure class diagnostics", async () => {
+  const session = createSession();
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-provider-tool-failure-"));
+  session.cwd = cwd;
+  session.repo.root = cwd;
+  session.toolPolicy.allowedRoots = [cwd];
+
+  try {
+    const result = await executeProviderRequest(
+      {
+        session,
+        prompt: "read current directory as a file",
+      },
+      {
+        exec: async (request) => {
+          if (!request.prompt.includes("Internal tool transcript")) {
+            return {
+              exitCode: 0,
+              stdout: "",
+              stderr: "",
+              output: '<nexagent_tool_call>{"name":"read_file","arguments":{}}</nexagent_tool_call>',
+            };
+          }
+
+          return {
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            output: "read failed; need a concrete file path",
+          };
+        },
+        http: async () => {
+          throw new Error("http should not be used");
+        },
+        codexHttp: async () => {
+          throw new Error("codex-http should not be used");
+        },
+      },
+    );
+
+    assert.equal(result.ok, true);
+    const diagnostic = session.events.find((event) => event.kind === "control" && event.summary.includes("tool.failed"));
+    assert.match(diagnostic?.detail ?? "", /failure_class=path_not_file/);
+    assert.match(diagnostic?.detail ?? "", /argument_count=0/);
+    assert.doesNotMatch(diagnostic?.detail ?? "", new RegExp(cwd.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("executeProviderRequest records MCP unavailable diagnostics with safe server metadata", async () => {
+  const session = createSession();
+  session.mcpRegistry = {
+    serverNames: ["github"],
+    servers: {
+      github: { url: "https://example.invalid/mcp", startup_timeout_sec: 5 },
+    },
+    tools: [],
+    statuses: [{
+      name: "github",
+      transport: "http",
+      status: "configured",
+      toolCount: 0,
+      startupTimeoutMs: 5000,
+      message: "http MCP transport not bridged yet",
+    }],
+    clients: new Map(),
+  };
+
+  const result = await executeProviderRequest(
+    {
+      session,
+      prompt: "call github mcp",
+    },
+    {
+      exec: async (request) => {
+        if (!request.prompt.includes("Internal tool transcript")) {
+          return {
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            output: '<nexagent_tool_call>{"name":"mcp_call","arguments":{"server":"github","tool":"list_issues","arguments":{"query":"raw user query should not be logged"}}}</nexagent_tool_call>',
+          };
+        }
+
+        return {
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+          output: "MCP unavailable; no result to report",
+        };
+      },
+      http: async () => {
+        throw new Error("http should not be used");
+      },
+      codexHttp: async () => {
+        throw new Error("codex-http should not be used");
+      },
+    },
+  );
+
+  assert.equal(result.ok, true);
+  const diagnostic = session.events.find((event) => event.kind === "control" && event.summary.includes("tool.mcp_unavailable"));
+  assert.match(diagnostic?.detail ?? "", /failure_class=mcp_server_not_hydrated/);
+  assert.match(diagnostic?.detail ?? "", /mcp_server=github/);
+  assert.match(diagnostic?.detail ?? "", /mcp_tool=list_issues/);
+  assert.match(diagnostic?.detail ?? "", /mcp_status=configured/);
+  assert.match(diagnostic?.detail ?? "", /mcp_transport=http/);
+  assert.doesNotMatch(diagnostic?.detail ?? "", /raw user query/);
 });
 
 test("executeProviderRequest repairs multiline JSON strings in tool markup", async () => {
@@ -1131,6 +1302,12 @@ test("executeProviderRequest nudges malformed tool markup instead of surfacing i
     session.events.some((event) => event.kind === "control" && event.summary.includes("provider.malformed_tool_call")),
     true,
   );
+  const diagnostic = session.events.find((event) => event.kind === "control" && event.summary.includes("provider.malformed_tool_call"));
+  assert.match(diagnostic?.detail ?? "", /loop=cli/);
+  assert.match(diagnostic?.detail ?? "", /step=1/);
+  assert.match(diagnostic?.detail ?? "", /markup_family=nexagent_tool_call/);
+  assert.match(diagnostic?.detail ?? "", /parse_failure=missing_tool_name/);
+  assert.doesNotMatch(diagnostic?.detail ?? "", /<nexagent_tool_call|arguments=/);
 });
 
 test("executeProviderRequest nudges non-actionable confirmation replies to continue", async () => {
@@ -1265,6 +1442,38 @@ test("executeProviderRequest requires active skill tool evidence instead of acce
     fallbackApplied: false,
     output: "done from active skill tool evidence",
   });
+});
+
+test("executeProviderRequest allows tool inventory answers that mention Nexsight tool names", async () => {
+  const session = createSession();
+
+  const result = await executeProviderRequest(
+    {
+      session,
+      prompt: "What tools and mcp tools do you have in your arsenal?",
+    },
+    {
+      exec: async () => ({
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+        output: [
+          "I used mcp_list_tools and can use these built-in Nexagent tools:",
+          "- nexsight_execute - bounded scripts/commands through Nexsight",
+          "- nexsight_search - search indexed Nexsight knowledge",
+        ].join("\n"),
+      }),
+      http: async () => {
+        throw new Error("http should not be used");
+      },
+      codexHttp: async () => {
+        throw new Error("codex-http should not be used");
+      },
+    },
+  );
+
+  assert.equal(result.ok, true);
+  assert.match(result.output, /nexsight_execute/);
 });
 
 test("executeProviderRequest catches say-proceed deferrals after direct tasks", async () => {
@@ -2374,6 +2583,58 @@ test("executeProviderRequest selects codex chatgpt adapter when transport mode i
     fallbackApplied: false,
     output: "codex hello",
   });
+});
+
+test("executeProviderRequest passes multiple image attachments to API transports", async () => {
+  const session = createSession("codex", "gpt-5.4");
+  session.providerTransport.executor = "fetch";
+  session.providerTransport.adapter = "codex-chatgpt-http";
+  session.providerTransport.mode = "codex-http";
+  session.providerTransport.authSource = "codex-auth-json";
+  session.providerTransport.authGate = "ready";
+  session.providerTransport.openaiBaseUrl = "https://chatgpt.com/backend-api/codex";
+  const calls: ProviderRequest[] = [];
+
+  const result = await executeProviderRequest(
+    {
+      session,
+      prompt: "compare images",
+      attachments: [
+        { path: "/tmp/one.png", name: "one.png", mimeType: "image/png", bytes: 12, dataUrl: "data:image/png;base64,one" },
+        { path: "/tmp/two.png", name: "two.png", mimeType: "image/png", bytes: 34, dataUrl: "data:image/png;base64,two" },
+      ],
+    },
+    {
+      exec: async () => {
+        throw new Error("exec should not be used");
+      },
+      http: async () => {
+        throw new Error("http should not be used");
+      },
+      codexHttp: async (request) => {
+        calls.push(request);
+        return {
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+          output: "compared\n",
+        };
+      },
+    },
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0]?.nativeInput, [{
+    role: "user",
+    content: [
+      { type: "input_text", text: "compare images" },
+      { type: "input_image", image_url: "data:image/png;base64,one" },
+      { type: "input_text", text: "[attachment] name=one.png; path=/tmp/one.png; mime=image/png; bytes=12" },
+      { type: "input_image", image_url: "data:image/png;base64,two" },
+      { type: "input_text", text: "[attachment] name=two.png; path=/tmp/two.png; mime=image/png; bytes=34" },
+    ],
+  }]);
 });
 
 test("executeProviderRequest rejects spark model on api transports using donor model truth", async () => {

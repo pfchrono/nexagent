@@ -9,7 +9,7 @@ import { loadMcpRegistrySummary, type McpRegistrySummary } from "./mcp.js";
 import { loadPersistedRuntimeState, type PersistedRuntimeState, type PersistedTransportMode } from "./persistence.js";
 
 export interface RuntimeBootstrap {
-  config: HarnessConfig;
+  config: HarnessConfig | (Omit<HarnessConfig, "lsp" | "ui"> & Partial<Pick<HarnessConfig, "lsp" | "ui">>);
   mcp: McpRegistrySummary;
   auth: RuntimeAuthState;
   persisted?: PersistedRuntimeState | null;
@@ -29,11 +29,14 @@ export interface RuntimeState {
   toolPolicy: HarnessConfig["toolPolicy"];
   mcpServers: string[];
   enabledMcpServers: string[];
+  mcpRegistry: McpRegistrySummary;
   imports: HarnessConfig["imports"];
   instructionSources: HarnessConfig["instructionSources"];
   promptV2Summary: PromptV2Summary;
   hooks: HooksConfig;
   archivist: HarnessConfig["archivist"];
+  lsp: HarnessConfig["lsp"];
+  ui: HarnessConfig["ui"];
   auth: RuntimeAuthState;
 }
 
@@ -61,7 +64,7 @@ export interface RuntimeOperationControlsDefaults {
 
 export async function bootstrapRuntime(cwd: string): Promise<RuntimeBootstrap> {
   const config = await loadHarnessConfig(cwd);
-  const mcp = await loadMcpRegistrySummary(config.mcpConfigPath, config.enabledMcpServers);
+  const mcp = await loadMcpRegistrySummary(config.mcpConfigPath, config.enabledMcpServers, { cwd });
   const persisted = await loadPersistedRuntimeState(cwd);
   const auth = mergeRuntimeAuth(await probeCodexAuthState(), persisted);
 
@@ -82,11 +85,16 @@ export function createRuntimeState(runtime: RuntimeBootstrap): RuntimeState {
         ...runtime.config.providerRouting.modelSelection.configuredModels,
         ...(runtime.persisted?.providerModels ?? {}),
       },
+      configuredReasoningEfforts: {
+        ...(runtime.config.providerRouting.modelSelection.configuredReasoningEfforts ?? {}),
+        ...(runtime.persisted?.providerReasoningEfforts ?? {}),
+      },
     },
   };
   const providerRegistry = runtime.config.providerRegistry ?? createDefaultProviderRegistry();
   const provider = resolveActiveProvider(runtime);
   const providerTransport = createProviderTransportState(runtime, provider);
+  const mcpRegistry = normalizeMcpRegistry(runtime.mcp);
   const promptV2 = buildPromptV2({
     session: {
       provider,
@@ -95,7 +103,7 @@ export function createRuntimeState(runtime: RuntimeBootstrap): RuntimeState {
       providerTransport,
       cwd: runtime.config.cwd,
       toolPolicy: runtime.config.toolPolicy,
-      mcpServers: runtime.mcp.serverNames,
+      mcpServers: mcpRegistry.serverNames,
       enabledMcpServers: runtime.config.enabledMcpServers,
       imports: runtime.config.imports,
       instructionSources: runtime.config.instructionSources,
@@ -123,8 +131,9 @@ export function createRuntimeState(runtime: RuntimeBootstrap): RuntimeState {
     cwd: runtime.config.cwd,
     repo: runtime.config.repo,
     toolPolicy: runtime.config.toolPolicy,
-    mcpServers: runtime.mcp.serverNames,
+    mcpServers: mcpRegistry.serverNames,
     enabledMcpServers: runtime.config.enabledMcpServers,
+    mcpRegistry,
     imports: runtime.config.imports,
     instructionSources: runtime.config.instructionSources,
     promptV2Summary: summarizePromptV2(promptV2.sections),
@@ -136,7 +145,36 @@ export function createRuntimeState(runtime: RuntimeBootstrap): RuntimeState {
       invalidEntries: runtime.config.hooks?.invalidEntries ?? [],
     },
     archivist: runtime.config.archivist,
+    lsp: createRuntimeLspState(runtime),
+    ui: {
+      ...(runtime.config.ui ?? { logoMode: "full" }),
+      logoMode: runtime.persisted?.ui?.logoMode ?? runtime.config.ui?.logoMode ?? "full",
+    },
     auth: runtime.auth,
+  };
+}
+
+function normalizeMcpRegistry(mcp: McpRegistrySummary): McpRegistrySummary {
+  return {
+    serverNames: mcp.serverNames ?? [],
+    servers: mcp.servers ?? {},
+    tools: mcp.tools ?? [],
+    statuses: mcp.statuses ?? [],
+    clients: mcp.clients ?? new Map(),
+  };
+}
+
+function createRuntimeLspState(runtime: RuntimeBootstrap): RuntimeState["lsp"] {
+  const configured = runtime.config.lsp ?? {
+    enabled: false,
+    command: null,
+    args: [],
+    indexArchivist: false,
+  };
+  return {
+    ...configured,
+    enabled: runtime.persisted?.lsp?.enabled ?? configured.enabled,
+    indexArchivist: runtime.persisted?.lsp?.indexArchivist ?? configured.indexArchivist,
   };
 }
 

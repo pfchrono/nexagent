@@ -1,6 +1,6 @@
 import type { InternalToolName } from "./tools.js";
 
-export type ToolEvidenceKind = "read" | "write" | "search" | "analysis" | "memory" | "shell" | "vcs" | "web";
+export type ToolEvidenceKind = "read" | "write" | "search" | "analysis" | "memory" | "shell" | "vcs" | "web" | "code-intel";
 
 export interface ToolContract {
   name: InternalToolName;
@@ -162,6 +162,46 @@ const TOOL_CONTRACTS: Record<InternalToolName, ToolContract> = {
     summary: "Persist checkpoint lineage to Archivist.",
     evidence: "memory",
     writes: false,
+    nexsight: false,
+  },
+  mcp_list_tools: {
+    name: "mcp_list_tools",
+    displayName: "mcp_list_tools",
+    summary: "List hydrated MCP tools.",
+    evidence: "analysis",
+    writes: false,
+    nexsight: false,
+  },
+  mcp_call: {
+    name: "mcp_call",
+    displayName: "mcp_call",
+    summary: "Call a hydrated MCP tool.",
+    evidence: "analysis",
+    writes: false,
+    nexsight: false,
+  },
+  lsp_status: {
+    name: "lsp_status",
+    displayName: "lsp_status",
+    summary: "Report disabled-by-default LSP service status.",
+    evidence: "code-intel",
+    writes: false,
+    nexsight: false,
+  },
+  lsp_symbols: {
+    name: "lsp_symbols",
+    displayName: "lsp_symbols",
+    summary: "Return bounded symbol summaries for a project file.",
+    evidence: "code-intel",
+    writes: true,
+    nexsight: false,
+  },
+  lsp_diagnostics: {
+    name: "lsp_diagnostics",
+    displayName: "lsp_diagnostics",
+    summary: "Return bounded diagnostics summaries for a project file.",
+    evidence: "code-intel",
+    writes: true,
     nexsight: false,
   },
 };

@@ -9,9 +9,12 @@ export type PersistedTransportMode = "cli-exec" | "http-responses" | "codex-http
 export interface PersistedRuntimeState {
   provider?: string;
   providerModels?: Record<string, string>;
+  providerReasoningEfforts?: Record<string, string>;
   transportMode?: PersistedTransportMode;
   commandModes?: PersistedCommandModes;
   operationControls?: PersistedOperationControls;
+  lsp?: PersistedLspState;
+  ui?: PersistedUiState;
   auth?: RuntimeAuthState;
   savedAt: string;
 }
@@ -25,6 +28,15 @@ export interface PersistedCommandModes {
 
 export interface PersistedOperationControls {
   requireApprovalForGuarded?: boolean;
+}
+
+export interface PersistedLspState {
+  enabled?: boolean;
+  indexArchivist?: boolean;
+}
+
+export interface PersistedUiState {
+  logoMode?: "full" | "condensed" | "off";
 }
 
 export interface SavePersistedRuntimeStateOptions {
@@ -54,6 +66,10 @@ export function savePersistedRuntimeState(session: RuntimeSession, options: Save
         Object.entries(session.providerRouting.modelSelection.configuredModels)
           .filter(([, model]) => typeof model === "string" && model.trim().length > 0),
       ),
+      providerReasoningEfforts: Object.fromEntries(
+        Object.entries(session.providerRouting.modelSelection.configuredReasoningEfforts ?? {})
+          .filter((entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].trim().length > 0),
+      ),
       transportMode: session.providerTransport.mode,
       commandModes: {
         cavemanMode: session.commandModes.cavemanMode,
@@ -63,6 +79,13 @@ export function savePersistedRuntimeState(session: RuntimeSession, options: Save
       },
       operationControls: {
         requireApprovalForGuarded,
+      },
+      lsp: {
+        enabled: session.lsp?.enabled === true,
+        indexArchivist: session.lsp?.indexArchivist === true,
+      },
+      ui: {
+        logoMode: session.ui?.logoMode ?? "full",
       },
       auth: session.auth,
       savedAt: new Date().toISOString(),
@@ -113,6 +136,7 @@ function normalizePersistedRuntimeState(value: unknown): PersistedRuntimeState |
   return {
     provider: typeof candidate.provider === "string" ? candidate.provider : undefined,
     providerModels: normalizeProviderModels(candidate.providerModels),
+    providerReasoningEfforts: normalizeProviderModels(candidate.providerReasoningEfforts),
     transportMode:
       candidate.transportMode === "http-responses"
         ? "http-responses"
@@ -123,8 +147,32 @@ function normalizePersistedRuntimeState(value: unknown): PersistedRuntimeState |
             : undefined,
     commandModes: normalizeCommandModes(candidate.commandModes),
     operationControls: normalizeOperationControls(candidate.operationControls),
+    lsp: normalizeLspState(candidate.lsp),
+    ui: normalizeUiState(candidate.ui),
     auth: normalizePersistedAuth(candidate.auth),
     savedAt: typeof candidate.savedAt === "string" ? candidate.savedAt : new Date(0).toISOString(),
+  };
+}
+
+function normalizeLspState(value: unknown): PersistedLspState | undefined {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+  const state = value as Record<string, unknown>;
+  return {
+    enabled: state.enabled === true,
+    indexArchivist: state.indexArchivist === true,
+  };
+}
+
+function normalizeUiState(value: unknown): PersistedUiState | undefined {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+  const state = value as Record<string, unknown>;
+  const logoMode = state.logoMode;
+  return {
+    logoMode: logoMode === "condensed" || logoMode === "off" || logoMode === "full" ? logoMode : undefined,
   };
 }
 

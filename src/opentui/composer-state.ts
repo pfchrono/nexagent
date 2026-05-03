@@ -27,6 +27,7 @@ export type ComposerIntent =
 
 export type ComposerKeyEvent =
   | { kind: "character"; value: string }
+  | { kind: "paste"; value: string }
   | { kind: "backspace" }
   | { kind: "delete-forward" }
   | { kind: "move-cursor"; direction: -1 | 1 }
@@ -80,9 +81,35 @@ export function handleOpenTuiComposerEvent(
         intent: null,
       };
     }
+    case "paste": {
+      const pasted = event.value.replace(/\r\n?/g, "\n");
+      if (!pasted) {
+        return { state: { ...state, notice: "clipboard empty" }, intent: null };
+      }
+      const cursorIndex = clampCursor(state.cursorIndex, state.text);
+      const text = `${state.text.slice(0, cursorIndex)}${pasted}${state.text.slice(cursorIndex)}`;
+      return {
+        state: {
+          ...state,
+          text,
+          cursorIndex: cursorIndex + pasted.length,
+          overlayMode: overlayForText(text, state.overlayMode),
+          historyIndex: -1,
+          selectedIndex: 0,
+          notice: "pasted",
+        },
+        intent: null,
+      };
+    }
     case "backspace": {
       const cursorIndex = clampCursor(state.cursorIndex, state.text);
       if (cursorIndex === 0) {
+        if (state.attachment) {
+          return {
+            state: { ...state, attachment: null, notice: "attachment cleared" },
+            intent: { kind: "clear-attachment" },
+          };
+        }
         return { state: { ...state, notice: "editing" }, intent: null };
       }
       const text = `${state.text.slice(0, cursorIndex - 1)}${state.text.slice(cursorIndex)}`;
@@ -299,6 +326,9 @@ function overlayForText(text: string, current: ComposerOverlayMode): ComposerOve
   if (trimmed.startsWith("$") || trimmed.startsWith("/skill")) {
     return "skill";
   }
+  if (isArgumentCommandPaletteText(trimmed)) {
+    return "command";
+  }
   if (/^\/\S*$/.test(trimmed)) {
     return "command";
   }
@@ -306,6 +336,10 @@ function overlayForText(text: string, current: ComposerOverlayMode): ComposerOve
     return "command";
   }
   return "none";
+}
+
+function isArgumentCommandPaletteText(trimmed: string): boolean {
+  return /^\/model(?:\s+\S*){0,2}$/.test(trimmed) || /^\/effort(?:\s+\S*)?$/.test(trimmed);
 }
 
 function hasTrailingPathCompletionToken(text: string): boolean {

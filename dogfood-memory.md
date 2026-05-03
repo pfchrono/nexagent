@@ -1,7 +1,14 @@
 # Dogfood Memory Improvements (Deduplication + Signal Quality)
 
-## Current observed issue
-Archivist memory is enabled (`bounded-write`), and retrieved memories currently show repeated periodic-autosave entries with near-identical content. This creates noise and lowers retrieval quality.
+## Current status
+Archivist memory is enabled (`bounded-write`). The first dedupe/recovery pass is implemented:
+
+- exact and near-duplicate entries are merged into recurrence records where possible
+- `/memory --maintenance` reports entry counts, duplicate suspects, stale signals, and persistence status
+- failed tool calls can be saved as failure recovery playbooks
+- later turns can retrieve failure playbooks when similar tool/provider failures appear
+
+Remaining tuning area: improve signal quality for long-running dogfood sessions so repeated low-value observations do not crowd out high-value constraints and recovery hints.
 
 ## Goal
 Preserve useful recurrence signal without creating duplicate memory clutter.
@@ -70,21 +77,22 @@ Represent repeated observations as one canonical entry:
 
 ## Suggested phased implementation
 
-### Phase 1 (fastest value)
+### Phase 1 (fastest value) — implemented
 1. Retrieval-side dedupe grouping.
 2. Autosave debounce window.
 
-### Phase 2
+### Phase 2 — implemented
 3. Write-path normalized fingerprint dedupe.
 4. `seenCount/lastSeen` updates for exact matches.
 
-### Phase 3
-5. Near-duplicate semantic matching and merge behavior.
-6. Canonical schema expansion (`mergedFromIds`, provenance).
+### Phase 3 — partial
+5. Near-duplicate text matching and merge behavior.
+6. Canonical schema expansion with recurrence metadata.
+7. Failure recovery playbooks for failed tool/provider usage.
 
-### Phase 4
-7. Compaction tooling + maintenance path.
-8. Staleness/priority tuning.
+### Phase 4 — remaining tuning
+8. More aggressive compaction tooling.
+9. Staleness/priority tuning.
 
 ---
 
@@ -92,6 +100,7 @@ Represent repeated observations as one canonical entry:
 - Repeated periodic-autosave entries no longer appear as separate near-identical retrieval hits.
 - Exact duplicate writes within dedupe window are suppressed or merged.
 - Canonical entries reflect recurrence via `seenCount` and `lastSeen`.
+- Tool failure recovery entries are searchable without exposing raw prompts, file contents, or tool output.
 - Retrieval output reduces duplicate clutter while preserving important repeated constraints.
 - Existing memory corpus can be compacted with traceable merge lineage.
 

@@ -74,6 +74,15 @@ test("OpenTUI composer inserts and deletes at cursor", () => {
   assert.equal(deleted.state.cursorIndex, 1);
 });
 
+test("OpenTUI composer pastes clipboard text at cursor", () => {
+  const state = { ...createOpenTuiComposerState(), text: "ac", cursorIndex: 1 };
+  const pasted = handleOpenTuiComposerEvent(state, { kind: "paste", value: "b\r\nline" });
+
+  assert.equal(pasted.state.text, "ab\nlinec");
+  assert.equal(pasted.state.cursorIndex, "ab\nline".length);
+  assert.equal(pasted.state.notice, "pasted");
+});
+
 test("OpenTUI composer history browsing preserves draft text", () => {
   const state = { ...createOpenTuiComposerState(), text: "draft" };
 
@@ -100,6 +109,18 @@ test("OpenTUI composer clear attachment emits intent", () => {
   const result = handleOpenTuiComposerEvent(attached, { kind: "clear-attachment" });
 
   assert.equal(result.state.attachment, null);
+  assert.deepEqual(result.intent, { kind: "clear-attachment" });
+});
+
+test("OpenTUI composer Backspace clears attachment chip before prompt text", () => {
+  const attached = setComposerAttachment(
+    { ...createOpenTuiComposerState(), text: "describe this", cursorIndex: 0 },
+    { label: "image.png", supported: true },
+  );
+  const result = handleOpenTuiComposerEvent(attached, { kind: "backspace" });
+
+  assert.equal(result.state.attachment, null);
+  assert.equal(result.state.text, "describe this");
   assert.deepEqual(result.intent, { kind: "clear-attachment" });
 });
 
@@ -137,12 +158,33 @@ test("OpenTUI composer opens completion overlay for trailing path tokens", () =>
   assert.equal(prosePath.state.overlayMode, "command");
 });
 
-test("OpenTUI composer closes slash command palette after args start", () => {
-  const command = handleOpenTuiComposerEvent(createOpenTuiComposerState(), { kind: "character", value: "/model" });
+test("OpenTUI composer closes generic slash command palette after args start", () => {
+  const command = handleOpenTuiComposerEvent(createOpenTuiComposerState(), { kind: "character", value: "/status" });
   const withSpace = handleOpenTuiComposerEvent(command.state, { kind: "character", value: " " });
-  const withArg = handleOpenTuiComposerEvent(withSpace.state, { kind: "character", value: "g" });
+  const withArg = handleOpenTuiComposerEvent(withSpace.state, { kind: "character", value: "-" });
 
   assert.equal(command.state.overlayMode, "command");
   assert.equal(withSpace.state.overlayMode, "none");
   assert.equal(withArg.state.overlayMode, "none");
+});
+
+test("OpenTUI composer keeps model and effort pickers open while typing args", () => {
+  const modelCommand = handleOpenTuiComposerEvent(createOpenTuiComposerState(), { kind: "character", value: "/model" });
+  const modelSpace = handleOpenTuiComposerEvent(modelCommand.state, { kind: "character", value: " " });
+  const modelPartial = handleOpenTuiComposerEvent(modelSpace.state, { kind: "character", value: "g" });
+  const modelWithEffortSpace = handleOpenTuiComposerEvent(
+    { ...modelPartial.state, text: "/model gpt-5.5 ", cursorIndex: "/model gpt-5.5 ".length },
+    { kind: "character", value: "h" },
+  );
+  const effortCommand = handleOpenTuiComposerEvent(createOpenTuiComposerState(), { kind: "character", value: "/effort" });
+  const effortSpace = handleOpenTuiComposerEvent(effortCommand.state, { kind: "character", value: " " });
+  const effortPartial = handleOpenTuiComposerEvent(effortSpace.state, { kind: "character", value: "x" });
+
+  assert.equal(modelCommand.state.overlayMode, "command");
+  assert.equal(modelSpace.state.overlayMode, "command");
+  assert.equal(modelPartial.state.overlayMode, "command");
+  assert.equal(modelWithEffortSpace.state.overlayMode, "command");
+  assert.equal(effortCommand.state.overlayMode, "command");
+  assert.equal(effortSpace.state.overlayMode, "command");
+  assert.equal(effortPartial.state.overlayMode, "command");
 });

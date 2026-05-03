@@ -4,6 +4,7 @@ import { getCodexModelDefinition } from "../models.js";
 import { deriveTurnCompletionState, getRemainingContextTokens, type RuntimeSession } from "../runtime/session.js";
 
 const OPEN_BY_DEFAULT_LINE_CAP = 30;
+const TRANSCRIPT_BLOCK_LIMIT = 80;
 
 export type OpenTuiTranscriptBlockKind = "user" | "assistant" | "skill" | "command" | "tool" | "result" | "trace" | "system";
 
@@ -52,6 +53,17 @@ export interface OpenTuiCockpitView {
   risk: string;
 }
 
+export interface OpenTuiConfigSectionView {
+  title: string;
+  rows: string[];
+}
+
+export interface OpenTuiLogoView {
+  mode: "full" | "condensed" | "off";
+  frames: string[];
+  metadata: string;
+}
+
 export interface OpenTuiStatuslineView {
   model: string;
   branch: string;
@@ -94,6 +106,8 @@ export interface OpenTuiRuntimeView {
   traceDetailLines: string[];
   traceBlocks: OpenTuiTranscriptBlock[];
   cockpit: OpenTuiCockpitView;
+  configSections: OpenTuiConfigSectionView[];
+  logo: OpenTuiLogoView;
   statusline: OpenTuiStatuslineView;
 }
 
@@ -113,6 +127,7 @@ export function createOpenTuiRuntimeView(session: RuntimeSession): OpenTuiRuntim
   const traceBlocks = createTraceBlocks(session);
   const cockpit = createCockpitView(session, approval);
   const statusline = createStatuslineView(session, model);
+  const logo = createLogoView(session, provider, model);
   return {
     product: session.product,
     sessionId: session.id,
@@ -126,7 +141,7 @@ export function createOpenTuiRuntimeView(session: RuntimeSession): OpenTuiRuntim
     toolPolicy: session.toolPolicy.mode,
     providerTransportMode: session.providerTransport.mode,
     imageAttachmentSupported: session.providerTransport.mode !== "cli-exec",
-    headerTitle: "nexagent :: agent tui",
+    headerTitle: logo.mode === "off" ? "nexagent :: agent tui" : "nexagent",
     providerLabel: `${provider}/${model}`,
     sessionLabel: `session ${session.id} | turns ${String(session.telemetry.turnCount)}`,
     statusLabel: `${session.action.status} - ${session.action.detail}`,
@@ -141,8 +156,110 @@ export function createOpenTuiRuntimeView(session: RuntimeSession): OpenTuiRuntim
     traceDetailLines,
     traceBlocks,
     cockpit,
+    configSections: createConfigSections(session),
+    logo,
     statusline,
   };
+}
+
+function createLogoView(session: RuntimeSession, provider: string, model: string): OpenTuiLogoView {
+  const mode = session.ui?.logoMode ?? "full";
+  const metadata = [
+    `${provider}/${model}`,
+    session.providerTransport.mode,
+    session.repo.name,
+    session.repo.branch ?? "detached",
+    `cfg:${mode}`,
+  ].join(" · ");
+  if (mode === "off") {
+    return { mode, frames: [], metadata };
+  }
+  if (mode === "condensed") {
+    return {
+      mode,
+      frames: ["nexagent ◜◆◝", "nexagent ◠◆◡", "nexagent ◟◆◞", "nexagent ◡◆◠"],
+      metadata,
+    };
+  }
+  return {
+    mode,
+    frames: [
+      "nexagent  ◜◆◝  terminal agent",
+      "nexagent  ◠◆◡  terminal agent",
+      "nexagent  ◟◆◞  terminal agent",
+      "nexagent  ◡◆◠  terminal agent",
+    ],
+    metadata,
+  };
+}
+
+function createConfigSections(session: RuntimeSession): OpenTuiConfigSectionView[] {
+  const mcpStatuses = session.mcpRegistry?.statuses ?? [];
+  const hydratedMcpServers = mcpStatuses.filter((status) => status.status === "hydrated");
+  const failedMcpServers = mcpStatuses.filter((status) => status.status === "failed");
+  const skippedMcpServers = mcpStatuses.filter((status) => status.status === "skipped");
+  const mcpRows = [
+    `configured ${String(session.mcpServers.length)}`,
+    `hydrated ${String(hydratedMcpServers.length)}/${String(mcpStatuses.length || session.mcpServers.length)}`,
+    `tools ${String(session.mcpRegistry?.tools?.length ?? 0)}`,
+    failedMcpServers.length > 0
+      ? `failed ${failedMcpServers.map((status) => status.name).join(", ")}`
+      : "failed none",
+  ];
+  if (skippedMcpServers.length > 0) {
+    mcpRows.push(`skipped ${skippedMcpServers.map((status) => status.name).join(", ")}`);
+  }
+  const lspEnabled = session.lsp?.enabled === true;
+  const lspConfigured = Boolean(session.lsp?.command);
+  const lspStatus = lspEnabled
+    ? lspConfigured ? "ready to start" : "enabled but missing command"
+    : lspConfigured ? "configured but disabled" : "disabled by default";
+  return [
+    {
+      title: "provider",
+      rows: [
+        `active ${session.provider}`,
+        `transport ${session.providerTransport.mode}`,
+        `auth ${session.providerTransport.authGate}`,
+      ],
+    },
+    {
+      title: "ui",
+      rows: [
+        `logo ${session.ui?.logoMode ?? "full"}`,
+        `mouse ${session.commandModes.mouseMode}`,
+        `statusline ${session.commandModes.statusline ? "on" : "off"}`,
+      ],
+    },
+    {
+      title: "memory",
+      rows: [
+        `archivist ${session.archivist.enabled ? "on" : "off"}`,
+        `storage ${session.archivist.storagePath ?? "disabled"}`,
+        `retrieval ${session.archivist.retrieval.sourceCategory ?? "idle"}`,
+      ],
+    },
+    {
+      title: "mcp",
+      rows: mcpRows,
+    },
+    {
+      title: "lsp",
+      rows: [
+        `status ${lspStatus}`,
+        `enabled ${lspEnabled ? "on" : "off"}`,
+        `configured ${lspConfigured ? "yes" : "no"}`,
+        `indexArchivist ${session.lsp?.indexArchivist === true ? "on" : "off"}`,
+      ],
+    },
+    {
+      title: "diagnostics",
+      rows: [
+        "sentry /status --sentry",
+        "redaction tags-only",
+      ],
+    },
+  ];
 }
 
 export function createLocalOutputBlock(
@@ -160,13 +277,19 @@ export function createLocalOutputBlock(
 }
 
 function isTranscriptEvent(event: RuntimeSession["events"][number]): boolean {
-  if (event.kind === "prompt" || event.kind === "assistant" || event.kind === "tool") {
+  if (event.kind === "prompt" || event.kind === "assistant" || event.kind === "tool" || event.kind === "command") {
     return true;
   }
   if (event.kind === "provider") {
     return event.status === "failed" || event.status === "blocked" || event.status === "canceled";
   }
-  return event.kind === "control" || event.kind === "compact";
+  if (event.kind === "control" && (isDiagnosticControlEvent(event.summary) || isTraceOnlyControlEvent(event.summary))) {
+    return false;
+  }
+  if (event.kind === "control") {
+    return isUserFacingControlEvent(event);
+  }
+  return event.kind === "compact";
 }
 
 function createTranscriptLines(session: RuntimeSession): string[] {
@@ -190,7 +313,7 @@ function createTranscriptBlocks(session: RuntimeSession): OpenTuiTranscriptBlock
   const transcriptEvents = session.events
     .filter((event) => isTranscriptEvent(event));
   const hasVisibleTranscriptEvent = transcriptEvents
-    .some((event) => event.kind === "prompt" || event.kind === "assistant" || event.kind === "compact");
+    .some((event) => event.kind === "prompt" || event.kind === "assistant" || event.kind === "command" || event.kind === "compact");
   const blocks = hasVisibleTranscriptEvent
     ? transcriptEvents.flatMap((event, index) => {
       if (event.kind === "prompt") {
@@ -227,11 +350,20 @@ function createTranscriptBlocks(session: RuntimeSession): OpenTuiTranscriptBlock
           collapsedByDefault: true,
         })];
       }
+      if (event.kind === "command") {
+        return [createBlock({
+          id: `event-command-${String(index)}-${event.at}`,
+          kind: "command",
+          label: formatCommandTranscriptLabel(event.summary, event.status),
+          lines: splitTranscriptLines(event.detail ?? event.summary),
+          collapsedByDefault: false,
+        })];
+      }
       if (event.kind === "provider" || event.kind === "control" || event.kind === "compact") {
         return [createBlock({
           id: `event-${event.kind}-${String(index)}-${event.at}`,
           kind: "system",
-          label: `${event.kind} ${event.status}`,
+          label: formatRuntimeTranscriptLabel(event),
           lines: formatRuntimeMessageLines(event),
           collapsedByDefault: true,
         })];
@@ -241,10 +373,10 @@ function createTranscriptBlocks(session: RuntimeSession): OpenTuiTranscriptBlock
     : [];
 
   if (blocks.length > 0) {
-    return blocks.slice(-16);
+    return blocks.slice(-TRANSCRIPT_BLOCK_LIMIT);
   }
 
-  return session.conversation.slice(-16).map((turn, index) => createBlock({
+  return session.conversation.slice(-TRANSCRIPT_BLOCK_LIMIT).map((turn, index) => createBlock({
     id: `conversation-${String(index)}`,
     kind: turn.role === "user" ? "user" : "assistant",
     label: turn.role === "user" ? "you" : "agent",
@@ -258,7 +390,7 @@ function createTraceSummaryLines(session: RuntimeSession): string[] {
     return ["no turn events"];
   }
 
-  return session.events.slice(-6).map((event) => `${event.kind} ${event.status} - ${event.summary}`);
+  return session.events.slice(-6).map((event) => formatTraceEventTitle(event));
 }
 
 function createTraceDetailLines(session: RuntimeSession): string[] {
@@ -321,25 +453,23 @@ function collectCurrentTurnTokenMetrics(session: RuntimeSession): { inputTokens:
   const events = promptIndex >= 0 ? session.events.slice(promptIndex) : session.events;
   return events.reduce((metrics, event) => {
     const detail = event.detail ?? "";
-    metrics.inputTokens += readMetricTokenCount(detail, "in");
-    metrics.outputTokens += readMetricTokenCount(detail, "out");
+    metrics.inputTokens += readMetricTokenCount(detail, "turn_in") || readMetricTokenCount(detail, "in");
+    metrics.outputTokens += readMetricTokenCount(detail, "turn_out") || readMetricTokenCount(detail, "out");
     return metrics;
   }, { inputTokens: 0, outputTokens: 0 });
 }
 
-function readMetricTokenCount(detail: string, key: "in" | "out"): number {
+function readMetricTokenCount(detail: string, key: "in" | "out" | "turn_in" | "turn_out"): number {
   const match = new RegExp(`(?:^|[;\\s])${key}~(\\d+)`).exec(detail);
   return match ? Number.parseInt(match[1] ?? "0", 10) : 0;
 }
 
 function formatSessionAge(session: RuntimeSession): string {
-  const latestAt = session.events[session.events.length - 1]?.at ?? session.startedAt;
   const startedMs = Date.parse(session.startedAt);
-  const latestMs = Date.parse(latestAt);
-  if (!Number.isFinite(startedMs) || !Number.isFinite(latestMs) || latestMs <= startedMs) {
+  if (!Number.isFinite(startedMs)) {
     return "0s";
   }
-  const seconds = Math.floor((latestMs - startedMs) / 1000);
+  const seconds = Math.max(0, Math.floor((Date.now() - startedMs) / 1000));
   if (seconds < 60) {
     return `${String(seconds)}s`;
   }
@@ -407,6 +537,15 @@ function createCockpitWarnings(session: RuntimeSession): OpenTuiCockpitWarningRo
       type: "error",
       message: session.action.detail,
       action: "inspect trace or retry after fix",
+    });
+  }
+  const failedMcpServers = session.mcpRegistry?.statuses?.filter((status) => status.status === "failed") ?? [];
+  if (failedMcpServers.length > 0) {
+    warnings.push({
+      severity: "warning",
+      type: "mcp",
+      message: `MCP failed: ${failedMcpServers.map((status) => status.name).join(", ")}`,
+      action: "/config or /status --sentry",
     });
   }
   if (session.operationControls.steerMessage) {
@@ -485,27 +624,185 @@ function parseSkillPromptLabel(value: string): string | null {
   return normalized.match(/^skill\s*->\s*[\w:.-]+(?:\s+.+)?$/i) ? normalized : null;
 }
 
+function isDiagnosticControlEvent(summary: string): boolean {
+  return /^(?:info|warning|error)\s+[\w.-]+:\s+/i.test(summary);
+}
+
+function isTraceOnlyControlEvent(summary: string): boolean {
+  return /\b(?:nudge applied|tool budget continuation cycle started|tool budget final synthesis requested|fallback returned partial result)\b/i.test(summary);
+}
+
+function isUserFacingControlEvent(event: RuntimeSession["events"][number]): boolean {
+  if (event.status !== "completed" && event.status !== "failed" && event.status !== "blocked" && event.status !== "canceled") {
+    return false;
+  }
+  return /\b(?:turn run|turn completed|turn canceled|request cancel|operation canceled)\b/i.test(event.summary);
+}
+
+function formatRuntimeTranscriptLabel(event: RuntimeSession["events"][number]): string {
+  if (event.kind === "compact") {
+    return `compact ${event.status}`;
+  }
+  if (event.kind === "provider") {
+    return `provider ${event.status}`;
+  }
+  if (event.kind === "control" && /\bturn run\b/i.test(event.summary)) {
+    return event.status === "completed" ? "turn complete" : `turn ${event.status}`;
+  }
+  return `${event.kind} ${event.status}`;
+}
+
+function formatStatusVerb(status: RuntimeSession["events"][number]["status"]): string {
+  return status === "started" ? "started"
+    : status === "queued" ? "queued"
+      : status === "completed" ? "completed"
+        : status === "failed" ? "failed"
+          : status === "blocked" ? "blocked"
+            : status === "canceled" ? "canceled"
+              : status;
+}
+
+function formatTraceEventTitle(event: RuntimeSession["events"][number]): string {
+  if (event.kind === "tool") {
+    return formatToolTranscriptLabel(event.summary, event.status, event.detail);
+  }
+  const icon = formatTraceEventIcon(event);
+  const noun = event.kind === "prompt" ? "User prompt"
+    : event.kind === "assistant" ? "Agent response"
+      : event.kind === "provider" ? "Provider"
+        : event.kind === "command" ? "Command"
+          : event.kind === "control" ? "Runtime"
+            : event.kind === "compact" ? "Compaction"
+              : event.kind;
+  const summary = firstLine(event.summary);
+  return `${icon} ${noun} ${formatStatusVerb(event.status)}${summary ? ` · ${summary}` : ""}`;
+}
+
+function formatTraceEventIcon(event: RuntimeSession["events"][number]): string {
+  if (event.kind === "prompt") {
+    return "🧭";
+  }
+  if (event.kind === "assistant") {
+    return "💬";
+  }
+  if (event.kind === "provider") {
+    return event.status === "failed" || event.status === "blocked" ? "⚠" : "↗";
+  }
+  if (event.kind === "command") {
+    return "⌘";
+  }
+  if (event.kind === "control") {
+    return event.status === "failed" || event.status === "blocked" ? "⚠" : "◆";
+  }
+  if (event.kind === "compact") {
+    return "🧠";
+  }
+  return "•";
+}
+
+function formatCommandTranscriptLabel(summary: string, status: RuntimeSession["events"][number]["status"]): string {
+  const normalized = firstLine(summary)
+    .replace(/\s+command\s*$/i, "")
+    .replace(/^command\s+/i, "");
+  return `command ${normalized || status}`;
+}
+
 function formatToolTranscriptLabel(summary: string, status: RuntimeSession["events"][number]["status"], detail?: string): string {
   const normalized = firstLine(summary)
     .replace(/^tool\s+/i, "")
     .replace(/\s+(started|completed|failed|not executed)$/i, "");
   const metrics = detail ? formatMetricBadge(detail) : "";
-  return `tool ${normalized || status}${metrics ? ` · ${metrics}` : ""}`;
+  const displayName = formatToolDisplayName(normalized || "tool");
+  const icon = formatToolIcon(normalized || displayName);
+  const statusLabel = status === "started" ? "Running"
+    : status === "completed" ? "Done"
+      : status === "failed" ? "Failed"
+        : status === "blocked" ? "Blocked"
+          : status === "canceled" ? "Canceled"
+            : status;
+  return `${icon} ${statusLabel} ${displayName}${metrics ? ` · ${metrics}` : ""}`;
 }
 
 function formatToolTranscriptLines(event: RuntimeSession["events"][number]): string[] {
   const metrics = event.detail ? formatMetricBadge(event.detail) : "";
-  const lines = [`${event.status} · ${firstLine(event.summary)}${metrics ? ` · ${metrics}` : ""}`];
+  const lines = [`${formatToolTranscriptLabel(event.summary, event.status, event.detail)}${metrics ? "" : ""}`];
   if (event.detail && event.detail !== event.summary) {
-    lines.push(...splitTranscriptLines(event.detail));
+    lines.push(...formatToolDetailLines(event.detail));
   }
   return lines;
 }
 
+function formatToolDisplayName(toolName: string): string {
+  const display: Record<string, string> = {
+    read_file: "Read file",
+    write_file: "Write file",
+    apply_patch: "Apply patch",
+    batch_edit: "Batch edit",
+    preview_patch: "Preview patch",
+    list_dir: "List directory",
+    search_content: "Search content",
+    search_files: "Search files",
+    shell_command: "Run shell",
+    git_status: "Git status",
+    git_diff: "Git diff",
+    nexsight_execute: "Nexsight",
+    nexsight_index: "Index context",
+    nexsight_batch: "Batch index",
+    nexsight_search: "Search context",
+    archivist_save: "Save memory",
+    archivist_checkpoint: "Checkpoint memory",
+    lsp_status: "LSP status",
+    lsp_symbols: "LSP symbols",
+    lsp_diagnostics: "LSP diagnostics",
+  };
+  return display[toolName] ?? toolName.replace(/_/g, " ");
+}
+
+function formatToolIcon(toolName: string): string {
+  const normalized = toolName.toLowerCase().replace(/\s+/g, "_");
+  if (normalized.includes("read_file") || normalized.includes("read")) {
+    return "📖";
+  }
+  if (normalized.includes("write") || normalized.includes("patch") || normalized.includes("edit")) {
+    return "✎";
+  }
+  if (normalized.includes("search") || normalized.includes("find") || normalized.includes("glob") || normalized.includes("rg")) {
+    return "🔎";
+  }
+  if (normalized.includes("shell") || normalized.includes("command")) {
+    return "⚙";
+  }
+  if (normalized.includes("git")) {
+    return "⑂";
+  }
+  if (normalized.includes("nexsight") || normalized.includes("context") || normalized.includes("index")) {
+    return "◇";
+  }
+  if (normalized.includes("archivist") || normalized.includes("memory") || normalized.includes("checkpoint")) {
+    return "🧠";
+  }
+  if (normalized.includes("lsp")) {
+    return "λ";
+  }
+  return "🔧";
+}
+
+function formatToolDetailLines(detail: string): string[] {
+  return splitTranscriptLines(detail)
+    .map((line) => firstLine(line)
+      .replace(/\bread-only\b/g, "read only")
+      .replace(/\bguarded\b/g, "approval guarded")
+      .replace(/\blow\b/g, "low risk")
+      .replace(/^duration=/, "duration ")
+      .replace(/;\s*/g, " · ")
+      .replace(/\bin~/g, "in ")
+      .replace(/\bout~/g, "out "));
+}
+
 function formatMetricBadge(detail: string): string {
   const duration = readMetricValue(detail, "duration");
-  const inputTokens = readMetricValue(detail, "in");
-  const outputTokens = readMetricValue(detail, "out");
+  const inputTokens = readMetricValue(detail, "turn_in") ?? readMetricValue(detail, "in");
+  const outputTokens = readMetricValue(detail, "turn_out") ?? readMetricValue(detail, "out");
   return [
     duration,
     inputTokens ? `↓ ${inputTokens}` : null,
@@ -513,13 +810,19 @@ function formatMetricBadge(detail: string): string {
   ].filter((value): value is string => Boolean(value)).join(" ");
 }
 
-function readMetricValue(detail: string, key: "duration" | "in" | "out"): string | null {
-  const match = new RegExp(`(?:^|[;\\s])${key}${key === "duration" ? "=" : "~"}([^;\\s]+)`).exec(detail);
+function readMetricValue(detail: string, key: "duration" | "in" | "out" | "turn_in" | "turn_out"): string | null {
+  const separator = key === "duration" ? "=" : "~";
+  const match = new RegExp(`(?:^|[;\\s])${key}${separator}([^;\\s]+)`).exec(detail);
   return match?.[1] ?? null;
 }
 
 function formatRuntimeMessageLines(event: RuntimeSession["events"][number]): string[] {
-  const lines = [`${event.status} · ${firstLine(event.summary)}`];
+  const metrics = event.detail ? formatMetricBadge(event.detail) : "";
+  const label = formatRuntimeTranscriptLabel(event);
+  const summary = event.kind === "control" && /\bturn run\b/i.test(event.summary)
+    ? label
+    : firstLine(event.summary);
+  const lines = [`${summary}${metrics ? ` · ${metrics}` : ""}`];
   if (event.detail && event.detail !== event.summary) {
     lines.push(...splitTranscriptLines(event.detail));
   }
@@ -527,7 +830,14 @@ function formatRuntimeMessageLines(event: RuntimeSession["events"][number]): str
 }
 
 function formatTraceEventLines(event: RuntimeSession["events"][number]): string[] {
-  const lines = [`${event.at} | ${event.kind} | ${event.status} | ${event.summary}`];
+  const lines = [
+    formatTraceEventTitle(event),
+    `  at ${event.at} · kind ${event.kind} · status ${event.status}`,
+  ];
+  if (event.kind === "command") {
+    lines.push("  output rendered in chat; command payload hidden from trace");
+    return lines;
+  }
   if (event.detail && event.detail !== event.summary) {
     lines.push(...splitTranscriptLines(event.detail).map((line) => `  ${line}`));
   }

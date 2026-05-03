@@ -94,6 +94,8 @@ test("buildPromptV2 emits stable section snapshot for default codex cli prompt",
     ],
   );
   assert.match(prompt.prompt, /Transport: Codex CLI \(codex-cli-exec\); auth=ready\./);
+  assert.match(prompt.prompt, /Text tool-call transport: there is no separate function-call UI/);
+  assert.match(prompt.prompt, /<nexagent_tool_call>\{"name":"read_file","arguments":\{"path":"README\.md"\}\}<\/nexagent_tool_call>/);
 });
 
 test("buildPromptV2 tells models to infer test targets from repo evidence", () => {
@@ -188,6 +190,10 @@ test("buildPromptV2 keeps style modes dynamic and subordinate", () => {
   assert.equal(caveman?.cache, "dynamic");
   assert.equal(deadpool?.cache, "dynamic");
   assert.ok((execution?.priority ?? 999) < (caveman?.priority ?? 0));
+  assert.match(caveman?.content.join("\n") ?? "", /Pattern: \[thing\] \[action\] \[reason\]\. \[next step\]\./);
+  assert.match(caveman?.content.join("\n") ?? "", /Structured and machine-readable content stays exact/);
+  assert.match(deadpool?.content.join("\n") ?? "", /recognizably Deadpool-flavored/);
+  assert.match(deadpool?.content.join("\n") ?? "", /Do not copy copyrighted quotes or signature catchphrases/);
 });
 
 test("buildPromptV2 snapshots archivist and active skill conversation context", () => {
@@ -247,4 +253,28 @@ test("buildPromptV2 switches provider guidance by transport", () => {
   assert.match(prompt.prompt, /Transport: OpenAI Responses HTTP \(openai-http-responses\); auth=ready\./);
   assert.match(prompt.prompt, /Prefer native tool calling/);
   assert.match(prompt.prompt, /Do not emit XML tool markup when native tool calling is active/);
+});
+
+test("buildPromptV2 tells codex-http to use text tool envelope, not nonexistent native functions", () => {
+  const session = createInstructionContext();
+  session.providerTransport = {
+    executor: "fetch",
+    adapter: "codex-chatgpt-http",
+    mode: "codex-http",
+    authSource: "codex-auth-json",
+    authGate: "ready",
+    activeProvider: "codex",
+    openaiBaseUrl: "https://chatgpt.com/backend-api/codex",
+    silentFallback: false,
+  };
+
+  const prompt = buildPromptV2({
+    session,
+    prompt: "write a file",
+  });
+
+  assert.match(prompt.prompt, /Transport: Codex ChatGPT HTTP \(codex-chatgpt-http\); auth=ready\./);
+  assert.match(prompt.prompt, /This transport still uses Nexagent text tool-call markup/);
+  assert.match(prompt.prompt, /do not wait for native callable functions/);
+  assert.match(prompt.prompt, /<nexagent_tool_call>\{"name":"read_file","arguments":\{"path":"README\.md"\}\}<\/nexagent_tool_call>/);
 });

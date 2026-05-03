@@ -7,7 +7,8 @@ export const COMMAND_CATALOG = [
   { name: "/login", usage: "/login [status]", description: "check or launch Codex login" },
   { name: "/codex", usage: "/codex [status|off]", description: "activate Codex provider preference" },
   { name: "/provider", usage: "/provider [status|name|transport ...] [--verbose]", description: "show or switch provider and transport mode" },
-  { name: "/model", usage: "/model [status|list|name]", description: "show or set model for active provider" },
+  { name: "/model", usage: "/model [status|list|name [effort]]", description: "show or set model for active provider" },
+  { name: "/effort", usage: "/effort [status|low|medium|high|xhigh]", description: "show or set reasoning effort for active model" },
   { name: "/skill", usage: "/skill [name] [args...]", description: "list skills or resolve and route a skill by name" },
   { name: "/mouse", usage: "/mouse [status|mode <auto|scroll|select>]", description: "show or set transcript mouse interaction mode" },
   { name: "/status", usage: "/status [--verbose|--sentry [--send-test-event]]", description: "show runtime, repo, auth, style, and Sentry status" },
@@ -20,6 +21,8 @@ export const COMMAND_CATALOG = [
   { name: "/compact", usage: "/compact [status]", description: "compact session context now or inspect compaction state" },
   { name: "/tools", usage: "/tools [--verbose]", description: "show repo-local tool policy and safety guards" },
   { name: "/nexsight", usage: "/nexsight [stats|index <path> [pattern]|search <query>|purge|doctor]", description: "manage local nexsight execution/index/search context store" },
+  { name: "/config", usage: "/config [status] | /config [set] <logo|lsp|lsp-index> <value>", description: "inspect or mutate persisted runtime configuration" },
+  { name: "/lsp", usage: "/lsp [status|mode <on|off>|symbols <path>|diagnostics <path>]", description: "inspect disabled-by-default local LSP code intelligence" },
   { name: "/pwd", usage: "/pwd", description: "show current working directory" },
   { name: "/ls", usage: "/ls [path]", description: "list directory contents from session cwd" },
   { name: "/read", usage: "/read <path>", description: "read text file contents" },
@@ -28,10 +31,13 @@ export const COMMAND_CATALOG = [
   { name: "/rg", usage: "/rg <pattern> [path]", description: "search repo files with ripgrep" },
   { name: "/diff", usage: "/diff [path]", description: "show bounded git diff for repo or one path" },
   { name: "/hooks", usage: "/hooks", description: "inspect repo-local hook policy" },
-  { name: "/memory", usage: "/memory [--verbose|--maintenance|save <text>|checkpoint [reason]|session [focus]]", description: "inspect, maintain, or persist archivist memory/checkpoints" },
+  { name: "/memory", usage: "/memory [status|--verbose|--maintenance|save <text>|checkpoint [reason]|session [focus]]", description: "inspect, maintain, or persist archivist memory/checkpoints" },
   { name: "/attach", usage: "/attach <image-path>", description: "attach local image for next prompt (http transports only)" },
   { name: "/detach", usage: "/detach", description: "clear queued image attachment" },
 ] as const;
 
 export const PATH_COMPLETION_COMMANDS = new Set(["/ls", "/read", "/diff"]);
 export const SECOND_ARG_PATH_COMMANDS = new Set(["/find", "/glob", "/rg"]);
+export const PATH_SUBCOMMANDS = new Map<string, ReadonlySet<string>>([
+  ["/lsp", new Set(["symbols", "diagnostics"])],
+]);

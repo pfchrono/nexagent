@@ -7,6 +7,7 @@ import test from "node:test";
 import { createDefaultProviderRegistry } from "../src/provider/registry.js";
 import { createRuntimeState } from "../src/runtime/bootstrap.js";
 import { loadHarnessConfig } from "../src/runtime/config.js";
+import { loadMcpRegistrySummary, shutdownMcpRegistry } from "../src/runtime/mcp.js";
 import { loadPersistedRuntimeState, savePersistedRuntimeState } from "../src/runtime/persistence.js";
 import {
   applyProviderSelection,
@@ -106,7 +107,7 @@ const EXPECTED_TOOL_AVAILABILITY = [
   "Missing tool rule: if a command/tool is missing, search package scripts, node_modules/.bin, local bins, available MCP/tool registries, and official web docs when needed; install project-local dependencies only when safe and scoped; ask user only for root/admin installs.",
   "Internal tool protocol: when tool use is required, respond with only one XML block:",
   '<nexagent_tool_call>{"name":"read_file","arguments":{"path":"src/cli.ts"}}</nexagent_tool_call>',
-  "Available internal tools: read_file, write_file, apply_patch, batch_edit, preview_patch, list_dir, search_content, search_files, web_fetch, web_search, git_status, git_diff, shell_command, nexsight_execute, nexsight_index, nexsight_batch, nexsight_search, archivist_save, archivist_checkpoint",
+  "Available internal tools: read_file, write_file, apply_patch, batch_edit, preview_patch, list_dir, search_content, search_files, web_fetch, web_search, git_status, git_diff, shell_command, nexsight_execute, nexsight_index, nexsight_batch, nexsight_search, archivist_save, archivist_checkpoint, mcp_list_tools, mcp_call",
   "Use tools for repo inspection instead of narrating intended actions.",
 ];
 
@@ -435,6 +436,217 @@ test("loadHarnessConfig imports Claude archivist settings", async () => {
   }
 });
 
+test("loadHarnessConfig migrates Codex MCP config to global nexagent mcp once", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "nexagent-codex-mcp-"));
+  const cwd = path.join(root, "repo");
+  const nexagentHome = path.join(root, ".nexagent");
+  const codexDir = path.join(root, ".codex");
+
+  try {
+    await mkdir(cwd, { recursive: true });
+    await mkdir(codexDir, { recursive: true });
+    await writeFile(path.join(codexDir, "config.toml"), [
+      "[mcp_servers.context7]",
+      "command = \"context7-mcp\"",
+      "startup_timeout_sec = 120",
+      "",
+      "[mcp_servers.github]",
+      "url = \"https://api.githubcopilot.com/mcp/\"",
+      "bearer_token_env_var = \"GITHUB_PAT_TOKEN\"",
+      "startup_timeout_sec = 120",
+      "",
+    ].join("\n"), "utf8");
+
+    const config = await withNexagentHome(nexagentHome, () => loadHarnessConfig(cwd));
+    const migrated = JSON.parse(await readFile(path.join(nexagentHome, "mcp.json"), "utf8")) as { mcpServers: Record<string, { startup_timeout_sec?: number; url?: string }> };
+
+    assert.equal(config.mcpConfigPath, path.join(nexagentHome, "mcp.json"));
+    assert.deepEqual(Object.keys(migrated.mcpServers).sort(), ["context7", "github"]);
+    assert.equal(migrated.mcpServers.context7?.startup_timeout_sec, 120);
+    assert.equal(migrated.mcpServers.github?.url, "https://api.githubcopilot.com/mcp/");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("loadHarnessConfig prefers repo nexagent mcp over global, legacy, and codex configs", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "nexagent-mcp-precedence-"));
+  const cwd = path.join(root, "repo");
+  const nexagentHome = path.join(root, ".nexagent");
+
+  try {
+    await mkdir(path.join(cwd, ".nexagent"), { recursive: true });
+    await mkdir(nexagentHome, { recursive: true });
+    await mkdir(path.join(root, ".codex"), { recursive: true });
+    await writeFile(path.join(cwd, ".nexagent", "mcp.json"), '{"mcpServers":{"repo":{}}}\n', "utf8");
+    await writeFile(path.join(nexagentHome, "mcp.json"), '{"mcpServers":{"global":{}}}\n', "utf8");
+    await writeFile(path.join(cwd, ".mcp.json"), '{"mcpServers":{"legacy":{}}}\n', "utf8");
+    await writeFile(path.join(root, ".codex", "config.toml"), '[mcp_servers.codex]\ncommand = "codex-mcp"\n', "utf8");
+
+    const config = await withNexagentHome(nexagentHome, () => loadHarnessConfig(cwd));
+
+    assert.equal(config.mcpConfigPath, path.join(cwd, ".nexagent", "mcp.json"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("loadHarnessConfig merges missing Codex MCP servers into global config without duplicates", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "nexagent-mcp-merge-"));
+  const cwd = path.join(root, "repo");
+  const nexagentHome = path.join(root, ".nexagent");
+
+  try {
+    await mkdir(cwd, { recursive: true });
+    await mkdir(nexagentHome, { recursive: true });
+    await mkdir(path.join(root, ".codex"), { recursive: true });
+    await writeFile(path.join(nexagentHome, "settings.json"), '{"mcp":{"configPath":"mcp.json"}}\n', "utf8");
+    await writeFile(path.join(nexagentHome, "mcp.json"), '{"mcpServers":{"context7":{"command":"existing"},"local":{"command":"local-mcp"}}}\n', "utf8");
+    await writeFile(path.join(root, ".codex", "config.toml"), [
+      "[mcp_servers.context7]",
+      "command = \"codex-context7\"",
+      "[mcp_servers.playwright]",
+      "command = \"npx\"",
+      "args = [\"@playwright/mcp@latest\"]",
+      "startup_timeout_sec = 120",
+      "",
+    ].join("\n"), "utf8");
+
+    const config = await withNexagentHome(nexagentHome, () => loadHarnessConfig(cwd));
+    const merged = JSON.parse(await readFile(path.join(nexagentHome, "mcp.json"), "utf8")) as { mcpServers: Record<string, { command?: string; startup_timeout_sec?: number }> };
+
+    assert.equal(config.mcpConfigPath, path.join(nexagentHome, "mcp.json"));
+    assert.deepEqual(Object.keys(merged.mcpServers).sort(), ["context7", "local", "playwright"]);
+    assert.equal(merged.mcpServers.context7?.command, "existing");
+    assert.equal(merged.mcpServers.playwright?.startup_timeout_sec, 120);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("loadHarnessConfig merges missing legacy repo MCP servers into global config", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "nexagent-mcp-legacy-merge-"));
+  const cwd = path.join(root, "repo");
+  const nexagentHome = path.join(root, ".nexagent");
+
+  try {
+    await mkdir(cwd, { recursive: true });
+    await mkdir(nexagentHome, { recursive: true });
+    await writeFile(path.join(nexagentHome, "settings.json"), '{"mcp":{"configPath":"mcp.json","enabledServers":["context7","sentry"]}}\n', "utf8");
+    await writeFile(path.join(nexagentHome, "mcp.json"), '{"mcpServers":{"context7":{"command":"existing"}}}\n', "utf8");
+    await writeFile(path.join(cwd, ".mcp.json"), '{"mcpServers":{"context7":{"command":"legacy-context7"},"sentry":{"command":"npx","args":["-y","@sentry/mcp-server@latest"]}}}\n', "utf8");
+
+    const config = await withNexagentHome(nexagentHome, () => loadHarnessConfig(cwd));
+    const merged = JSON.parse(await readFile(path.join(nexagentHome, "mcp.json"), "utf8")) as { mcpServers: Record<string, { command?: string; args?: string[] }> };
+
+    assert.equal(config.mcpConfigPath, path.join(nexagentHome, "mcp.json"));
+    assert.deepEqual(Object.keys(merged.mcpServers).sort(), ["context7", "sentry"]);
+    assert.equal(merged.mcpServers.context7?.command, "existing");
+    assert.deepEqual(merged.mcpServers.sentry?.args, ["-y", "@sentry/mcp-server@latest"]);
+    assert.deepEqual(config.enabledMcpServers, ["context7", "sentry"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("loadMcpRegistrySummary hydrates line-framed stdio MCP tools with startup timeout", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-mcp-hydrate-"));
+  const serverPath = path.join(cwd, "mcp-server.mjs");
+  const configPath = path.join(cwd, "mcp.json");
+
+  try {
+    await writeFile(serverPath, `
+let buffer = "";
+process.stdin.on("data", (chunk) => {
+  buffer += chunk.toString("utf8");
+  for (;;) {
+    const lineEnd = buffer.indexOf("\\n");
+    if (lineEnd === -1) return;
+    const line = buffer.slice(0, lineEnd).replace(/\\r$/, "");
+    buffer = buffer.slice(lineEnd + 1);
+    if (!line.trim()) continue;
+    const message = JSON.parse(line);
+    if (message.id && message.method === "initialize") respond(message.id, { protocolVersion: "2024-11-05", capabilities: {}, serverInfo: { name: "fake", version: "1" } });
+    if (message.id && message.method === "tools/list") respond(message.id, { tools: [{ name: "echo", description: "Echo input", inputSchema: { type: "object" } }] });
+  }
+});
+function respond(id, result) {
+  const body = JSON.stringify({ jsonrpc: "2.0", id, result });
+  process.stdout.write(body + "\\n");
+}
+`, "utf8");
+    await writeFile(configPath, JSON.stringify({
+      mcpServers: {
+        fake: {
+          command: process.execPath,
+          args: [serverPath],
+          startup_timeout_sec: 1,
+        },
+      },
+    }), "utf8");
+
+    const registry = await loadMcpRegistrySummary(configPath);
+
+    assert.deepEqual(registry.serverNames, ["fake"]);
+    assert.equal(registry.statuses[0]?.status, "hydrated");
+    assert.equal(registry.statuses[0]?.startupTimeoutMs, 1000);
+    assert.deepEqual(registry.tools.map((tool) => `${tool.server}.${tool.name}`), ["fake.echo"]);
+    shutdownMcpRegistry(registry);
+    assert.equal(registry.clients.size, 0);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("loadMcpRegistrySummary expands MCP env placeholders from repo dotenv", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-mcp-env-"));
+  const serverPath = path.join(cwd, "mcp-server.mjs");
+  const configPath = path.join(cwd, "mcp.json");
+
+  try {
+    await writeFile(path.join(cwd, ".env"), "SENTRY_ACCESS_TOKEN=from-dotenv\n", "utf8");
+    await writeFile(serverPath, `
+let buffer = "";
+process.stdin.on("data", (chunk) => {
+  buffer += chunk.toString("utf8");
+  for (;;) {
+    const lineEnd = buffer.indexOf("\\n");
+    if (lineEnd === -1) return;
+    const line = buffer.slice(0, lineEnd).replace(/\\r$/, "");
+    buffer = buffer.slice(lineEnd + 1);
+    if (!line.trim()) continue;
+    const message = JSON.parse(line);
+    if (message.id && message.method === "initialize") respond(message.id, { protocolVersion: "2024-11-05", capabilities: {}, serverInfo: { name: "fake", version: "1" } });
+    if (message.id && message.method === "tools/list") respond(message.id, { tools: [{ name: "auth", description: process.env.SENTRY_ACCESS_TOKEN === "from-dotenv" ? "expanded" : "missing", inputSchema: { type: "object" } }] });
+  }
+});
+function respond(id, result) {
+  process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, result }) + "\\n");
+}
+`, "utf8");
+    await writeFile(configPath, JSON.stringify({
+      mcpServers: {
+        fake: {
+          command: process.execPath,
+          args: [serverPath],
+          env: {
+            SENTRY_ACCESS_TOKEN: "${SENTRY_ACCESS_TOKEN}",
+          },
+        },
+      },
+    }), "utf8");
+
+    const registry = await loadMcpRegistrySummary(configPath, [], { cwd, env: {} });
+
+    assert.equal(registry.statuses[0]?.status, "hydrated");
+    assert.equal(registry.tools[0]?.description, "expanded");
+    shutdownMcpRegistry(registry);
+    assert.equal(registry.clients.size, 0);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test("loadHarnessConfig lets local nexagent settings override imported archivist config", async () => {
   const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-archivist-override-"));
   const nexagentHome = await mkdtemp(path.join(tmpdir(), "nexagent-home-"));
@@ -560,8 +772,11 @@ test("createRuntimeState exposes discovered instruction sources", () => {
         },
       },
       mcp: {
-        path: "/repo/.mcp.json",
         serverNames: ["context7"],
+        servers: { context7: {} },
+        tools: [],
+        statuses: [],
+        clients: new Map(),
       },
       auth: AUTH_STATE,
     }),
@@ -580,6 +795,7 @@ test("createRuntimeState exposes discovered instruction sources", () => {
         modelSelection: {
           activeProvider: "codex",
           configuredModels: { codex: "gpt-5.4" },
+          configuredReasoningEfforts: {},
         },
         transport: {},
       },
@@ -613,6 +829,13 @@ test("createRuntimeState exposes discovered instruction sources", () => {
       toolPolicy: DEFAULT_TOOL_POLICY,
       mcpServers: ["context7"],
       enabledMcpServers: ["context7"],
+      mcpRegistry: {
+        serverNames: ["context7"],
+        servers: { context7: {} },
+        tools: [],
+        statuses: [],
+        clients: new Map(),
+      },
       imports: { claude: null },
       hooks: {
         sourcePath: null,
@@ -625,7 +848,7 @@ test("createRuntimeState exposes discovered instruction sources", () => {
       instructionSources,
       promptV2Summary: {
         assembly: "v2",
-        count: 55,
+        count: 59,
         stableSections: "identity, execution_contract, tool_routing, editing_safety, provider_guidance",
         dynamicSections: "repo_context, runtime_state",
         dynamicBoundary: "__NEXAGENT_PROMPT_DYNAMIC_BOUNDARY__",
@@ -638,7 +861,7 @@ test("createRuntimeState exposes discovered instruction sources", () => {
         editingSafety:
           "Read relevant code before editing behavior. | Keep changes scoped to requested outcome. | Do not revert user changes unless explicitly requested. | Prefer existing repo patterns over new abstractions. | Use structured parsers or repo helpers over ad hoc text manipulation when available. | Run focused verification when available before reporting completion. | If verification fails, report actual failing command/output and either fix it or name the blocker.",
         providerGuidance:
-          "Active provider: codex | Provider fallback policy: require-open-spec | Do not silently switch providers. Use configured provider and transport unless user or config changes it. | Tool calls must use Nexagent internal tool envelope exactly when provider text transport requires tool markup. | Transport: Codex ChatGPT HTTP (codex-chatgpt-http); auth=ready. | Keep instructions separate from user input. Use native/request tool loop shape supplied by transport. | Avoid CLI-only assumptions; API transport may not expose local Codex shell behavior.",
+          'Active provider: codex | Provider fallback policy: require-open-spec | Do not silently switch providers. Use configured provider and transport unless user or config changes it. | Tool calls must use Nexagent internal tool envelope exactly when provider text transport requires tool markup. | Transport: Codex ChatGPT HTTP (codex-chatgpt-http); auth=ready. | Keep instructions separate from user input. | This transport still uses Nexagent text tool-call markup; do not wait for native callable functions. | Text tool-call transport: there is no separate function-call UI. To call a tool, emit exactly one XML block and no other prose: | <nexagent_tool_call>{"name":"read_file","arguments":{"path":"README.md"}}</nexagent_tool_call> | Replace name and arguments with the needed internal tool. After tool output returns, continue from evidence. | Avoid CLI-only assumptions; API transport may not expose local Codex shell behavior.',
         style: "none",
         repoContext: "Repo-local instructions are scoped context, not replacements for core execution contract. | AGENTS.md: # agents",
         runtimeState:
@@ -664,6 +887,15 @@ test("createRuntimeState exposes discovered instruction sources", () => {
           entryCount: 0,
           preview: null,
         },
+      },
+      lsp: {
+        enabled: false,
+        command: null,
+        args: [],
+        indexArchivist: false,
+      },
+      ui: {
+        logoMode: "full",
       },
     },
   );
@@ -1230,7 +1462,7 @@ test("runtime session keeps bounded shared event log", () => {
   assert.equal(session.events[0]?.kind, "system");
   assert.equal(session.events[0]?.summary, "runtime baseline ready");
 
-  for (let index = 0; index < 220; index += 1) {
+  for (let index = 0; index < 620; index += 1) {
     recordRuntimeEvent(session, {
       kind: "command",
       status: "completed",
@@ -1238,8 +1470,8 @@ test("runtime session keeps bounded shared event log", () => {
     });
   }
 
-  assert.equal(session.events.length, 200);
-  assert.equal(session.events.at(-1)?.summary, "event 219");
+  assert.equal(session.events.length, 600);
+  assert.equal(session.events.at(-1)?.summary, "event 619");
 });
 
 test("persisted runtime state stores provider and transport mode", async () => {
@@ -1324,6 +1556,85 @@ test("persisted runtime state stores provider and transport mode", async () => {
 
     const raw = await readFile(path.join(cwd, ".nexagent", "session.json"), "utf8");
     assert.match(raw, /"transportMode": "http-responses"/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("runtime session starts fresh even when legacy persisted telemetry exists", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-fresh-session-"));
+
+  try {
+    await mkdir(path.join(cwd, ".nexagent"), { recursive: true });
+    await writeFile(path.join(cwd, ".nexagent", "session.json"), JSON.stringify({
+      provider: "codex",
+      providerModels: { codex: "gpt-5.4" },
+      transportMode: "codex-http",
+      telemetry: { turnCount: 12, lastInputTokens: 777, lastOutputTokens: 333 },
+      events: [{ kind: "assistant", status: "completed", summary: "legacy" }],
+      conversation: [{ role: "assistant", content: "legacy", tokens: 1 }],
+      savedAt: new Date().toISOString(),
+    }), "utf8");
+
+    const persisted = await loadPersistedRuntimeState(cwd);
+    const session = createRuntimeSession({
+      config: {
+        cwd,
+        productName: "nexagent",
+        provider: "codex",
+        providerRouting: {
+          fallback: {
+            policy: "require-open-spec",
+            silentProviderSwitch: false,
+          },
+          modelSelection: {
+            activeProvider: "codex",
+            configuredModels: {
+              codex: "gpt-5.4",
+            },
+          },
+          transport: {},
+        },
+        mcpConfigPath: path.join(cwd, ".mcp.json"),
+        enabledMcpServers: [],
+        imports: { claude: null },
+        instructionSources: [],
+        archivist: {
+          enabled: false,
+          boundary: "disabled",
+          storagePath: null,
+          storageExists: false,
+          retrieval: { used: false, sourceCategory: null, matchCount: 0, preview: null },
+          writes: { used: false, action: null, sourceCategory: null, savedAt: null, entryCount: 0, preview: null },
+        },
+        lsp: { enabled: false, command: null, args: [], indexArchivist: false },
+        ui: { logoMode: "full" },
+        repo: {
+          root: cwd,
+          name: "repo",
+          vcs: "git",
+          branch: "main",
+          freshness: DEFAULT_GIT_FRESHNESS,
+        },
+        toolPolicy: {
+          ...DEFAULT_TOOL_POLICY,
+          allowedRoots: [cwd],
+        },
+      },
+      mcp: {
+        path: path.join(cwd, ".mcp.json"),
+        serverNames: [],
+      },
+      auth: AUTH_STATE,
+      persisted,
+    });
+
+    assert.equal(session.telemetry.turnCount, 0);
+    assert.equal(session.telemetry.lastInputTokens, 0);
+    assert.equal(session.telemetry.lastOutputTokens, 0);
+    assert.equal(session.conversation.length, 0);
+    assert.equal(session.events.length, 1);
+    assert.equal(session.events[0]?.summary, "runtime baseline ready");
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }

@@ -13,7 +13,7 @@ import {
   withSentryAiRequestSpan,
   withSentryAiToolSpan,
 } from "./instrument.js";
-import { applyArchivistRetrieval } from "./runtime/archivist.js";
+import { applyArchivistRetrieval, rememberArchivistFailure, rememberArchivistRecovery } from "./runtime/archivist.js";
 import { writeDebugLog } from "./runtime/debug.js";
 import { hasNexsightEvidence, hasToolEvidence, hasWriteEvidence } from "./runtime/evidence.js";
 import { assemblePrompt } from "./runtime/instructions.js";
@@ -21,6 +21,7 @@ import {
   isNexsightToolCall,
   shouldRouteToNexsightOnly,
 } from "./runtime/nexsight-router.js";
+import { getMcpServerStatus } from "./runtime/mcp.js";
 import { toDiagnosticRuntimeEvent, type RuntimeDiagnosticInput } from "./runtime/diagnostics.js";
 import { consumeOperatorSteer, estimateTokenCount, recordRuntimeEvent, setRuntimeAction } from "./runtime/session.js";
 import type { RuntimeApprovalRequest, RuntimeSession } from "./runtime/session.js";
@@ -93,7 +94,7 @@ export interface CodexInvokers {
   codexHttp: CodexInvoker;
 }
 
-const TOOL_CALL_PATTERN = /<nexagent_tool_call>([\s\S]+?)<\/nexagent_tool_call>/;
+const JSON_BODY_TOOL_CALL_PATTERN = /<(?:nexagent_)?tool_call>([\s\S]+?)<\/(?:nexagent_)?tool_call>/i;
 const INTERNAL_TOOL_TAG_NAMES = [
   "read_file",
   "write_file",
@@ -381,6 +382,10 @@ async function executeProviderRequestImpl(
               transport: request.session.providerTransport.mode,
               model: model ?? "default",
               adapter: transport.id,
+              loop: "cli",
+              cycle: cycle + 1,
+              step: step + 1,
+              ...classifyToolCallMarkup(output),
             },
           });
           prompt = `${assembled.prompt}\n\n${toolTranscript.length > 0 ? `Internal tool transcript:\n${toolTranscript.join("\n\n")}\n\n` : ""}${MALFORMED_TOOL_CALL_NUDGE}`;
@@ -998,6 +1003,9 @@ async function executeOpenAiNativeToolLoop(
             transport: request.session.providerTransport.mode,
             model: model ?? "default",
             adapter: transport.id,
+            loop: "native",
+            step: step + 1,
+            ...classifyToolCallMarkup(output),
           },
         });
         nativeInput = [{ role: "user", content: MALFORMED_TOOL_CALL_NUDGE }];
@@ -1311,20 +1319,6 @@ function validateAttachmentSupport(
     return null;
   }
 
-  if (attachments.length > 1) {
-    return {
-      ok: false,
-      provider: request.session.provider,
-      model: resolveModel(request.session),
-      transport: transport.transport,
-      adapter: transport.id,
-      fallbackApplied: false,
-      code: "transport_error",
-      message: "only one image attachment is supported right now",
-      detail: `received ${String(attachments.length)} attachments; baseline supports 1`,
-    };
-  }
-
   if (request.session.providerTransport.mode === "cli-exec") {
     return {
       ok: false,
@@ -1427,18 +1421,143 @@ async function executeToolWithRuntimeActivity(session: RuntimeSession, call: Int
     detail: `${risk}; duration=${formatToolDuration(durationMs)}; in~${inputTokens}; out~${outputTokens}; output=${outputPreview}`,
   });
   if (!result.ok) {
+    const failureClass = classifyToolFailure(result.output);
+    const diagnosticClass = isMcpUnavailableFailure(call, failureClass) ? "tool.mcp_unavailable" : "tool.failed";
     recordRuntimeDiagnostic(session, {
-      class: "tool.failed",
+      class: diagnosticClass,
       attributes: {
         tool_name: call.name,
         risk,
+        failure_class: failureClass,
+        failure_hint: summarizeToolFailure(result.output),
+        argument_count: Object.keys(call.arguments ?? {}).length,
         duration_ms: durationMs,
         input_tokens: inputTokens,
         output_tokens: outputTokens,
+        ...mcpFailureDiagnosticAttributes(session, call),
       },
     });
+    await rememberToolFailure(session, call.name, result.output, failureClass);
+  } else {
+    await rememberToolRecoveryIfPresent(session, call.name);
   }
   return result;
+}
+
+async function rememberToolFailure(session: RuntimeSession, toolName: string, output: string, failureClass: string): Promise<void> {
+  try {
+    await rememberArchivistFailure(session, {
+      toolName,
+      failureClass,
+      message: output,
+    });
+  } catch {
+    // Failure memory is best-effort and must not change tool behavior.
+  }
+}
+
+async function rememberToolRecoveryIfPresent(session: RuntimeSession, toolName: string): Promise<void> {
+  try {
+    const priorFailure = [...session.events]
+      .reverse()
+      .find((event) => event.kind === "tool" && event.status === "failed" && event.summary === `tool ${toolName} failed`);
+    if (!priorFailure) {
+      return;
+    }
+    await rememberArchivistRecovery(session, {
+      toolName,
+      priorFailure: priorFailure.detail ?? priorFailure.summary,
+      recovery: "Same tool completed after a previous failure. Prefer the successful argument shape and bounded output path next time.",
+    });
+  } catch {
+    // Recovery memory is best-effort and must not change tool behavior.
+  }
+}
+
+function classifyToolFailure(output: string): string {
+  const normalized = output.toLowerCase();
+  if (normalized.includes("mcp server not hydrated")) {
+    return "mcp_server_not_hydrated";
+  }
+  if (normalized.includes("http mcp transport not bridged")) {
+    return "mcp_transport_unavailable";
+  }
+  if (normalized.includes("server and tool are required")) {
+    return "mcp_missing_target";
+  }
+  if (normalized.includes("required write evidence") || normalized.includes("missing evidence")) {
+    return "missing_evidence";
+  }
+  if (normalized.includes("requires") && normalized.includes("execution path")) {
+    return "async_tool_pending";
+  }
+  if (normalized.includes("timed out")) {
+    return "timeout";
+  }
+  if (normalized.includes("protected path") || normalized.includes("policy blocked")) {
+    return "policy_blocked";
+  }
+  if (normalized.includes("malformed") || normalized.includes("schema") || normalized.includes("arguments")) {
+    return "malformed_tool_call";
+  }
+  if (normalized.includes("blocked") || normalized.includes("rejected")) {
+    return "blocked_tool";
+  }
+  if (normalized.includes("is not a file")) {
+    return "path_not_file";
+  }
+  if (normalized.includes("not found") || normalized.includes("no such file")) {
+    return "path_not_found";
+  }
+  return "tool_failed";
+}
+
+function summarizeToolFailure(output: string): string {
+  const normalized = output.replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return "empty tool failure";
+  }
+  if (/code or command required/i.test(normalized)) {
+    return "missing code or command argument";
+  }
+  if (/server and tool are required/i.test(normalized)) {
+    return "missing MCP server or tool argument";
+  }
+  if (/MCP server not hydrated/i.test(normalized)) {
+    return "MCP server not hydrated";
+  }
+  if (/timed out/i.test(normalized)) {
+    return "tool timed out";
+  }
+  if (/protected path|policy blocked/i.test(normalized)) {
+    return "policy blocked";
+  }
+  if (/not found|no such file/i.test(normalized)) {
+    return "target not found";
+  }
+  return normalized.slice(0, 120);
+}
+
+function isMcpUnavailableFailure(call: InternalToolCall, failureClass: string): boolean {
+  return call.name === "mcp_call" && failureClass.startsWith("mcp_");
+}
+
+function mcpFailureDiagnosticAttributes(session: RuntimeSession, call: InternalToolCall): Record<string, string | number> {
+  if (call.name !== "mcp_call") {
+    return {};
+  }
+
+  const server = typeof call.arguments?.server === "string" ? call.arguments.server.trim() : "";
+  const tool = typeof call.arguments?.tool === "string" ? call.arguments.tool.trim() : "";
+  const status = server ? getMcpServerStatus(session.mcpRegistry, server) : null;
+
+  return {
+    mcp_server: server || "missing",
+    mcp_tool: tool || "missing",
+    mcp_status: status?.status ?? "missing",
+    mcp_transport: status?.transport ?? "unknown",
+    mcp_tool_count: status?.toolCount ?? 0,
+  };
 }
 
 function formatToolDuration(durationMs: number): string {
@@ -1447,6 +1566,9 @@ function formatToolDuration(durationMs: number): string {
 
 function recordRuntimeDiagnostic(session: RuntimeSession, input: RuntimeDiagnosticInput): void {
   const event = captureSentryDiagnostic(input, { sendEvent: true });
+  if (event.severity === "error") {
+    logSentryError(event.summary, event.attributes);
+  }
   recordRuntimeEvent(session, toDiagnosticRuntimeEvent(event));
 }
 
@@ -1542,13 +1664,12 @@ function sleep(ms: number): Promise<void> {
 }
 
 function parseInternalToolCall(output: string): InternalToolCall | null {
-  const match = output.match(TOOL_CALL_PATTERN);
+  const match = output.match(JSON_BODY_TOOL_CALL_PATTERN);
   if (match) {
     const parsed = parseToolCallJson(match[1] ?? "");
-    if (!parsed || typeof parsed.name !== "string") {
-      return null;
+    if (parsed && typeof parsed.name === "string") {
+      return parsed;
     }
-    return parsed;
   }
 
   return parseAttributeStyleToolCall(output) ?? parseBareInternalToolTag(output);
@@ -1611,6 +1732,39 @@ function escapeControlCharsInJsonStrings(value: string): string {
 
 function containsToolCallMarkup(output: string): boolean {
   return TOOL_CALL_MARKUP_PATTERN.test(output);
+}
+
+function classifyToolCallMarkup(output: string): Record<string, string | number | boolean> {
+  const toolCallMatches = output.match(/<\s*(?:nexagent_)?tool_call\b/gi) ?? [];
+  const firstBlock = output.match(/<\s*(nexagent_)?tool_call\b([^>]*)>([\s\S]*?)<\/\s*(?:nexagent_)?tool_call\s*>/i);
+  const attributes = firstBlock?.[2] ?? "";
+  const body = firstBlock?.[3]?.trim() ?? "";
+  const generic = firstBlock ? !firstBlock[1] : /<\s*tool_call\b/i.test(output);
+  const hasNameAttribute = Boolean(readXmlAttribute(attributes, "name"));
+  const hasArgumentsAttribute = Boolean(readXmlAttribute(attributes, "arguments"));
+  const bodyLooksJson = body.startsWith("{") || body.startsWith("[");
+  const bodyHasName = /"name"\s*:/.test(body);
+  const hasArgumentChildren = /<\s*arg\b/i.test(body);
+  const parsedJson = bodyLooksJson ? parseToolCallJson(body) : null;
+  const parseFailure = parsedJson && typeof parsedJson.name === "string"
+    ? "none"
+    : bodyLooksJson
+      ? bodyHasName ? "json_body_invalid" : "json_body_missing_name"
+      : hasNameAttribute
+        ? "attribute_body_invalid"
+        : "missing_tool_name";
+
+  return {
+    markup_family: generic ? "generic_tool_call" : "nexagent_tool_call",
+    block_count: toolCallMatches.length,
+    adjacent_blocks: toolCallMatches.length > 1,
+    has_name_attribute: hasNameAttribute,
+    has_arguments_attribute: hasArgumentsAttribute,
+    has_argument_children: hasArgumentChildren,
+    body_kind: bodyLooksJson ? "json" : body.length > 0 ? "text" : "empty",
+    body_has_name: bodyHasName,
+    parse_failure: parseFailure,
+  };
 }
 
 function parseAttributeStyleToolCall(output: string): InternalToolCall | null {
@@ -2288,7 +2442,7 @@ function isNonActionableDeferral(output: string): boolean {
     return false;
   }
 
-  if (TOOL_CALL_PATTERN.test(text) || /^(done|complete|completed|fixed|updated|implemented)\b/i.test(text)) {
+  if (JSON_BODY_TOOL_CALL_PATTERN.test(text) || TOOL_CALL_MARKUP_PATTERN.test(text) || /^(done|complete|completed|fixed|updated|implemented)\b/i.test(text)) {
     return false;
   }
 

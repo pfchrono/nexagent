@@ -122,6 +122,7 @@ export type RuntimeSessionListener = () => void;
 
 const runtimeSessionListeners = new WeakMap<RuntimeSession, Set<RuntimeSessionListener>>();
 const runtimeSessionRevisions = new WeakMap<RuntimeSession, number>();
+const RUNTIME_EVENT_LOG_LIMIT = 600;
 
 export function subscribeRuntimeSession(session: RuntimeSession, listener: RuntimeSessionListener): () => void {
   const listeners = runtimeSessionListeners.get(session) ?? new Set<RuntimeSessionListener>();
@@ -322,8 +323,8 @@ export function recordRuntimeEvent(
     ...(event.detail ? { detail: event.detail } : {}),
   };
   session.events.push(entry);
-  if (session.events.length > 200) {
-    session.events.splice(0, session.events.length - 200);
+  if (session.events.length > RUNTIME_EVENT_LOG_LIMIT) {
+    session.events.splice(0, session.events.length - RUNTIME_EVENT_LOG_LIMIT);
   }
   notifyRuntimeSessionChanged(session);
   return entry;
@@ -342,13 +343,13 @@ function collectCurrentTurnTokenMetrics(session: RuntimeSession): { inputTokens:
   const events = promptIndex >= 0 ? session.events.slice(promptIndex) : session.events;
   return events.reduce((metrics, event) => {
     const detail = event.detail ?? "";
-    metrics.inputTokens += readMetricTokenCount(detail, "in");
-    metrics.outputTokens += readMetricTokenCount(detail, "out");
+    metrics.inputTokens += readMetricTokenCount(detail, "turn_in") || readMetricTokenCount(detail, "in");
+    metrics.outputTokens += readMetricTokenCount(detail, "turn_out") || readMetricTokenCount(detail, "out");
     return metrics;
   }, { inputTokens: 0, outputTokens: 0 });
 }
 
-function readMetricTokenCount(detail: string, key: "in" | "out"): number {
+function readMetricTokenCount(detail: string, key: "in" | "out" | "turn_in" | "turn_out"): number {
   const match = new RegExp(`(?:^|[;\\s])${key}~(\\d+)`).exec(detail);
   return match ? Number.parseInt(match[1] ?? "0", 10) : 0;
 }

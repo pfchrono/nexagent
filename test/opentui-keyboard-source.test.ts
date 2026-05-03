@@ -30,6 +30,24 @@ test("OpenTUI raw keyboard parser splits printable chunks", () => {
   assert.deepEqual(parseRawKeyboardInput("quit").map((event) => event.sequence), ["q", "u", "i", "t"]);
 });
 
+test("OpenTUI raw keyboard parser keeps multiline paste as one event", () => {
+  const events = parseRawKeyboardInput("first line\nsecond line\nthird line");
+
+  assert.equal(events.length, 1);
+  assert.equal(events[0]?.name, "paste");
+  assert.equal(events[0]?.paste, true);
+  assert.equal(events[0]?.sequence, "first line\nsecond line\nthird line");
+});
+
+test("OpenTUI raw keyboard parser unwraps bracketed paste as one event", () => {
+  const events = parseRawKeyboardInput("\x1b[200~first line\r\nsecond line\x1b[201~");
+
+  assert.equal(events.length, 1);
+  assert.equal(events[0]?.name, "paste");
+  assert.equal(events[0]?.paste, true);
+  assert.equal(events[0]?.sequence, "first line\r\nsecond line");
+});
+
 test("OpenTUI renderer key source buffers initial slash before app subscribes", () => {
   const keyInput = new EventEmitter();
   const source = createOpenTuiKeyboardSource({
@@ -96,6 +114,41 @@ test("OpenTUI renderer key source preserves startup named printable keys without
   const unsubscribe = source.subscribe((event) => captured.push(event.sequence));
 
   assert.deepEqual(captured, ["/", "$"]);
+  unsubscribe();
+  source.dispose();
+});
+
+test("OpenTUI renderer key source normalizes Ctrl+G and Ctrl+V variants", () => {
+  const keyInput = new EventEmitter();
+  const source = createOpenTuiKeyboardSource({
+    on(event, handler) {
+      keyInput.on(event, handler);
+    },
+    off(event, handler) {
+      keyInput.off(event, handler);
+    },
+  });
+  const captured: Array<[string, boolean]> = [];
+
+  keyInput.emit("keypress", {
+    name: "ctrl+g",
+    ctrl: false,
+    meta: false,
+    shift: false,
+    option: false,
+    sequence: "",
+  });
+  keyInput.emit("keypress", {
+    name: "C-v",
+    ctrl: false,
+    meta: false,
+    shift: false,
+    option: false,
+    sequence: "",
+  });
+  const unsubscribe = source.subscribe((event) => captured.push([event.name, event.ctrl]));
+
+  assert.deepEqual(captured, [["g", true], ["v", true]]);
   unsubscribe();
   source.dispose();
 });
@@ -210,11 +263,19 @@ test("OpenTUI raw keyboard parser skips terminal protocol responses", () => {
 });
 
 test("OpenTUI raw keyboard parser handles control shortcuts", () => {
-  assert.deepEqual(parseRawKeyboardInput("\x03\x11\x14\x19").map((event) => [event.name, event.ctrl]), [
+  assert.deepEqual(parseRawKeyboardInput("\x03\x07\x11\x14\x16\x19").map((event) => [event.name, event.ctrl]), [
     ["c", true],
+    ["g", true],
     ["q", true],
     ["t", true],
+    ["v", true],
     ["y", true],
+  ]);
+});
+
+test("OpenTUI raw keyboard parser handles Kitty printable control shortcuts", () => {
+  assert.deepEqual(parseRawKeyboardInput("\x1b[103;5u").map((event) => [event.name, event.ctrl]), [
+    ["g", true],
   ]);
 });
 

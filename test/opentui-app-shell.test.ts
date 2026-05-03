@@ -9,6 +9,8 @@ test("OpenTUI app shell renders live view fields and Phase 66 command surfaces",
   assert.match(source, /view\.transcriptBlocks/);
   assert.doesNotMatch(source, /expandedTraceBlocks/);
   assert.match(source, /renderTraceProgressRows/);
+  assert.match(source, /parseTraceProgressEvent/);
+  assert.match(source, /kind\\s\+\(\\w\+\)/);
   assert.match(source, /traceProgressPaletteKey/);
   assert.match(source, /traceDetailScrollOffset/);
   assert.match(source, /handleTraceProgressRowClick/);
@@ -22,6 +24,8 @@ test("OpenTUI app shell renders live view fields and Phase 66 command surfaces",
   assert.match(source, /limitTraceProgressRows/);
   assert.match(source, /markActiveTraceProgressRow/);
   assert.match(source, /" \[-\]"/);
+  assert.match(source, /const compactPrefix = compactIcon \? `\$\{compactIcon\} ` : ""/);
+  assert.match(source, /if \(block\.kind === "tool"\) {\n\s+return "";/);
   assert.match(source, /progressRowBudget/);
   assert.match(source, /const transcriptBlocks = view\.transcriptBlocks/);
   assert.doesNotMatch(source, /view\.composerHint/);
@@ -34,10 +38,15 @@ test("OpenTUI app shell renders live view fields and Phase 66 command surfaces",
   assert.match(source, /No matches/);
   assert.match(source, /Select skill/);
   assert.match(source, /skill:/);
-  assert.match(source, /clear attachment/);
+  assert.match(source, /\[X\] clear/);
+  assert.match(source, /handleAttachmentClearClick/);
+  assert.match(source, /row\.key === "composer-attachment" && composer\.attachment\?\.supported/);
+  assert.match(source, /formatAttachmentListLabel/);
+  assert.match(source, /\[Image #\$\{String\(index\)\}\]/);
+  assert.match(source, /attachmentLabel: composer\.attachment\?\.supported \? composer\.attachment\.label : null/);
   assert.match(source, /extractClipboardImageToTempFile/);
   assert.match(source, /applyAttachmentMutationCommand/);
-  assert.match(source, /pendingImageAttachment/);
+  assert.match(source, /pendingImageAttachments/);
   assert.match(source, /No history matches/);
   assert.match(source, /move-selection/);
   assert.match(source, /accept-selection/);
@@ -59,6 +68,10 @@ test("OpenTUI app shell renders live view fields and Phase 66 command surfaces",
   assert.match(source, /kind: "command"/);
   assert.match(source, /intent\.input\.trim\(\) === "\/quit"/);
   assert.match(source, /ALT_V_UNSUPPORTED_MESSAGE/);
+  assert.match(source, /CTRL_V_UNSUPPORTED_MESSAGE/);
+  assert.match(source, /key\.ctrl && key\.name === "v"/);
+  assert.match(source, /readClipboardText/);
+  assert.match(source, /Ctrl\+V text/);
   assert.match(source, /COMPOSER_CURSOR/);
   assert.match(source, /COPIED_RESULTS_NOTICE/);
   assert.match(source, /copyTextToClipboardOsc52/);
@@ -70,10 +83,12 @@ test("OpenTUI app shell renders live view fields and Phase 66 command surfaces",
   assert.match(source, /onMouseUp/);
   assert.match(source, /handleTranscriptMouseScroll/);
   assert.match(source, /event\.type === "scroll"/);
+  assert.match(source, /MOUSE_SCROLL_LINES = 1/);
+  assert.match(source, /transcriptLineColor/);
   assert.match(source, /selectable/);
   assert.match(source, /selectionBg/);
-  assert.match(source, /PageUp\/PageDown Ctrl\+Up\/Ctrl\+Down wheel/);
-  assert.match(source, /Ctrl\+Y copy reply/);
+  assert.match(source, /PgUp\/PgDn scroll/);
+  assert.match(source, /Ctrl\+Y copy/);
   assert.match(source, /visiblePaletteWindow/);
   assert.match(source, /createPaletteDisplayRows/);
   assert.match(source, /PALETTE_VISIBLE_ROWS = 5/);
@@ -100,6 +115,21 @@ test("OpenTUI app shell renders live view fields and Phase 66 command surfaces",
   assert.match(source, /cockpitWarningOverflow/);
   assert.match(source, /cockpitExpanded/);
   assert.match(source, /key\.ctrl && key\.name === "p"/);
+  assert.match(source, /configExpanded/);
+  assert.match(source, /key\.ctrl && key\.name === "g"/);
+  assert.match(source, /renderConfigPanelRows/);
+  assert.match(source, /renderLogoRows/);
+  assert.match(source, /view\.logo\.frames/);
+  assert.match(source, /Ctrl\+G config/);
+  assert.match(source, /zIndex=\{94\}/);
+  assert.match(source, /configSelectedIndex/);
+  assert.match(source, /moveConfigSelection/);
+  assert.match(source, /applyConfigSelection/);
+  assert.match(source, /\/config logo \$\{next\}/);
+  assert.match(source, /\/config lsp on/);
+  assert.match(source, /\/config lsp-index on/);
+  assert.match(source, /handleConfigRowClick/);
+  assert.match(source, /↑\/↓ select · Enter run · click select · Esc close/);
   assert.match(source, /showCockpitPanel = cockpitExpanded/);
   assert.doesNotMatch(source, /warning lane/);
   assert.doesNotMatch(source, /action ladder intent/);
@@ -136,6 +166,9 @@ test("OpenTUI app shell renders live view fields and Phase 66 command surfaces",
   assert.match(source, /chatDividerLine/);
   assert.match(source, /spinnerTick/);
   assert.match(source, /view\.status === "running"/);
+  assert.match(source, /IDLE_REFRESH_INTERVAL_MS = 1000/);
+  assert.match(source, /RUNNING_REFRESH_INTERVAL_MS = 80/);
+  assert.match(source, /intervalMs = view\.status === "running" \? RUNNING_REFRESH_INTERVAL_MS : IDLE_REFRESH_INTERVAL_MS/);
   assert.match(source, /setSpinnerTick\(\(current\) => current \+ 1\);\n\s+scheduleRuntimeViewRefresh\(0\);/);
   assert.match(source, /subscribeRuntimeSession/);
   assert.match(source, /scheduleRuntimeViewRefresh\(16\)/);
@@ -163,6 +196,15 @@ test("OpenTUI app shell renders live view fields and Phase 66 command surfaces",
   assert.match(source, /"-"\.repeat\(barWidth - filled\)/);
   assert.doesNotMatch(source, /Cost: \$0\.00/);
   assert.doesNotMatch(source, /\.\.\/runtime\/tools/);
+});
+
+test("OpenTUI entry shuts down hydrated MCP clients on exit", async () => {
+  const source = await readFile(new URL("../src/opentui/entry.tsx", import.meta.url), "utf8");
+
+  assert.match(source, /shutdownMcpRegistry/);
+  assert.match(source, /shutdownMcpRegistry\(session\.mcpRegistry\)/);
+  assert.match(source, /keyboardSource\.dispose\(\)/);
+  assert.match(source, /renderer\.destroy\(\)/);
 });
 
 test("OpenTUI transcript scroll shortcuts preserve overlay selection ownership", async () => {

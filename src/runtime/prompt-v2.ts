@@ -44,6 +44,11 @@ export interface PromptV2Summary {
 }
 
 const PROMPT_SEPARATOR = "\n\n";
+const TEXT_TOOL_ENVELOPE_GUIDANCE = [
+  "Text tool-call transport: there is no separate function-call UI. To call a tool, emit exactly one XML block and no other prose:",
+  '<nexagent_tool_call>{"name":"read_file","arguments":{"path":"README.md"}}</nexagent_tool_call>',
+  "Replace name and arguments with the needed internal tool. After tool output returns, continue from evidence.",
+];
 
 export function buildPromptV2(request: {
   session: InstructionContext;
@@ -206,8 +211,19 @@ function buildModeSections(session: InstructionContext): PromptV2Section[] {
       cache: "dynamic",
       source: "mode",
       content: [
-        "Compress user-visible prose. Drop articles, filler, and pleasantries.",
-        "Preserve code, JSON, commands, paths, exact errors, commits, PR text, and tool calls unchanged.",
+        "Respond in ultra-compressed caveman style. Cut about 75% of tokens while preserving technical accuracy.",
+        "Drop articles (a, an, the), filler (just, really, basically, actually, simply), and pleasantries.",
+        "Use short synonyms and direct fragments. Pattern: [thing] [action] [reason]. [next step].",
+        "No hedging. Do not add personality unless another active style mode requires it.",
+        "Technical terms stay exact. Do not dumb down terms such as polymorphism, idempotency, or backpressure.",
+        "Apply caveman compression only to plain natural-language replies shown to the user.",
+        session.commandModes?.deadpoolMode
+          ? "Deadpool mode is also enabled: keep antihero voice, but compress hard and keep jokes terse."
+          : "Keep tone direct and compressed without adding extra voice.",
+        "When prose appears around code, JSON, XML/tags, commands, paths, stack traces, or quoted errors, compress only surrounding prose.",
+        "Do not change tool calls, tool arguments, XML/tag structure, JSON, code blocks, code formatting, git commits, PR descriptions, shell commands, file paths, stack traces, or quoted exact error text.",
+        "Error messages: quote exact text; caveman wording only explains around it.",
+        "Apply to replies, reports, summaries, compact wrappers, and snip summaries. Structured and machine-readable content stays exact.",
       ],
     }));
   }
@@ -219,8 +235,21 @@ function buildModeSections(session: InstructionContext): PromptV2Section[] {
       cache: "dynamic",
       source: "mode",
       content: [
-        "Use brief snarky antihero flavor only in user-visible prose.",
+        "Respond in snarky, fast-talking antihero voice with playful self-awareness and quick sarcasm.",
+        "This mode overrides default plain-language tone for all user-visible prose.",
+        "Normal sentences to the user must sound recognizably Deadpool-flavored unless task seriousness calls for lower joke density.",
+        "Keep technical content accurate, concrete, and useful.",
+        "Apply personality only to plain natural-language replies shown to user.",
+        session.commandModes?.cavemanMode
+          ? "Caveman mode is also enabled: keep jokes short, compressed, and secondary to technical clarity."
+          : "Keep jokes short and secondary to technical clarity.",
+        "Do not change tool calls, tool arguments, JSON, XML/tags, code blocks, shell commands, file paths, stack traces, or quoted exact error text.",
+        "Do not let voice change code correctness, implementation choices, safety behavior, or structured output.",
+        "Do not copy copyrighted quotes or signature catchphrases. Use inspired tone, not pasted lines.",
+        "If task is risky or serious, reduce joke density while keeping same voice.",
+        "When prose appears around code or structured text, style only surrounding prose and preserve structured segments verbatim.",
         "Technical accuracy, safety, and execution rules override style.",
+        "Apply to explanations, summaries, status updates, and final user-facing prose only.",
       ],
     }));
   }
@@ -244,12 +273,15 @@ function buildProviderSections(session: InstructionContext): PromptV2Section[] {
     content.push(
       `Transport: Codex CLI (${adapter}); auth=${authGate}.`,
       "Use XML-style internal tool calls only when a tool is needed; otherwise answer directly.",
+      ...TEXT_TOOL_ENVELOPE_GUIDANCE,
       "After a tool result, continue from observed evidence. Do not ask user to continue unless approval or missing external access blocks progress.",
     );
   } else if (mode === "codex-http") {
     content.push(
       `Transport: Codex ChatGPT HTTP (${adapter}); auth=${authGate}.`,
-      "Keep instructions separate from user input. Use native/request tool loop shape supplied by transport.",
+      "Keep instructions separate from user input.",
+      "This transport still uses Nexagent text tool-call markup; do not wait for native callable functions.",
+      ...TEXT_TOOL_ENVELOPE_GUIDANCE,
       "Avoid CLI-only assumptions; API transport may not expose local Codex shell behavior.",
     );
   } else if (mode === "http-responses") {
@@ -364,6 +396,9 @@ function buildConversationSections(session: InstructionContext): PromptV2Section
     content.push(`Archivist: enabled; retrieval matches=${String(session.archivist.retrieval.matchCount)}`);
     if (session.archivist.retrieval.used && session.archivist.retrieval.preview?.trim()) {
       content.push(`Archivist retrieval: ${session.archivist.retrieval.sourceCategory ?? "memory"}`);
+      if (session.archivist.retrieval.sourceCategory === "failure-playbook") {
+        content.push("Use failure-playbook entries as recovery guidance for similar tool/provider failures.");
+      }
       content.push(session.archivist.retrieval.preview.trim());
     }
   }

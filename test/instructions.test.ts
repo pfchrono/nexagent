@@ -260,7 +260,7 @@ test("assemblePrompt keeps precedence layers distinct before serialization", asy
       "Missing tool rule: if a command/tool is missing, search package scripts, node_modules/.bin, local bins, available MCP/tool registries, and official web docs when needed; install project-local dependencies only when safe and scoped; ask user only for root/admin installs.",
       "Internal tool protocol: when tool use is required, respond with only one XML block:",
       '<nexagent_tool_call>{"name":"read_file","arguments":{"path":"src/cli.ts"}}</nexagent_tool_call>',
-      "Available internal tools: read_file, write_file, apply_patch, batch_edit, preview_patch, list_dir, search_content, search_files, web_fetch, web_search, git_status, git_diff, shell_command, nexsight_execute, nexsight_index, nexsight_batch, nexsight_search, archivist_save, archivist_checkpoint",
+      "Available internal tools: read_file, write_file, apply_patch, batch_edit, preview_patch, list_dir, search_content, search_files, web_fetch, web_search, git_status, git_diff, shell_command, nexsight_execute, nexsight_index, nexsight_batch, nexsight_search, archivist_save, archivist_checkpoint, mcp_list_tools, mcp_call, lsp_status, lsp_symbols, lsp_diagnostics",
       "Use tools for repo inspection instead of narrating intended actions.",
     ]);
     assert.deepEqual(assembled.layers.providerFallback, [

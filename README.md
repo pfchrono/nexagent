@@ -16,13 +16,14 @@ Terminal-first AI coding harness for local operator-driven development.
 - Exposes guarded internal tools for repo reads, writes, diffs, searches, shell commands, and Archivist memory.
 - Exposes Nexsight tools for bounded code/data execution, local indexing, and context search with SQLite FTS when available.
 - Provides guarded web fetch/search and batch edit helpers for research and multi-file patch workflows.
-- Provides slash commands for status, provider/model control, tools, memory, skill routing, mouse behavior, approvals, compaction, file reads/searches, diffs, and image attachments.
+- Provides slash commands for status, provider/model/effort control, tools, memory, config, LSP, skill routing, mouse behavior, approvals, compaction, file reads/searches, diffs, and image attachments.
+- Hydrates stdio MCP servers at startup from `.nexagent/mcp.json` or legacy `.mcp.json`, with per-server startup timeouts and deduped server selection.
 - Supports `$skill` shorthand for skill routing.
 - Supports `!<command>` for guarded shell command transcript output.
 - Supports `--yolo` session mode for guarded approval bypass while preserving destructive shell/tool blocks.
 - Supports `--debug`, `--debugfile <path.log>`, and `--verbose` for diagnostic logs.
-- Supports `/cavemanmode` and `/deadpoolmode` instruction overlays for concise/operator-style model replies.
-- Shows cockpit-style TUI panels for turn metadata, warnings, structured actions/results, risk/outcome state, recovery actions, navigation hints, and terminal capabilities.
+- Supports `/caveman-mode` and `/deadpoolmode` instruction overlays for precise user-facing prose style while preserving code, tool calls, JSON, commands, paths, stack traces, and quoted errors unchanged.
+- Shows cockpit-style TUI panels for turn metadata, warning/error lanes, structured actions/results, risk/outcome state, recovery actions, navigation hints, terminal capabilities, MCP/LSP status, and compact key hints.
 - Uses OpenTUI as the default interactive shell for the v1.5 terminal UI.
 
 ## Repository Layout
@@ -34,7 +35,7 @@ Terminal-first AI coding harness for local operator-driven development.
 - `src/opentui/` — default interactive OpenTUI shell and runtime view adapter
 - `test/` — CLI, provider, runtime config, instructions, and tool tests
 - `.planning/` — project roadmap, state, requirements, phase artifacts, audits
-- `.nexagent/`, `.claude/`, `.mcp.json` — repo-local runtime and assistant configuration
+- `.nexagent/`, `.claude/`, `.nexagent/mcp.json`, legacy `.mcp.json` — repo-local runtime and assistant configuration
 - `~/.nexagent/` — global user settings, skills, and reusable Nexagent assets
 
 ## Commands
@@ -122,7 +123,7 @@ Run the default interactive OpenTUI shell:
 bun run dev
 ```
 
-OpenTUI is the default interactive path after the v1.5 migration acceptance checks. Current shell work includes the live runtime shell, multiline composer, slash/skill command surfaces, bounded transcript review, collapsible trace blocks, cockpit warning/action/approval/memory surfaces, mouse wheel scrolling, and OSC52 copy feedback. Transcript review uses `PageUp`/`PageDown`, `Ctrl+Up`/`Ctrl+Down`, mouse wheel, `Ctrl+End` for latest output, `Ctrl+T` for trace, and `Ctrl+C`/`Ctrl+Y` to copy the selected block. Use `Ctrl+Q` or `/quit` to exit OpenTUI.
+OpenTUI is the default interactive path after the v1.5 migration acceptance checks. Current shell work includes the live runtime shell, multiline composer, slash/skill/model/effort command surfaces, bounded transcript review, collapsible trace blocks, cockpit warning/action/approval/memory/MCP/LSP surfaces, mouse wheel scrolling, clipboard text paste, multi-image paste/attach chips, and OSC52 copy feedback. Transcript review uses `PageUp`/`PageDown`, `Ctrl+Up`/`Ctrl+Down`, mouse wheel, `Ctrl+End` for latest output, `Ctrl+T` for trace, and `Ctrl+Y` to copy the selected block. `Ctrl+G` opens config, `Ctrl+V` pastes clipboard text, `Alt+V` pastes clipboard images, and `Ctrl+Q` or `/quit` exits OpenTUI.
 
 Show launch help:
 
@@ -154,6 +155,8 @@ Runtime settings merge in this order:
 8. repo `.nexagent/config.json`
 
 Repo settings win over global settings. Relative paths inside global settings resolve from `~/.nexagent/`; relative paths inside repo settings resolve from the repo root.
+
+MCP configuration is discovered separately from runtime settings. Nexagent prefers repo `.nexagent/mcp.json`, then legacy repo `.mcp.json`, then global `~/.nexagent/mcp.json`. Legacy `.mcp.json` entries are migrated into `.nexagent/mcp.json` when possible, and duplicate server names are not loaded twice. Stdio MCP servers hydrate during startup. Each server can set `startup_timeout_sec` or `startupTimeoutSec`; values are bounded to prevent a hung server from blocking the shell indefinitely. HTTP MCP definitions remain visible as configured status until an HTTP bridge is available.
 
 Provider registry config lives in `config.json` and currently supports JSON-first provider definitions. Repo `.nexagent/config.json` overrides global `~/.nexagent/config.json`; invalid provider entries are disabled with warnings instead of crashing startup.
 
@@ -248,13 +251,20 @@ Inside TUI:
 - `/status --sentry` — safe Sentry diagnostics and self-test status
 - `/provider` — provider status or provider switch
 - `/provider transport ...` — transport mode switch
-- `/model` — model status or switch
+- `/model` — model status or switch; accepts `/model <name> [effort]`
+- `/effort` — show or set reasoning effort with `low`, `medium`, `high`, or `xhigh`
 - `/tools` — internal tool policy and availability
 - `/tools nexsight` — Nexsight store/status helpers
 - `/memory` — Archivist memory status, safe signal counters, and commands
-- `/memory --maintenance` — remove exact duplicate Archivist entries and refresh memory diagnostics
+- `/memory --maintenance` — merge duplicate Archivist entries into recurrence records and refresh memory diagnostics
+- `/config` — inspect runtime config status for provider, UI, memory, LSP, and diagnostics
+- `/config [set] logo <full|condensed|off>` — persist startup logo mode
+- `/config [set] lsp <on|off>` and `/config [set] lsp-index <on|off>` — persist disabled-by-default LSP/code-intel toggles
+- `/lsp` — inspect local LSP status; disabled by default and never auto-downloads language servers
+- `/lsp symbols <path>` and `/lsp diagnostics <path>` — summarize local code intelligence for one path when LSP is configured
 - `/skill` — list or route skills
 - `/attach <image-path>` — queue image attachment for HTTP transports
+- `/detach` — clear queued image attachments
 - `/mouse` — mouse mode status/config
 - `/approval` — approval gate controls
 - `/compact` — compaction status/manual compaction
@@ -286,6 +296,10 @@ Recent dogfood work tightened the provider loop:
 - non-actionable "say apply now" replies are nudged to continue when the task is already authorized
 - explicit Nexsight tasks are routed back toward Nexsight tools
 - tool events include duration and bounded output token estimates for the trace
+- Prompt V3 adds an evidence contract: claims are labeled as observed, verified, inferred, assumption, or unknown, and contradictions update verdicts without stopping loop work prematurely.
+- Failed tool calls are classified, logged with redacted diagnostics, and stored as Archivist recovery playbooks so later turns can recall working argument shapes or fallback paths.
+- Edit tools return bounded unified diff previews; OpenTUI renders changed-file summaries and colored add/remove lines for patch review.
+- Command output goes to compact chat blocks, while debug lifecycle detail stays in trace. Turn and tool rows show duration plus input/output token badges.
 
 These guardrails are not a replacement for review. They reduce common harness failure modes while keeping operator-visible trace evidence.
 

@@ -19,6 +19,16 @@ test("OpenTUI command surface exposes first-match completion for Tab", () => {
   assert.equal(surface.completion.suggestions[0]?.value, "/status ");
 });
 
+test("OpenTUI command surface offers model and effort picker rows", () => {
+  const modelSurface = createCommandSurface(process.cwd(), "/model gpt-5.5");
+  const effortSurface = createCommandSurface(process.cwd(), "/model gpt-5.5 h");
+  const directEffortSurface = createCommandSurface(process.cwd(), "/effort x");
+
+  assert.ok(modelSurface.rows.some((row) => row.value === "/model gpt-5.5 "));
+  assert.ok(effortSurface.rows.some((row) => row.value === "/model gpt-5.5 high"));
+  assert.ok(directEffortSurface.rows.some((row) => row.value === "/effort xhigh"));
+});
+
 test("OpenTUI command surface resolves skill preview", () => {
   const cwd = makeSkillWorkspace(["alpha"]);
   const preview = resolveSkillPreview(cwd, "$alp");
@@ -99,6 +109,35 @@ test("OpenTUI command surface lists path rows for relative and home tokens", () 
     assert.equal(homeRows.title, "Files");
     assert.ok(relative.rows.some((row) => row.label === "./docs/"));
     assert.ok(homeRows.rows.some((row) => row.label === "~/code/"));
+  } finally {
+    if (previousHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = previousHome;
+    }
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("OpenTUI command surface lists file rows for LSP path subcommands", () => {
+  const cwd = mkdtempSync(path.join(tmpdir(), "nexagent-lsp-path-surface-"));
+  const home = mkdtempSync(path.join(tmpdir(), "nexagent-lsp-path-home-"));
+  const previousHome = process.env.HOME;
+  try {
+    process.env.HOME = home;
+    mkdirSync(path.join(cwd, "src"));
+    writeFileSync(path.join(cwd, "src", "lsp.ts"), "export function alpha() {}\n", "utf8");
+    mkdirSync(path.join(home, "code"));
+
+    const relative = createCommandSurface(cwd, "/lsp symbols src/l");
+    const homeRows = createCommandSurface(cwd, "/lsp diagnostics ~/");
+
+    assert.equal(relative.title, "Files");
+    assert.equal(homeRows.title, "Files");
+    assert.ok(relative.rows.some((row) => row.label === "src/lsp.ts"));
+    assert.ok(homeRows.rows.some((row) => row.label === "~/code/"));
+    assert.equal(relative.completion.suggestions[0]?.value, "/lsp symbols src/lsp.ts");
   } finally {
     if (previousHome === undefined) {
       delete process.env.HOME;

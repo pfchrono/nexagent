@@ -169,10 +169,19 @@ export class TurnRun {
 }
 
 function claimsNexsightWork(output: string): boolean {
+  if (/\b(can use|available|built-in|tool(?:s)?|mcp|arsenal)\b/i.test(output)
+    && /\bnexsight_(?:execute|index|batch|search)\b/i.test(output)) {
+    return false;
+  }
+
   return output
     .split(/[\n.!?;]+/)
-    .some((segment) => /\bnexsight\b/i.test(segment)
-      && /\b(ran|used|executed|searched|indexed|scanned|queried|inspected|analy[sz]ed)\b/i.test(segment));
+    .some((segment) => {
+      const claimsDirectUse = /\b(ran|used|executed|searched|indexed|scanned|queried|inspected|analy[sz]ed)\s+(?:the\s+)?(?:nexsight|nexsight_(?:execute|index|batch|search))\b/i.test(segment);
+      const claimsNexsightResult = /\bnexsight\s+(?:evidence|result|output|scan|search|index|inspection|analysis)\b/i.test(segment)
+        && /\b(completed|returned|found|shows?|reported|produced|confirmed)\b/i.test(segment);
+      return claimsDirectUse || claimsNexsightResult;
+    });
 }
 
 function collectTurnRunTokenMetrics(session: RuntimeSession): { inputTokens: number; outputTokens: number } {
