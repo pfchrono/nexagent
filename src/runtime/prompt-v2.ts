@@ -196,6 +196,7 @@ function buildCoreSections(): PromptV2Section[] {
         "Use structured parsers or repo helpers over ad hoc text manipulation when available.",
         "Run focused verification when available before reporting completion.",
         "If verification fails, report actual failing command/output and either fix it or name the blocker.",
+        "When edit tool output already rendered an Edited-file block or bounded diff preview, final answer should not repeat the full diff; summarize changed paths, line counts, verification, and blockers only.",
       ],
     }),
   ];

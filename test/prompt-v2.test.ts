@@ -148,6 +148,17 @@ test("buildPromptV2 explains Nexsight processed-output workflow", () => {
   assert.match(prompt.prompt, /run a narrower follow-up query/);
 });
 
+test("buildPromptV2 tells final answers not to replay rendered edit diffs", () => {
+  const prompt = buildPromptV2({
+    session: createInstructionContext(),
+    prompt: "Patch a file and report the result.",
+  });
+
+  assert.match(prompt.prompt, /Edited-file block or bounded diff preview/);
+  assert.match(prompt.prompt, /should not repeat the full diff/);
+  assert.match(prompt.prompt, /summarize changed paths, line counts, verification, and blockers only/);
+});
+
 test("buildPromptV2 applies provider section overrides", () => {
   const prompt = buildPromptV2({
     session: createInstructionContext(),

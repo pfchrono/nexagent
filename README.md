@@ -123,7 +123,7 @@ Run the default interactive OpenTUI shell:
 bun run dev
 ```
 
-OpenTUI is the default interactive path after the v1.5 migration acceptance checks. Current shell work includes the live runtime shell, multiline composer, slash/skill/model/effort command surfaces, bounded transcript review, collapsible trace blocks, cockpit warning/action/approval/memory/MCP/LSP surfaces, mouse wheel scrolling, clipboard text paste, multi-image paste/attach chips, and OSC52 copy feedback. Transcript review uses `PageUp`/`PageDown`, `Ctrl+Up`/`Ctrl+Down`, mouse wheel, `Ctrl+End` for latest output, `Ctrl+T` for trace, and `Ctrl+Y` to copy the selected block. `Ctrl+G` opens config, `Ctrl+V` pastes clipboard text, `Alt+V` pastes clipboard images, and `Ctrl+Q` or `/quit` exits OpenTUI.
+OpenTUI is the default interactive path after the v1.5 migration acceptance checks. Current shell work includes the live runtime shell, multiline composer, slash/skill/model/effort command surfaces, bounded transcript review, collapsible trace blocks, cockpit warning/action/approval/memory/MCP/LSP surfaces, mouse wheel scrolling, clipboard text paste, multi-image paste/attach chips, edit-tool diff previews, and OSC52 copy feedback. Transcript review uses `PageUp`/`PageDown`, `Ctrl+Up`/`Ctrl+Down`, mouse wheel, `Ctrl+End` for latest output, `Ctrl+T` for trace, and `Ctrl+Y` to copy the selected block. `Ctrl+G` opens config, `Ctrl+V` pastes clipboard text, `Alt+V` pastes clipboard images, and `Ctrl+Q` or `/quit` exits OpenTUI.
 
 Show launch help:
 
@@ -270,6 +270,8 @@ Inside TUI:
 - `/compact` — compaction status/manual compaction
 - `/diff`, `/rg`, `/find`, `/read`, `/ls`, `/pwd` — repo-local utility commands
 - `!<command>` — guarded shell command transcript output
+
+Roadmap notes for the full interactive config menu and real LSP manager live in `docs/config-menu-plan.md` and `docs/lsp-integration-plan.md`.
 
 ## Nexsight
 

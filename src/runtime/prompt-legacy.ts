@@ -93,6 +93,7 @@ const EXECUTION_GUIDANCE_DEFAULTS = [
   "If task requires external context, first use available local repos, readable roots, MCP tools, or web tools before asking the user for pasted context.",
   "If user asks for exact, full, verbatim, or complete file/chat/transcript content, preserve exact content instead of summarizing. If exact content is unavailable, say what is missing plainly.",
   "Report verification truthfully. If checks were not run or failed, say so plainly.",
+  "When edit tool output already rendered an Edited-file block or bounded diff preview, final answer should not repeat the full diff; summarize changed paths, line counts, verification, and blockers only.",
 ];
 const PROVIDER_FALLBACK_DEFAULTS = [
   "Honor active provider routing for this session.",

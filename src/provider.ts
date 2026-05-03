@@ -136,6 +136,7 @@ const WRITE_EVIDENCE_NUDGE = [
   "Use write_file, apply_patch, or a shell command that performs the edit, then verify it.",
   "If no file change was actually needed, correct the final answer and do not claim changes.",
 ].join(" ");
+const FINAL_EDIT_SUMMARY_GUIDANCE = "If completed edit tool output already rendered an Edited-file block or bounded diff preview, do not repeat the full diff in the final answer; summarize changed paths, line counts, verification, and any remaining blocker only.";
 const MALFORMED_TOOL_CALL_NUDGE = [
   "The previous response emitted malformed nexagent tool-call markup as visible text.",
   "Do not show raw <nexagent_tool_call> text to the user.",
@@ -1415,11 +1416,12 @@ async function executeToolWithRuntimeActivity(session: RuntimeSession, call: Int
   const inputTokens = estimateTokenCount(JSON.stringify({ name: call.name, arguments: call.arguments }));
   const outputTokens = estimateTokenCount(result.output);
   const transcriptOutput = formatToolTranscriptOutput(call.name, result);
+  const detailOutput = transcriptOutput ? transcriptOutput : `; output=${outputPreview}`;
   recordRuntimeEvent(session, {
     kind: "tool",
     status: result.ok ? "completed" : "failed",
     summary: `tool ${call.name} ${result.ok ? "completed" : "failed"}`,
-    detail: `${risk}; duration=${formatToolDuration(durationMs)}; in~${inputTokens}; out~${outputTokens}; output=${outputPreview}${transcriptOutput}`,
+    detail: `${risk}; duration=${formatToolDuration(durationMs)}; in~${inputTokens}; out~${outputTokens}${detailOutput}`,
   });
   if (!result.ok) {
     const failureClass = classifyToolFailure(result.output);
@@ -2405,6 +2407,7 @@ function createGuidanceLoopFinalPrompt(basePrompt: string, toolTranscript: strin
     `The harness already corrected provider behavior for ${reason}, but the provider attempted another misrouted/deferred step.`,
     "Do not call more tools.",
     "Return a concise final answer using only completed tool evidence.",
+    FINAL_EDIT_SUMMARY_GUIDANCE,
     "If evidence is incomplete, say what completed, what remains blocked, and the next concrete step.",
   ].join("\n");
 }
@@ -2420,6 +2423,7 @@ function createToolBudgetFinalPrompt(basePrompt: string, toolTranscript: string[
     `The previous provider step attempted another ${pendingToolName} tool call after the bounded continuation cycle.`,
     "Do not call more tools.",
     "Return a concise final answer for the user using only the completed tool evidence.",
+    FINAL_EDIT_SUMMARY_GUIDANCE,
     "If evidence is incomplete, say exactly what completed, what remains blocked, and the next concrete step.",
   ].join("\n");
 }

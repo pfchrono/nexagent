@@ -506,6 +506,7 @@ test("executeProviderRequest forces final synthesis at tool budget boundary", as
   });
   assert.equal(prompts.length, 13);
   assert.match(prompts[12] ?? "", /Do not call more tools/);
+  assert.match(prompts[12] ?? "", /do not repeat the full diff/);
   assert.equal(
     session.events.some((event) => event.kind === "control" && event.summary === "tool budget final synthesis requested"),
     true,
@@ -1163,6 +1164,7 @@ test("executeProviderRequest synthesizes after repeated guidance with evidence",
     assert.equal(result.output, "Final from completed Nexsight evidence.");
     assert.equal(prompts.length, 4);
     assert.match(prompts[3] ?? "", /Do not call more tools/);
+    assert.match(prompts[3] ?? "", /Edited-file block or bounded diff preview/);
     assert.equal(
       session.events.some((event) => event.kind === "control" && event.summary === "guidance loop final synthesis requested"),
       true,

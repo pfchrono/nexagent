@@ -383,7 +383,7 @@ test("createOpenTuiRuntimeView expands edit tool diff previews in chat", () => {
       status: "completed",
       summary: "tool apply_patch completed",
       detail: [
-        "guarded; duration=0.01s; in~12; out~40; output=patched .nexagent/patch-preview-smoke.txt (1 match)",
+        "guarded; duration=0.01s; in~12; out~40",
         "patched .nexagent/patch-preview-smoke.txt (1 match)",
         "Edited .nexagent/patch-preview-smoke.txt (+1 -1)",
         "diff:",
@@ -402,6 +402,7 @@ test("createOpenTuiRuntimeView expands edit tool diff previews in chat", () => {
   assert.match(toolBlock?.detailLines.join("\n") ?? "", /Edited \.nexagent\/patch-preview-smoke\.txt \(\+1 -1\)/);
   assert.match(toolBlock?.detailLines.join("\n") ?? "", /-beta/);
   assert.match(toolBlock?.detailLines.join("\n") ?? "", /\+gamma/);
+  assert.doesNotMatch(toolBlock?.detailLines[0] ?? "", /output=patched/);
 });
 
 test("createOpenTuiRuntimeView keeps provider nudge debug payloads out of chat", () => {
