@@ -1,6 +1,8 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import pLimit from "p-limit";
+import { z } from "zod";
 
 export interface McpServerDefinition {
   command?: string;
@@ -61,7 +63,21 @@ export interface McpLoadOptions {
 
 const DEFAULT_STARTUP_TIMEOUT_MS = 10_000;
 const MAX_STARTUP_TIMEOUT_MS = 120_000;
+const MCP_HYDRATION_CONCURRENCY = 4;
 const MCP_PROTOCOL_VERSION = "2024-11-05";
+const McpServerDefinitionSchema = z.object({
+  command: z.string().optional(),
+  args: z.array(z.string()).optional(),
+  env: z.record(z.string(), z.string()).optional(),
+  url: z.string().optional(),
+  bearer_token_env_var: z.string().optional(),
+  startup_timeout_sec: z.number().optional(),
+  startupTimeoutSec: z.number().optional(),
+  disabled: z.boolean().optional(),
+}).passthrough();
+const McpConfigFileSchema = z.object({
+  mcpServers: z.record(z.string(), McpServerDefinitionSchema).optional(),
+}).passthrough();
 
 export async function loadMcpRegistrySummary(
   filePath: string,
@@ -78,7 +94,8 @@ export async function loadMcpRegistrySummary(
           Object.entries(allServers).filter(([name]) => enabledServers.includes(name)),
         );
   const serverNames = Object.keys(servers).sort();
-  const hydration = await Promise.all(serverNames.map((name) => hydrateServer(name, servers[name], runtimeEnv)));
+  const limit = pLimit(MCP_HYDRATION_CONCURRENCY);
+  const hydration = await Promise.all(serverNames.map((name) => limit(() => hydrateServer(name, servers[name], runtimeEnv))));
   const tools = hydration.flatMap((result) => result.tools);
   const statuses = hydration.map((result) => result.status);
   const clients = new Map<string, McpRuntimeClient>();
@@ -149,7 +166,7 @@ export async function readMcpConfigFile(filePath: string): Promise<McpConfigFile
     if (filePath.endsWith(".toml") || trimmed.startsWith("[mcp_servers")) {
       return parseCodexTomlMcpConfig(raw);
     }
-    return JSON.parse(raw) as McpConfigFile;
+    return parseMcpConfigJson(raw, filePath);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
       return null;
@@ -157,6 +174,18 @@ export async function readMcpConfigFile(filePath: string): Promise<McpConfigFile
 
     throw error;
   }
+}
+
+function parseMcpConfigJson(raw: string, filePath: string): McpConfigFile {
+  const parsed = JSON.parse(raw) as unknown;
+  const result = McpConfigFileSchema.safeParse(parsed);
+  if (!result.success) {
+    const issue = result.error.issues[0];
+    const pathLabel = issue?.path.length ? issue.path.join(".") : "root";
+    const message = issue ? `${pathLabel}: ${issue.message}` : "invalid MCP config";
+    throw new Error(`invalid MCP config ${filePath}: ${message}`);
+  }
+  return result.data;
 }
 
 export async function writeMcpConfigFile(filePath: string, config: McpConfigFile): Promise<void> {

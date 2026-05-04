@@ -131,7 +131,7 @@ function normalizeOpenTuiKeyEvent(key: OpenTuiKeyEvent): OpenTuiKeyEvent {
   const fallbackSequence = !key.ctrl && !key.meta && !key.option ? printableSequenceForNamedKey(normalizedName, key.shift) : "";
   return {
     name: normalizedName,
-    ctrl: key.ctrl || isControlShortcutName(key.name),
+    ctrl: key.ctrl || isControlShortcutKey(key.name, key.sequence),
     meta: key.meta,
     shift: key.shift,
     option: key.option,
@@ -147,13 +147,23 @@ function normalizeKeyName(name: string, sequence: string): string {
   if (normalized === "ctrl+v" || normalized === "c-v" || normalized === "^v" || sequence === "\x16") {
     return "v";
   }
+  if (normalized === "ctrl+c" || normalized === "c-c" || normalized === "^c" || sequence === "\x03") {
+    return "c";
+  }
   return normalized;
 }
 
-function isControlShortcutName(name: string): boolean {
+function isControlShortcutKey(name: string, sequence: string): boolean {
   const normalized = name.toLowerCase();
+  if (sequence.length === 1) {
+    const code = sequence.charCodeAt(0);
+    if (code >= 1 && code <= 26) {
+      return true;
+    }
+  }
   return normalized === "ctrl+g" || normalized === "c-g" || normalized === "^g"
-    || normalized === "ctrl+v" || normalized === "c-v" || normalized === "^v";
+    || normalized === "ctrl+v" || normalized === "c-v" || normalized === "^v"
+    || normalized === "ctrl+c" || normalized === "c-c" || normalized === "^c";
 }
 
 function printableSequenceForNamedKey(name: string, shifted: boolean): string {

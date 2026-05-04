@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { test } from "bun:test";
 
 import { createLocalOutputBlock, createOpenTuiRuntimeView } from "../src/opentui/runtime-view.js";
 import { createDefaultProviderRegistry } from "../src/provider/registry.js";
+import { touchLspFileSync } from "../src/runtime/lsp.js";
 import type { RuntimeSession } from "../src/runtime/session.js";
 
 test("createOpenTuiRuntimeView maps runtime session without mutation", () => {
@@ -86,13 +90,20 @@ test("createOpenTuiRuntimeView maps runtime session without mutation", () => {
       },
       {
         title: "lsp",
-        rows: ["status disabled by default", "enabled off", "configured no", "indexArchivist off"],
+        rows: ["status disabled", "enabled off", "configured no", "command none", "source disabled", "problems 0", "lastTouched none", "indexArchivist off"],
       },
       {
         title: "diagnostics",
         rows: ["sentry /status --sentry", "redaction tags-only"],
       },
     ],
+    lspProblems: {
+      visible: false,
+      count: 0,
+      lastTouched: null,
+      source: "disabled",
+      rows: [],
+    },
     logo: {
       mode: "full",
       frames: [
@@ -138,13 +149,44 @@ test("createOpenTuiRuntimeView maps config sections and logo modes", () => {
   assert.match(view.logo.frames[0] ?? "", /nexagent/);
   assert.match(view.logo.metadata, /cfg:condensed/);
   assert.deepEqual(view.configSections.map((section) => section.title), ["provider", "ui", "memory", "mcp", "lsp", "diagnostics"]);
-  assert.deepEqual(view.configSections.find((section) => section.title === "lsp")?.rows, [
-    "status ready to start",
+  const lspRows = view.configSections.find((section) => section.title === "lsp")?.rows ?? [];
+  assert.match(lspRows.join("\n"), /^status (ready|fallback)$/m);
+  assert.deepEqual(lspRows.slice(1, 4), [
     "enabled on",
     "configured yes",
-    "indexArchivist on",
+    "command typescript-language-server",
   ]);
+  assert.match(lspRows.join("\n"), /^source (language-server|typescript-service)$/m);
+  assert.match(lspRows.join("\n"), /^problems 0$/m);
+  assert.match(lspRows.join("\n"), /^lastTouched none$/m);
+  assert.match(lspRows.join("\n"), /^indexArchivist on$/m);
   assert.match(view.configSections.find((section) => section.title === "memory")?.rows.join("\n") ?? "", /failure-playbook/);
+});
+
+test("createOpenTuiRuntimeView exposes compact LSP problems panel data", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-opentui-lsp-problems-"));
+  try {
+    await writeFile(path.join(cwd, "sample.ts"), "export const value = 1;\n// TODO fix this\n", "utf8");
+    const session = createSession();
+    session.cwd = cwd;
+    session.repo.root = cwd;
+    session.lsp = { enabled: true, command: "typescript-language-server", args: ["--stdio"], indexArchivist: false };
+    touchLspFileSync(session, "sample.ts");
+
+    const view = createOpenTuiRuntimeView(session);
+
+    assert.equal(view.lspProblems.visible, true);
+    assert.equal(view.lspProblems.count, 1);
+    assert.equal(view.lspProblems.lastTouched, "sample.ts");
+    assert.deepEqual(view.lspProblems.rows, [
+      "Problems",
+      "1 issue",
+      "last sample.ts",
+      "/lsp diagnostics sample.ts",
+    ]);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
 });
 
 test("createOpenTuiRuntimeView surfaces MCP hydration health", () => {
@@ -373,6 +415,20 @@ test("createOpenTuiRuntimeView surfaces turn token metrics in chat control rows"
   assert.equal(view.statusline.lastOutputTokens, 11);
 });
 
+test("createOpenTuiRuntimeView shows compact turn intent at turn start", () => {
+  const session = createSession();
+  session.events = [
+    { at: "2025-01-01T00:00:01.000Z", kind: "prompt", status: "queued", summary: "user prompt accepted", detail: "verify config copy" },
+    { at: "2025-01-01T00:00:01.100Z", kind: "control", status: "started", summary: "turn intent", detail: "Attempting: verify config copy" },
+  ];
+
+  const view = createOpenTuiRuntimeView(session);
+
+  assert.deepEqual(view.transcriptBlocks.map((block) => block.label), ["you", "agent"]);
+  assert.equal(view.transcriptBlocks[1]?.collapsedByDefault, false);
+  assert.equal(view.transcriptBlocks[1]?.detailLines[0], "Attempting: verify config copy");
+});
+
 test("createOpenTuiRuntimeView expands edit tool diff previews in chat", () => {
   const session = createSession();
   session.events = [
@@ -422,6 +478,34 @@ test("createOpenTuiRuntimeView keeps provider nudge debug payloads out of chat",
   assert.doesNotMatch(transcriptText, /<tool_call>|shell_command|claim evidence nudge/);
   assert.match(traceText, /malformed tool call nudge applied/);
   assert.match(traceText, /<tool_call>/);
+});
+
+test("createOpenTuiRuntimeView hides raw assistant tool call markup in chat", () => {
+  const session = createSession();
+  session.conversation = [
+    { role: "user", content: "resume", tokens: 1 },
+    {
+      role: "assistant",
+      content: '<nexagent_tool_call>{"name":"shell_command","arguments":{"command":"pwd"}}</nexagent_tool_call>Done.',
+      tokens: 8,
+    },
+  ];
+  session.events = [
+    { at: "2025-01-01T00:00:01.000Z", kind: "prompt", status: "queued", summary: "user prompt accepted", detail: "resume" },
+    {
+      at: "2025-01-01T00:00:02.000Z",
+      kind: "assistant",
+      status: "completed",
+      summary: "assistant response completed",
+      detail: '<nexagent_tool_call>{"name":"shell_command","arguments":{"command":"pwd"}}</nexagent_tool_call>Done.',
+    },
+  ];
+
+  const view = createOpenTuiRuntimeView(session);
+  const transcriptText = view.transcriptBlocks.map((block) => block.detailLines.join("\n")).join("\n");
+
+  assert.doesNotMatch(transcriptText, /<nexagent_tool_call>|"arguments"/);
+  assert.match(transcriptText, /\[tool call hidden: shell_command\]Done\./);
 });
 
 test("createOpenTuiRuntimeView shows command output in chat without diagnostic control detail", () => {

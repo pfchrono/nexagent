@@ -6,10 +6,11 @@ import path from "node:path";
 
 import { checkpointArchivistSession, saveArchivistMemory } from "./archivist.js";
 import { buildPatchPreview, searchFilesWithIgnore } from "./core-helpers.js";
-import { formatLspStatus, summarizeLspDiagnostics, summarizeLspSymbols } from "./lsp.js";
+import { formatLspStatus, summarizeLspDiagnostics, summarizeLspSymbols, touchLspFileSync } from "./lsp.js";
 import { callMcpTool, listMcpTools } from "./mcp.js";
 import { batchIndexNexsight, executeNexsight, indexNexsight, indexNexsightFile, searchNexsight } from "./nexsight.js";
 import {
+  analyzeBlockedShellCommand,
   findBlockedShellPattern,
   validateReadToolPath as validateReadPathPolicy,
   validateRepoToolPath as validateRepoPathPolicy,
@@ -346,7 +347,7 @@ export function getInternalToolDefinitions(): readonly InternalToolDefinition[] 
     },
     {
       name: "lsp_status",
-      description: "Report safe local LSP status. Disabled by default; never auto-downloads language servers.",
+      description: "Report safe local LSP status. Enabled by default with bounded fallback; never auto-downloads language servers.",
       inputSchema: {
         type: "object",
         properties: {},
@@ -579,7 +580,9 @@ function executeReadFileTool(session: RuntimeSession, inputPath: string): Intern
       return fail("read_file", `${formatToolPath(session, targetPath)} is not a file`);
     }
 
-    return ok("read_file", readFileSync(targetPath, "utf8"));
+    const content = readFileSync(targetPath, "utf8");
+    touchLspFileSync(session, targetPath);
+    return ok("read_file", content);
   } catch (error) {
     return fail("read_file", formatToolError(targetPath, error));
   }
@@ -613,6 +616,7 @@ function executeWriteFileTool(session: RuntimeSession, inputPath: string, conten
     const current = readExistingFileForDiff(targetPath);
     mkdirSync(path.dirname(targetPath), { recursive: true });
     writeFileSync(targetPath, content, "utf8");
+    touchLspFileSync(session, targetPath);
     return ok("write_file", formatEditToolOutput(session, targetPath, current, content, `wrote ${formatToolPath(session, targetPath)} (${String(content.length)} chars)`));
   } catch (error) {
     return fail("write_file", formatToolError(targetPath, error));
@@ -653,6 +657,7 @@ function executeApplyPatchTool(
 
     const next = replaceAll ? current.split(find).join(replace) : current.replace(find, replace);
     writeFileSync(targetPath, next, "utf8");
+    touchLspFileSync(session, targetPath);
     return ok("apply_patch", formatEditToolOutput(session, targetPath, current, next, `patched ${formatToolPath(session, targetPath)} (${String(occurrences)} match${occurrences === 1 ? "" : "es"})`));
   } catch (error) {
     return fail("apply_patch", formatToolError(targetPath, error));
@@ -709,6 +714,7 @@ function executeBatchEditTool(session: RuntimeSession, args: Record<string, unkn
   for (const [targetPath, next] of nextByPath) {
     mkdirSync(path.dirname(targetPath), { recursive: true });
     writeFileSync(targetPath, next, "utf8");
+    touchLspFileSync(session, targetPath);
   }
 
   return ok("batch_edit", [
@@ -989,7 +995,17 @@ function executeShellCommandTool(session: RuntimeSession, command: string, args:
 
   const blockedPattern = findBlockedShellPattern(normalized);
   if (blockedPattern) {
-    return fail("shell_command", `shell policy blocked command; destructive pattern matched: ${blockedPattern.source}`);
+    const analysis = analyzeBlockedShellCommand(normalized);
+    const report = {
+      command: normalized,
+      pattern: blockedPattern.source,
+      reason: analysis?.reason ?? "destructive shell pattern matched",
+      matchedText: analysis?.matchedText ?? null,
+      source: session.activeSkill ? `skill ${session.activeSkill.name}` : "shell_command",
+      advice: analysis?.advice ?? "Use the narrow internal tool for the intended change, or run a non-destructive inspection command.",
+    };
+    session.operationControls.lastShellBlocker = report;
+    return fail("shell_command", formatShellPolicyBlockReport(report));
   }
 
   try {
@@ -1032,6 +1048,21 @@ function executeShellCommandTool(session: RuntimeSession, command: string, args:
   } catch (error) {
     return fail("shell_command", `shell failed: ${error instanceof Error ? error.message : String(error)}`);
   }
+}
+
+function formatShellPolicyBlockReport(report: RuntimeSession["operationControls"]["lastShellBlocker"]): string {
+  if (!report) {
+    return "shell policy blocked command";
+  }
+  return [
+    "shell policy blocked command",
+    `reason: ${report.reason}`,
+    `source: ${report.source}`,
+    `pattern: ${report.pattern}`,
+    report.matchedText ? `matched: ${report.matchedText}` : null,
+    `command: ${report.command}`,
+    `safer: ${report.advice}`,
+  ].filter((line): line is string => Boolean(line)).join("\n");
 }
 
 function withNexsightRouteHint(output: string): string {

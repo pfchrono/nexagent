@@ -413,6 +413,50 @@ test("executeProviderRequest executes internal tool loop before final answer", a
   });
 });
 
+test("executeProviderRequest gives recovery hint after blocked shell tool", async () => {
+  const session = createSession();
+  const prompts: string[] = [];
+
+  const result = await executeProviderRequest(
+    {
+      session,
+      prompt: "clean files safely",
+    },
+    {
+      exec: async (request) => {
+        prompts.push(request.prompt);
+        if (prompts.length === 1) {
+          return {
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            output: '<nexagent_tool_call>{"name":"shell_command","arguments":{"command":"rm -rf ."}} </nexagent_tool_call>',
+          };
+        }
+
+        return {
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+          output: "Blocked shell. Use apply_patch for scoped edits.",
+        };
+      },
+      http: async () => {
+        throw new Error("http should not be used");
+      },
+      codexHttp: async () => {
+        throw new Error("codex-http should not be used");
+      },
+    },
+  );
+
+  assert.equal(result.ok, true);
+  assert.match(prompts[1] ?? "", /shell policy blocked command/);
+  assert.match(prompts[1] ?? "", /Recovery hint:/);
+  assert.match(prompts[1] ?? "", /Use write_file\/apply_patch\/batch_edit/);
+  assert.equal(session.operationControls.lastShellBlocker?.reason, "recursive remove is destructive");
+});
+
 test("executeProviderRequest returns partial result when tool budget is exhausted", async () => {
   const session = createSession();
   const prompts: string[] = [];
@@ -442,10 +486,11 @@ test("executeProviderRequest returns partial result when tool budget is exhauste
   );
 
   assert.equal(result.ok, true);
-  assert.equal(prompts.length, 13);
-  assert.match(prompts[5] ?? "", /Tool budget is almost exhausted/);
-  assert.match(prompts[6] ?? "", /Tool budget continuation cycle 2 started/);
-  assert.match(prompts[12] ?? "", /Do not call more tools/);
+  assert.equal(prompts.length, 25);
+  assert.match(prompts[7] ?? "", /Tool budget is almost exhausted/);
+  assert.match(prompts[8] ?? "", /Tool budget continuation cycle 2 started/);
+  assert.match(prompts[16] ?? "", /Tool budget continuation cycle 3 started/);
+  assert.match(prompts[24] ?? "", /Do not call more tools/);
   assert.match(result.output, /Tool budget exhausted before final assistant answer/);
   assert.match(result.output, /Partial evidence from completed tools/);
   assert.match(result.output, /Tool call: \{"name":"git_status","arguments":\{\}\}/);
@@ -471,7 +516,7 @@ test("executeProviderRequest forces final synthesis at tool budget boundary", as
     {
       exec: async (request) => {
         prompts.push(request.prompt);
-        if (prompts.length <= 12) {
+        if (prompts.length <= 24) {
           return {
             exitCode: 0,
             stdout: "",
@@ -504,9 +549,9 @@ test("executeProviderRequest forces final synthesis at tool budget boundary", as
     fallbackApplied: false,
     output: "Final summary from completed tool evidence.",
   });
-  assert.equal(prompts.length, 13);
-  assert.match(prompts[12] ?? "", /Do not call more tools/);
-  assert.match(prompts[12] ?? "", /do not repeat the full diff/);
+  assert.equal(prompts.length, 25);
+  assert.match(prompts[24] ?? "", /Do not call more tools/);
+  assert.match(prompts[24] ?? "", /do not repeat the full diff/);
   assert.equal(
     session.events.some((event) => event.kind === "control" && event.summary === "tool budget final synthesis requested"),
     true,
@@ -525,7 +570,7 @@ test("executeProviderRequest resets tool budget once for bounded continuation", 
     {
       exec: async (request) => {
         prompts.push(request.prompt);
-        if (prompts.length <= 6) {
+        if (prompts.length <= 8) {
           return {
             exitCode: 0,
             stdout: "",
@@ -558,8 +603,8 @@ test("executeProviderRequest resets tool budget once for bounded continuation", 
     fallbackApplied: false,
     output: "continued after budget reset",
   });
-  assert.equal(prompts.length, 7);
-  assert.match(prompts[6] ?? "", /legally reset the per-cycle tool counter/);
+  assert.equal(prompts.length, 9);
+  assert.match(prompts[8] ?? "", /legally reset the per-cycle tool counter/);
   assert.equal(
     session.events.some((event) => event.kind === "control" && event.summary === "tool budget continuation cycle started"),
     true,

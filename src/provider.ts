@@ -118,8 +118,8 @@ const INTERNAL_TOOL_TAG_NAMES = [
 ] as const satisfies readonly InternalToolCall["name"][];
 const INTERNAL_TOOL_TAG_PATTERN = INTERNAL_TOOL_TAG_NAMES.join("|");
 const TOOL_CALL_MARKUP_PATTERN = new RegExp(`<\\s*\\/?\\s*(?:(?:nexagent_)?tool_call|${INTERNAL_TOOL_TAG_PATTERN})\\b`, "i");
-const MAX_INTERNAL_TOOL_STEPS = 6;
-const MAX_INTERNAL_TOOL_CYCLES = 2;
+const MAX_INTERNAL_TOOL_STEPS = 8;
+const MAX_INTERNAL_TOOL_CYCLES = 3;
 const MAX_GUIDANCE_NUDGES_BEFORE_SYNTHESIS = 2;
 const CONTINUATION_NUDGE = [
   "The previous response deferred action or asked for confirmation instead of executing.",
@@ -172,7 +172,7 @@ const REQUIRED_CLAIM_EVIDENCE_NUDGE = [
 const FINAL_TOOL_STEP_NUDGE = [
   "Tool budget is almost exhausted.",
   "You have one provider step left after this transcript.",
-  "Answer now from the available evidence unless one final tool call is absolutely required.",
+  "Answer now from the available evidence unless one final tool call is required to complete a user-requested write, verification, or artifact update.",
   "If another tool is still required, the harness may start one bounded continuation cycle with the tool count reset.",
   "After that continuation cycle, it will return a partial result instead of failing the turn.",
 ].join(" ");
@@ -1923,7 +1923,27 @@ function formatInternalToolExchange(step: number, call: InternalToolCall, result
     `Tool call: ${JSON.stringify(call)}`,
     `Tool result (${result.ok ? "ok" : "error"}):`,
     result.output,
-  ].join("\n");
+    formatToolRecoveryHint(call, result),
+  ].filter((line) => line.length > 0).join("\n");
+}
+
+function formatToolRecoveryHint(call: InternalToolCall, result: InternalToolResult): string {
+  if (result.ok) {
+    return "";
+  }
+  if (call.name === "shell_command" && result.output.startsWith("shell policy blocked command")) {
+    return [
+      "Recovery hint:",
+      "- Do not retry same shell command.",
+      "- Use read_file/list_dir/search_content for inspection.",
+      "- Use write_file/apply_patch/batch_edit for workspace file changes.",
+      "- Run /why-blocked if user asks why command was blocked.",
+    ].join("\n");
+  }
+  if (/tool policy blocked .*protected path/i.test(result.output)) {
+    return "Recovery hint:\n- Do not access protected roots. Use repo-local paths or ask user for safe input path.";
+  }
+  return "";
 }
 
 function createGuidedPrompt(basePrompt: string, toolTranscript: string[], nudge: string): string {

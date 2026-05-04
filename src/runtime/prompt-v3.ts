@@ -32,6 +32,7 @@ export function buildPromptV3(request: { session: InstructionContext; prompt: st
     "  - If evidence contradicts hypothesis, update verdict and continue; do not force a fix.",
     "  - Loop safety: evidence labels guide claims, not loop termination. If claim is inferred/unknown and task remains actionable, use the smallest next inspection/verification tool instead of stopping.",
     "  - Hard stops only: verified completion, approval/safety gate, unavailable external dependency, exhausted runtime tool budget, or user-requested pause/stop.",
+    "  - Chat presentation: keep final answers compact and readable; put detailed evidence in files or trace unless requested in chat.",
     "- Tool contracts:",
     ...getToolContracts().map((contract) => `  - ${contract.name}: ${contract.summary} (evidence=${contract.evidence})`),
   ];

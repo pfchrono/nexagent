@@ -11,10 +11,12 @@ import { executeProviderRequest, type ImageAttachment } from "./provider.js";
 import { launchCodexLogin, probeCodexAuthStateSync } from "./runtime/auth.js";
 import { checkpointArchivistSession, maintainArchivistMemorySync, saveArchivistMemory } from "./runtime/archivist.js";
 import { bootstrapRuntime } from "./runtime/bootstrap.js";
+import { beginBoomerang, buildBoomerangPrompt, cancelBoomerang, completeBoomerang } from "./runtime/boomerang.js";
 import { initializeRuntimeDebug, writeDebugLog, type RuntimeDebugOptions } from "./runtime/debug.js";
 import { buildPromptV2, summarizePromptV2 } from "./runtime/prompt-v2.js";
+import { formatTurnStartIntent } from "./runtime/turn-intent.js";
 import { checkpointNexsightSession, getNexsightStats, purgeNexsight, searchNexsight } from "./runtime/nexsight.js";
-import { formatLspStatus, summarizeLspDiagnosticsSync, summarizeLspSymbolsSync } from "./runtime/lsp.js";
+import { formatLspSetup, formatLspStatus, getLspStatus, scanLspWorkspaceSync, summarizeLspDiagnosticsSync, summarizeLspSymbolsSync } from "./runtime/lsp.js";
 import { toDiagnosticRuntimeEvent } from "./runtime/diagnostics.js";
 import { savePersistedRuntimeState } from "./runtime/persistence.js";
 import { executeInternalTool, getInternalToolDefinitions } from "./runtime/tools.js";
@@ -357,6 +359,9 @@ interface RuntimeCommandSuccess {
   output: string;
   activity: string;
   autoInvokeAfterSkill?: boolean;
+  invokePrompt?: string;
+  transcriptPrompt?: string;
+  promptSummary?: string;
 }
 
 interface RuntimeCommandFailure {
@@ -799,9 +804,12 @@ async function readPipedStdin(stdin: NodeJS.ReadStream): Promise<string | null> 
 
 export async function runPromptCommand(session: RuntimeSession, prompt: string): Promise<void> {
   let effectivePrompt = prompt.trim();
+  let transcriptPrompt = effectivePrompt;
+  let promptSummary: string | undefined;
   const skillCommand = toSkillCommandFromShorthand(effectivePrompt);
   if (skillCommand) {
     effectivePrompt = skillCommand;
+    transcriptPrompt = skillCommand;
   }
   const trimmedPrompt = effectivePrompt;
   if (session.debug) {
@@ -894,10 +902,12 @@ export async function runPromptCommand(session: RuntimeSession, prompt: string):
   const commandResult = runRuntimeCommand(session, effectivePrompt);
 
   if (commandResult) {
-    // Skill commands with autoInvokeAfterSkill fall through to model invocation
+    // Commands with autoInvokeAfterSkill fall through to model invocation.
     if (commandResult.ok && commandResult.autoInvokeAfterSkill) {
       process.stdout.write(`${commandResult.output}\n`);
-      effectivePrompt = buildActiveSkillExecutionPrompt(session, effectivePrompt);
+      transcriptPrompt = commandResult.transcriptPrompt ?? effectivePrompt;
+      promptSummary = commandResult.promptSummary;
+      effectivePrompt = commandResult.invokePrompt ?? buildActiveSkillExecutionPrompt(session, effectivePrompt);
     } else if (commandResult.ok) {
       setRuntimeAction(session, "ready", "command complete");
       recordRuntimeEvent(session, {
@@ -926,8 +936,14 @@ export async function runPromptCommand(session: RuntimeSession, prompt: string):
   recordRuntimeEvent(session, {
     kind: "prompt",
     status: "queued",
-    summary: "user prompt accepted",
-    detail: formatPromptEventDetail(effectivePrompt),
+    summary: promptSummary ?? "user prompt accepted",
+    detail: formatPromptEventDetail(transcriptPrompt),
+  });
+  recordRuntimeEvent(session, {
+    kind: "control",
+    status: "started",
+    summary: "turn intent",
+    detail: formatTurnStartIntent(transcriptPrompt),
   });
   setRuntimeAction(session, "running", "provider request");
 
@@ -947,10 +963,19 @@ export async function runPromptCommand(session: RuntimeSession, prompt: string):
           output: result.output,
         }, { verboseOnly: true });
       }
-      recordConversationTurn(session, "user", effectivePrompt);
+      recordConversationTurn(session, "user", transcriptPrompt);
       recordConversationTurn(session, "assistant", result.output);
       recordTurnTelemetry(session, effectivePrompt, result.output);
       checkpointNexsightSession(session, "turn");
+      const boomerangSummary = completeBoomerang(session, result.output);
+      if (boomerangSummary) {
+        recordRuntimeEvent(session, {
+          kind: "compact",
+          status: "completed",
+          summary: "boomerang summary captured",
+          detail: summarizeBoomerangEvent(boomerangSummary),
+        });
+      }
       setRuntimeAction(session, "ready", `response received · ${result.provider}`);
       await maybeArchiveAgedChatHistory(session);
       process.stdout.write(`${result.output}\n`);
@@ -958,6 +983,7 @@ export async function runPromptCommand(session: RuntimeSession, prompt: string):
     }
 
     setRuntimeAction(session, "error", result.message);
+    cancelBoomerang(session);
     if (session.debug) {
       writeDebugLog(session.debug, "provider.failure", {
         provider: result.provider,
@@ -978,6 +1004,7 @@ export async function runPromptCommand(session: RuntimeSession, prompt: string):
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     setRuntimeAction(session, "error", message);
+    cancelBoomerang(session);
     recordRuntimeEvent(session, {
       kind: "provider",
       status: "failed",
@@ -986,6 +1013,22 @@ export async function runPromptCommand(session: RuntimeSession, prompt: string):
     });
     throw error;
   }
+}
+
+function summarizeBoomerangEvent(summary: string): string {
+  return summary
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(0, 8)
+    .join("\n");
+}
+
+function firstBoomerangSummaryLine(summary: string): string {
+  return summary
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line.length > 0 && line !== "[BOOMERANG COMPLETE]") ?? "captured";
 }
 
 export function runRuntimeCommand(session: RuntimeSession, input: string): RuntimeCommandResult | null {
@@ -1037,10 +1080,14 @@ function dispatchRuntimeCommand(session: RuntimeSession, input: string): Runtime
       return handleEffortCommand(session, args);
     case "/skill":
       return handleSkillCommand(session, args);
+    case "/boomerang":
+      return handleBoomerangCommand(session, args);
     case "/mouse":
       return handleMouseCommand(session, args);
     case "/status":
       return handleStatusCommand(session, args);
+    case "/doctor":
+      return handleDoctorCommand(session, args);
     case "/caveman-mode":
       return handleStyleToggleCommand(session, args, "cavemanMode");
     case "/deadpoolmode":
@@ -1057,6 +1104,8 @@ function dispatchRuntimeCommand(session: RuntimeSession, input: string): Runtime
       return handleCompactCommand(session, args);
     case "/tools":
       return handleToolsCommand(session, args);
+    case "/why-blocked":
+      return handleWhyBlockedCommand(session, args);
     case "/nexsight":
       return handleNexsightCommand(session, args);
     case "/pwd":
@@ -1247,6 +1296,55 @@ function handleSkillCommand(session: RuntimeSession, args: string[]): RuntimeCom
     activity: `skill routed · ${resolution.skill.name}`,
     autoInvokeAfterSkill: true,
   };
+}
+
+function handleBoomerangCommand(session: RuntimeSession, args: string[]): RuntimeCommandResult {
+  const [firstArg, ...restArgs] = args;
+  const mode = firstArg?.toLowerCase();
+  if (!firstArg || STATUS_ARGS.has(mode ?? "")) {
+    return {
+      ok: true,
+      output: formatBoomerangStatus(session),
+      activity: "boomerang status",
+    };
+  }
+  if (mode === "cancel") {
+    const canceled = cancelBoomerang(session);
+    return {
+      ok: true,
+      output: canceled ? "boomerang canceled" : "boomerang idle",
+      activity: canceled ? "boomerang canceled" : "boomerang idle",
+    };
+  }
+
+  const task = [firstArg, ...restArgs].join(" ").trim();
+  if (!task) {
+    return {
+      ok: false,
+      message: "usage: /boomerang <task> | /boomerang status | /boomerang cancel",
+      activity: "command failed · /boomerang usage",
+    };
+  }
+  beginBoomerang(session, task);
+  return {
+    ok: true,
+    output: [`boomerang queued`, `task: ${task}`].join("\n"),
+    activity: "boomerang queued",
+    autoInvokeAfterSkill: true,
+    invokePrompt: buildBoomerangPrompt(task),
+    transcriptPrompt: `/boomerang ${task}`,
+    promptSummary: "boomerang task accepted",
+  };
+}
+
+function formatBoomerangStatus(session: RuntimeSession): string {
+  const state = session.operationControls.boomerang;
+  return [
+    "boomerang",
+    `active: ${state.active ? "true" : "false"}`,
+    `task: ${state.task ?? "none"}`,
+    `lastSummary: ${state.lastSummary ? firstBoomerangSummaryLine(state.lastSummary) : "none"}`,
+  ].join("\n");
 }
 
 export function buildActiveSkillExecutionPrompt(session: RuntimeSession, originalCommand: string): string {
@@ -1487,16 +1585,23 @@ function handleLspCommand(session: RuntimeSession, args: string[]): RuntimeComma
       activity: "lsp status",
     };
   }
+  if (args.length === 1 && args[0] === "setup") {
+    return {
+      ok: true,
+      output: formatLspSetup(session),
+      activity: "lsp setup",
+    };
+  }
   if (args.length === 2 && args[0] === "mode") {
     const next = args[1]?.toLowerCase();
     if (!ENABLE_ARGS.has(next ?? "") && !DISABLE_ARGS.has(next ?? "")) {
       return {
         ok: false,
-        message: "usage: /lsp [status|mode <on|off>|symbols <path>|diagnostics <path>]",
+        message: LSP_USAGE,
         activity: "command failed · /lsp usage",
       };
     }
-    session.lsp = session.lsp ?? { enabled: false, command: null, args: [], indexArchivist: false };
+    session.lsp = ensureDefaultLspState(session);
     session.lsp.enabled = ENABLE_ARGS.has(next ?? "");
     savePersistedRuntimeState(session);
     return {
@@ -1535,13 +1640,29 @@ function handleLspCommand(session: RuntimeSession, args: string[]): RuntimeComma
       };
     }
   }
+  if ((args.length === 1 || args.length === 2) && (args[0] === "check" || args[0] === "workspace")) {
+    try {
+      return {
+        ok: true,
+        output: scanLspWorkspaceSync(session, args[1] ?? ".").output,
+        activity: "lsp workspace",
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        message: error instanceof Error ? error.message : String(error),
+        activity: "command failed · /lsp workspace",
+      };
+    }
+  }
   return {
     ok: false,
-    message: "usage: /lsp [status|mode <on|off>|symbols <path>|diagnostics <path>]",
+    message: LSP_USAGE,
     activity: "command failed · /lsp usage",
   };
 }
 
+const LSP_USAGE = "usage: /lsp [status|setup|mode <on|off>|symbols <path>|diagnostics <path>|check [path]]";
 const CONFIG_USAGE = "usage: /config [status] | /config [set] logo <full|condensed|off> | /config [set] lsp <on|off> | /config [set] lsp-index <on|off>";
 
 function handleConfigCommand(session: RuntimeSession, args: string[]): RuntimeCommandResult {
@@ -1582,7 +1703,7 @@ function handleConfigCommand(session: RuntimeSession, args: string[]): RuntimeCo
         };
       }
       const enabled = ENABLE_ARGS.has(value);
-      session.lsp = session.lsp ?? { enabled: false, command: null, args: [], indexArchivist: false };
+      session.lsp = ensureDefaultLspState(session);
       if (section === "lsp") {
         session.lsp.enabled = enabled;
       } else {
@@ -1601,6 +1722,18 @@ function handleConfigCommand(session: RuntimeSession, args: string[]): RuntimeCo
     message: CONFIG_USAGE,
     activity: "command failed · /config usage",
   };
+}
+
+function ensureDefaultLspState(session: RuntimeSession): RuntimeSession["lsp"] {
+  session.lsp = session.lsp ?? {
+    enabled: true,
+    command: "typescript-language-server",
+    args: ["--stdio"],
+    indexArchivist: false,
+  };
+  session.lsp.command = session.lsp.command ?? "typescript-language-server";
+  session.lsp.args = session.lsp.args.length > 0 ? session.lsp.args : ["--stdio"];
+  return session.lsp;
 }
 
 function isMemoryMaintenanceArg(arg: string): boolean {
@@ -1646,6 +1779,22 @@ function handleStatusCommand(session: RuntimeSession, args: string[]): RuntimeCo
     ok: true,
     output: formatRuntimeStatus(session, detailMode),
     activity: "status",
+  };
+}
+
+function handleDoctorCommand(session: RuntimeSession, args: string[]): RuntimeCommandResult {
+  if (args.length !== 0) {
+    return {
+      ok: false,
+      message: "usage: /doctor",
+      activity: "command failed · /doctor usage",
+    };
+  }
+
+  return {
+    ok: true,
+    output: formatDoctorStatus(session),
+    activity: "doctor status",
   };
 }
 
@@ -1788,6 +1937,31 @@ function handleToolsCommand(session: RuntimeSession, args: string[]): RuntimeCom
     ok: true,
     output: formatToolPolicyStatus(session, detailMode),
     activity: "tools status",
+  };
+}
+
+function handleWhyBlockedCommand(session: RuntimeSession, args: string[]): RuntimeCommandResult {
+  if (args.length !== 0) {
+    return {
+      ok: false,
+      message: "usage: /why-blocked",
+      activity: "command failed · /why-blocked usage",
+    };
+  }
+
+  const report = session.operationControls.lastShellBlocker;
+  if (!report) {
+    return {
+      ok: true,
+      output: "lastShellBlocker: none",
+      activity: "why-blocked · none",
+    };
+  }
+
+  return {
+    ok: true,
+    output: formatShellBlockerStatus(report),
+    activity: "why-blocked · shell",
   };
 }
 
@@ -2069,10 +2243,11 @@ function handleBangShellCommand(session: RuntimeSession, prompt: string): Runtim
   });
 
   if (!result.ok) {
+    const shellPolicyBlocked = result.output.startsWith("shell policy blocked command");
     return {
       ok: false,
       message: result.output,
-      activity: `shell failed · ${command}`,
+      activity: shellPolicyBlocked ? "command blocked · shell policy" : `shell failed · ${command}`,
     };
   }
 
@@ -2389,6 +2564,87 @@ export function formatRuntimeStatus(session: RuntimeSession, detailMode: DetailM
   ]).join("\n");
 }
 
+function formatDoctorStatus(session: RuntimeSession): string {
+  const lsp = getLspStatus(session);
+  const mcpStatuses = session.mcpRegistry?.statuses ?? [];
+  const failedMcp = mcpStatuses.filter((status) => status.status !== "hydrated" && status.status !== "configured");
+  const clipboard = formatClipboardDoctorStatus();
+  const shellBlocker = session.operationControls.lastShellBlocker;
+  const issues = [
+    !session.auth.loggedIn ? "provider auth not ready" : null,
+    failedMcp.length > 0 ? `${String(failedMcp.length)} MCP server(s) failed or unavailable` : null,
+    lsp.enabled && !lsp.available ? "LSP language server missing; fallback active" : null,
+    lsp.problemCount > 0 ? `${String(lsp.problemCount)} cached LSP problem(s)` : null,
+    clipboard.copy === "missing" ? "clipboard copy backend missing" : null,
+    shellBlocker ? "recent shell command blocked" : null,
+  ].filter((issue): issue is string => Boolean(issue));
+  const next = [
+    !session.auth.loggedIn ? "/login" : null,
+    failedMcp.length > 0 ? "check .nexagent/mcp.json env/commands, then /reload" : null,
+    lsp.enabled && !lsp.available ? "bun install or /lsp setup" : null,
+    lsp.problemCount > 0 ? (lsp.lastTouchedPath ? `/lsp diagnostics ${lsp.lastTouchedPath}` : "/lsp workspace") : null,
+    clipboard.copy === "missing" ? "install wl-copy/xclip/xsel/pbcopy or rely on OSC52 terminal support" : null,
+    shellBlocker ? "/why-blocked" : null,
+  ].filter((item): item is string => Boolean(item));
+
+  return [
+    "doctor",
+    `status: ${issues.length === 0 ? "ok" : "attention"}`,
+    `issues: ${issues.length === 0 ? "none" : issues.join(" | ")}`,
+    "provider",
+    `active: ${session.provider}`,
+    `transport: ${session.providerTransport.mode}`,
+    `auth: ${session.auth.loggedIn ? "ready" : session.auth.status}`,
+    "mcp",
+    `servers: ${String(session.mcpServers.length)}`,
+    `tools: ${String(session.mcpRegistry?.tools?.length ?? 0)}`,
+    `failed: ${failedMcp.length === 0 ? "none" : failedMcp.map((status) => status.name).slice(0, 5).join(", ")}`,
+    "lsp",
+    `enabled: ${String(lsp.enabled)}`,
+    `source: ${lsp.source}`,
+    `available: ${String(lsp.available)}`,
+    `problems: ${String(lsp.problemCount)}`,
+    `last: ${lsp.lastTouchedPath ?? "none"}`,
+    "clipboard",
+    `copy: ${clipboard.copy}`,
+    `paste: ${clipboard.paste}`,
+    "shell",
+    `guard: ${session.toolPolicy.shell}; ${session.toolPolicy.deletes}`,
+    `lastBlocked: ${shellBlocker ? shellBlocker.reason : "none"}`,
+    "next",
+    next.length === 0 ? "none" : next.map((item) => `- ${item}`).join("\n"),
+  ].join("\n");
+}
+
+function formatClipboardDoctorStatus(): { copy: string; paste: string } {
+  const copyBackends = ["pbcopy", "wl-copy", "xclip", "xsel", "powershell.exe"].filter(isCommandOnPath);
+  const pasteBackends = ["pbpaste", "wl-paste", "xclip", "xsel", "powershell.exe"].filter(isCommandOnPath);
+  return {
+    copy: copyBackends.length > 0 ? copyBackends.join(", ") : "missing",
+    paste: pasteBackends.length > 0 ? pasteBackends.join(", ") : "missing",
+  };
+}
+
+function isCommandOnPath(command: string): boolean {
+  const pathEntries = (process.env.PATH ?? "").split(path.delimiter).filter(Boolean);
+  const extensions = process.platform === "win32"
+    ? (process.env.PATHEXT ?? ".EXE;.CMD;.BAT;.COM").split(";")
+    : [""];
+  for (const entry of pathEntries) {
+    for (const extension of extensions) {
+      const candidate = path.join(entry, command.endsWith(extension) ? command : `${command}${extension}`);
+      try {
+        if (statSync(candidate).isFile()) {
+          return true;
+        }
+      } catch {
+        // Try next PATH entry.
+      }
+    }
+  }
+  return false;
+}
+
 function formatAuthStatus(session: RuntimeSession): string {
   return [
     `provider: ${session.auth.provider}`,
@@ -2485,6 +2741,7 @@ function formatConfigStatus(session: RuntimeSession): string {
     "lsp",
     `enabled: ${String(session.lsp?.enabled === true)}`,
     `configured: ${String(Boolean(session.lsp?.command))}`,
+    `command: ${session.lsp?.command ?? "none"}`,
     `indexArchivist: ${String(session.lsp?.indexArchivist === true)}`,
     "diagnostics",
     "sentry: /status --sentry",
@@ -2553,6 +2810,18 @@ function formatToolPolicyStatus(session: RuntimeSession, detailMode: DetailMode 
     ["internalTools", internalTools],
     ["ripgrep", hasRipgrep() ? "available" : "missing"],
   ]).join("\n");
+}
+
+function formatShellBlockerStatus(report: NonNullable<RuntimeSession["operationControls"]["lastShellBlocker"]>): string {
+  return [
+    "lastShellBlocker",
+    `source: ${report.source}`,
+    `reason: ${report.reason}`,
+    `matched: ${report.matchedText ?? "none"}`,
+    `pattern: ${report.pattern}`,
+    `command: ${report.command}`,
+    `safer: ${report.advice}`,
+  ].join("\n");
 }
 
 function formatCompactionStatus(session: RuntimeSession): string {
@@ -2820,6 +3089,14 @@ function toolResultToCommandResult(command: string, detail: string, result: Retu
       ok: false,
       message: result.output,
       activity: `command blocked · ${blockedPath}`,
+    };
+  }
+
+  if (result.output.startsWith("shell policy blocked command")) {
+    return {
+      ok: false,
+      message: result.output,
+      activity: "command blocked · shell policy",
     };
   }
 

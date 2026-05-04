@@ -75,7 +75,11 @@ test("OpenTUI app shell renders live view fields and Phase 66 command surfaces",
   assert.match(source, /COMPOSER_CURSOR/);
   assert.match(source, /COPIED_RESULTS_NOTICE/);
   assert.match(source, /copyTextToClipboardOsc52/);
-  assert.doesNotMatch(source, /key\.ctrl && key\.name === "c"/);
+  assert.match(source, /copyTextToClipboard/);
+  assert.match(source, /copyNotice/);
+  assert.match(source, /key\.ctrl && key\.name === "c"/);
+  assert.match(source, /renderer\.getSelection\(\)\?\.getSelectedText\(\)/);
+  assert.match(source, /no text selection/);
   assert.match(source, /copyLatestResultBlock/);
   assert.match(source, /key\.ctrl && key\.name === "q"/);
   assert.match(source, /key\.meta \|\| key\.option/);
@@ -88,7 +92,8 @@ test("OpenTUI app shell renders live view fields and Phase 66 command surfaces",
   assert.match(source, /selectable/);
   assert.match(source, /selectionBg/);
   assert.match(source, /PgUp\/PgDn scroll/);
-  assert.match(source, /Ctrl\+Y copy/);
+  assert.match(source, /Ctrl\+C copy/);
+  assert.match(source, /Ctrl\+Y latest/);
   assert.match(source, /visiblePaletteWindow/);
   assert.match(source, /createPaletteDisplayRows/);
   assert.match(source, /PALETTE_VISIBLE_ROWS = 5/);
@@ -118,6 +123,9 @@ test("OpenTUI app shell renders live view fields and Phase 66 command surfaces",
   assert.match(source, /configExpanded/);
   assert.match(source, /key\.ctrl && key\.name === "g"/);
   assert.match(source, /renderConfigPanelRows/);
+  assert.match(source, /renderLspProblemsPanelRows/);
+  assert.match(source, /view\.lspProblems\.visible/);
+  assert.match(source, /lspProblemsPanelWidth/);
   assert.match(source, /renderLogoRows/);
   assert.match(source, /view\.logo\.frames/);
   assert.match(source, /Ctrl\+G config/);

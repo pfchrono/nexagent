@@ -204,6 +204,8 @@ test("buildPromptV2 keeps style modes dynamic and subordinate", () => {
   assert.match(caveman?.content.join("\n") ?? "", /Pattern: \[thing\] \[action\] \[reason\]\. \[next step\]\./);
   assert.match(caveman?.content.join("\n") ?? "", /Structured and machine-readable content stays exact/);
   assert.match(deadpool?.content.join("\n") ?? "", /recognizably Deadpool-flavored/);
+  assert.match(deadpool?.content.join("\n") ?? "", /Do not apply Deadpool voice to tool calls/);
+  assert.match(deadpool?.content.join("\n") ?? "", /LSP diagnostics/);
   assert.match(deadpool?.content.join("\n") ?? "", /Do not copy copyrighted quotes or signature catchphrases/);
 });
 

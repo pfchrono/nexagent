@@ -26,7 +26,7 @@ Canonical guidance for coding agents working in `nexagent`.
   - `lsp_status`
   - `lsp_symbols`
   - `lsp_diagnostics`
-- slash commands including `/status`, `/status --sentry`, `/provider`, `/model`, `/effort`, `/tools`, `/memory`, `/memory --maintenance`, `/config`, `/lsp`, `/skill`, `/attach`, `/detach`, `/mouse`, `/approval`, `/compact`, `/diff`, `/rg`
+- slash commands including `/status`, `/status --sentry`, `/provider`, `/model`, `/effort`, `/tools`, `/memory`, `/memory --maintenance`, `/config`, `/lsp`, `/skill`, `/boomerang`, `/attach`, `/detach`, `/mouse`, `/approval`, `/compact`, `/diff`, `/rg`
 - `$skill` shorthand routed into `/skill`
 - guarded `!<command>` shell transcript command
 - `--yolo` session mode that bypasses guarded approvals while preserving destructive shell/tool blocks
@@ -35,7 +35,7 @@ Canonical guidance for coding agents working in `nexagent`.
 - tags-only Sentry diagnostics for command, provider, tool, compaction, OpenTUI, startup, and memory signal failures; raw prompts/output/tool/file/transcript content stays out of Sentry unless explicitly opted in for AI span content
 - configurable compaction thresholds, Archivist recurrence/dedupe, failure recovery playbooks, and memory signal counters
 - cockpit-style OpenTUI surfaces: paced assistant replies, turn metadata, warning/error lanes, turn blocks, token/duration badges, risk/outcome/action rows, navigation hints, capability panel
-- default OpenTUI shell with multiline composer, command/skill/model/effort overlays, bounded transcript blocks, collapsible trace blocks, foreground approval panel, capped warning lane, action ladder, pilot override row, split memory summary, MCP/LSP panels, clipboard text paste, edit-tool diff previews, mouse wheel transcript scroll, and OSC52 selected-block copy feedback
+- default OpenTUI shell with multiline composer, command/skill/model/effort overlays, bounded transcript blocks, collapsible trace blocks, foreground approval panel, capped warning lane, action ladder, pilot override row, split memory summary, MCP/LSP panels, interactive config side window, clipboard text paste, edit-tool diff previews, mouse wheel transcript scroll, and OSC52 selected-block copy feedback
 
 ## Canonical Docs
 

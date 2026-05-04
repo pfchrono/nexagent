@@ -1,6 +1,7 @@
 import { freemem, totalmem } from "node:os";
 
 import { getCodexModelDefinition } from "../models.js";
+import { getLspStatus } from "../runtime/lsp.js";
 import { deriveTurnCompletionState, getRemainingContextTokens, type RuntimeSession } from "../runtime/session.js";
 
 const OPEN_BY_DEFAULT_LINE_CAP = 30;
@@ -64,6 +65,14 @@ export interface OpenTuiLogoView {
   metadata: string;
 }
 
+export interface OpenTuiLspProblemsView {
+  visible: boolean;
+  count: number;
+  lastTouched: string | null;
+  source: string;
+  rows: string[];
+}
+
 export interface OpenTuiStatuslineView {
   model: string;
   branch: string;
@@ -107,6 +116,7 @@ export interface OpenTuiRuntimeView {
   traceBlocks: OpenTuiTranscriptBlock[];
   cockpit: OpenTuiCockpitView;
   configSections: OpenTuiConfigSectionView[];
+  lspProblems: OpenTuiLspProblemsView;
   logo: OpenTuiLogoView;
   statusline: OpenTuiStatuslineView;
 }
@@ -157,6 +167,7 @@ export function createOpenTuiRuntimeView(session: RuntimeSession): OpenTuiRuntim
     traceBlocks,
     cockpit,
     configSections: createConfigSections(session),
+    lspProblems: createLspProblemsView(session),
     logo,
     statusline,
   };
@@ -209,11 +220,10 @@ function createConfigSections(session: RuntimeSession): OpenTuiConfigSectionView
   if (skippedMcpServers.length > 0) {
     mcpRows.push(`skipped ${skippedMcpServers.map((status) => status.name).join(", ")}`);
   }
-  const lspEnabled = session.lsp?.enabled === true;
-  const lspConfigured = Boolean(session.lsp?.command);
-  const lspStatus = lspEnabled
-    ? lspConfigured ? "ready to start" : "enabled but missing command"
-    : lspConfigured ? "configured but disabled" : "disabled by default";
+  const lsp = getLspStatus(session);
+  const lspState = lsp.enabled
+    ? lsp.available ? "ready" : "fallback"
+    : "disabled";
   return [
     {
       title: "provider",
@@ -246,9 +256,13 @@ function createConfigSections(session: RuntimeSession): OpenTuiConfigSectionView
     {
       title: "lsp",
       rows: [
-        `status ${lspStatus}`,
-        `enabled ${lspEnabled ? "on" : "off"}`,
-        `configured ${lspConfigured ? "yes" : "no"}`,
+        `status ${lspState}`,
+        `enabled ${lsp.enabled ? "on" : "off"}`,
+        `configured ${lsp.configured ? "yes" : "no"}`,
+        `command ${lsp.command ?? "none"}`,
+        `source ${lsp.source}`,
+        `problems ${String(lsp.problemCount)}`,
+        `lastTouched ${lsp.lastTouchedPath ?? "none"}`,
         `indexArchivist ${session.lsp?.indexArchivist === true ? "on" : "off"}`,
       ],
     },
@@ -260,6 +274,27 @@ function createConfigSections(session: RuntimeSession): OpenTuiConfigSectionView
       ],
     },
   ];
+}
+
+function createLspProblemsView(session: RuntimeSession): OpenTuiLspProblemsView {
+  const lsp = getLspStatus(session);
+  const visible = lsp.enabled && lsp.problemCount > 0;
+  const lastTouched = lsp.lastTouchedPath ?? null;
+  const rows = visible
+    ? [
+      "Problems",
+      `${String(lsp.problemCount)} issue${lsp.problemCount === 1 ? "" : "s"}`,
+      lastTouched ? `last ${lastTouched}` : "last none",
+      lastTouched ? `/lsp diagnostics ${lastTouched}` : "/lsp workspace",
+    ]
+    : [];
+  return {
+    visible,
+    count: lsp.problemCount,
+    lastTouched,
+    source: lsp.source,
+    rows,
+  };
 }
 
 export function createLocalOutputBlock(
@@ -282,6 +317,9 @@ function isTranscriptEvent(event: RuntimeSession["events"][number]): boolean {
   }
   if (event.kind === "provider") {
     return event.status === "failed" || event.status === "blocked" || event.status === "canceled";
+  }
+  if (event.kind === "control" && isTurnIntentEvent(event)) {
+    return true;
   }
   if (event.kind === "control" && (isDiagnosticControlEvent(event.summary) || isTraceOnlyControlEvent(event.summary))) {
     return false;
@@ -333,11 +371,12 @@ function createTranscriptBlocks(session: RuntimeSession): OpenTuiTranscriptBlock
       if (event.kind === "assistant") {
         const conversationTurn = conversationAssistants[assistantIndex];
         assistantIndex += 1;
+        const assistantText = sanitizeAssistantTranscriptText(conversationTurn?.content ?? event.detail ?? event.summary);
         return [createBlock({
           id: `event-assistant-${String(index)}-${event.at}`,
           kind: "assistant",
           label: "agent",
-          lines: splitTranscriptLines(conversationTurn?.content ?? event.detail ?? event.summary),
+          lines: splitTranscriptLines(assistantText),
           collapsedByDefault: false,
         })];
       }
@@ -366,7 +405,7 @@ function createTranscriptBlocks(session: RuntimeSession): OpenTuiTranscriptBlock
           kind: "system",
           label: formatRuntimeTranscriptLabel(event),
           lines: formatRuntimeMessageLines(event),
-          collapsedByDefault: true,
+          collapsedByDefault: !isTurnIntentEvent(event),
         })];
       }
       return [];
@@ -634,10 +673,17 @@ function isTraceOnlyControlEvent(summary: string): boolean {
 }
 
 function isUserFacingControlEvent(event: RuntimeSession["events"][number]): boolean {
+  if (isTurnIntentEvent(event)) {
+    return true;
+  }
   if (event.status !== "completed" && event.status !== "failed" && event.status !== "blocked" && event.status !== "canceled") {
     return false;
   }
   return /\b(?:turn run|turn completed|turn canceled|request cancel|operation canceled)\b/i.test(event.summary);
+}
+
+function isTurnIntentEvent(event: RuntimeSession["events"][number]): boolean {
+  return event.kind === "control" && event.status === "started" && event.summary === "turn intent";
 }
 
 function formatRuntimeTranscriptLabel(event: RuntimeSession["events"][number]): string {
@@ -649,6 +695,9 @@ function formatRuntimeTranscriptLabel(event: RuntimeSession["events"][number]): 
   }
   if (event.kind === "control" && /\bturn run\b/i.test(event.summary)) {
     return event.status === "completed" ? "turn complete" : `turn ${event.status}`;
+  }
+  if (isTurnIntentEvent(event)) {
+    return "agent";
   }
   return `${event.kind} ${event.status}`;
 }
@@ -828,6 +877,9 @@ function readMetricValue(detail: string, key: "duration" | "in" | "out" | "turn_
 function formatRuntimeMessageLines(event: RuntimeSession["events"][number]): string[] {
   const metrics = event.detail ? formatMetricBadge(event.detail) : "";
   const label = formatRuntimeTranscriptLabel(event);
+  if (isTurnIntentEvent(event)) {
+    return splitTranscriptLines(event.detail ?? event.summary);
+  }
   const summary = event.kind === "control" && /\bturn run\b/i.test(event.summary)
     ? label
     : firstLine(event.summary);
@@ -858,4 +910,23 @@ function splitTranscriptLines(value: string): string[] {
     .split(/\r?\n/)
     .map((line) => line.trimEnd())
     .filter((line) => line.trim().length > 0);
+}
+
+function sanitizeAssistantTranscriptText(value: string): string {
+  return value
+    .replace(/<\s*(?:nexagent_)?tool_call\b[^>]*>([\s\S]*?)<\/\s*(?:nexagent_)?tool_call\s*>/gi, (_match, body: string) => {
+      const toolName = extractToolNameFromToolCallBody(String(body));
+      return `[tool call hidden${toolName ? `: ${toolName}` : ""}]`;
+    })
+    .replace(/<\s*\/?\s*(?:nexagent_)?tool_call\b[^>]*>/gi, "[tool call hidden]");
+}
+
+function extractToolNameFromToolCallBody(body: string): string | null {
+  try {
+    const parsed = JSON.parse(body.trim()) as { name?: unknown };
+    return typeof parsed.name === "string" && parsed.name.trim() ? parsed.name.trim() : null;
+  } catch {
+    const match = body.match(/"name"\s*:\s*"([^"]+)"/);
+    return match?.[1] ?? null;
+  }
 }

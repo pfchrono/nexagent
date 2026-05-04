@@ -406,6 +406,13 @@ function createSession(provider = "codex"): RuntimeSession {
       steerState: null,
       lastAppliedSteer: null,
       steerHistory: [],
+      boomerang: {
+        active: false,
+        task: null,
+        startConversationIndex: 0,
+        startEventIndex: 0,
+        lastSummary: null,
+      },
     },
     conversation: [],
     compaction: {
@@ -477,9 +484,10 @@ test("runRuntimeCommand exposes command catalog through help", async () => {
     "/quit - exit interactive TTY session",
     "/provider [status|name|transport ...] [--verbose] - show or switch provider and transport mode",
     "/skill [name] [args...] - list skills or resolve and route a skill by name",
+    "/boomerang <task> | /boomerang status | /boomerang cancel - run autonomous task then compact turn into handoff summary",
     "/mouse [status|mode <auto|scroll|select>] - show or set transcript mouse interaction mode",
     "/config [status] | /config [set] <logo|lsp|lsp-index> <value> - inspect or mutate persisted runtime configuration",
-    "/lsp [status|mode <on|off>|symbols <path>|diagnostics <path>] - inspect disabled-by-default local LSP code intelligence",
+    "/lsp [status|setup|mode <on|off>|symbols <path>|diagnostics <path>|check [path]] - inspect enabled local LSP code intelligence with bounded fallback",
     "/memory [status|--verbose|--maintenance|save <text>|checkpoint [reason]|session [focus]] - inspect, maintain, or persist archivist memory/checkpoints",
     "/attach <image-path> - attach local image for next prompt (http transports only)",
     "/detach - clear queued image attachment",
@@ -489,6 +497,82 @@ test("runRuntimeCommand exposes command catalog through help", async () => {
     assert.ok(outputLines.includes(line), `${line} missing`);
   }
   assert.equal(result?.activity, "help");
+});
+
+test("runRuntimeCommand queues boomerang autonomous task", async () => {
+  const { runRuntimeCommand } = await import("../src/cli.js");
+  const session = createSession();
+
+  const result = runRuntimeCommand(session, "/boomerang improve diagnostics");
+
+  assert.equal(result?.ok, true);
+  assert.equal(result?.autoInvokeAfterSkill, true);
+  assert.match(result?.invokePrompt ?? "", /BOOMERANG MODE ACTIVE/);
+  assert.match(result?.invokePrompt ?? "", /Task:\nimprove diagnostics/);
+  assert.equal(result?.transcriptPrompt, "/boomerang improve diagnostics");
+  assert.equal(result?.promptSummary, "boomerang task accepted");
+  assert.equal(session.operationControls.boomerang.active, true);
+  assert.equal(session.operationControls.boomerang.task, "improve diagnostics");
+
+  const status = runRuntimeCommand(session, "/boomerang status");
+  assert.equal(status?.ok, true);
+  assert.match(status?.output ?? "", /active: true/);
+});
+
+test("boomerang completion compacts turn and seeds archivist memory", async () => {
+  const { beginBoomerang, completeBoomerang } = await import("../src/runtime/boomerang.js");
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-boomerang-"));
+  const session = createSession();
+  session.cwd = cwd;
+  session.repo.root = cwd;
+  session.archivist.enabled = true;
+  session.archivist.storagePath = path.join(cwd, ".nexagent", "archivist.json");
+
+  try {
+    beginBoomerang(session, "fix parser");
+    session.events.push(
+      {
+        at: "2025-01-01T00:00:00.000Z",
+        kind: "tool",
+        status: "completed",
+        summary: "tool read_file completed",
+        detail: "read-only; args={\"path\":\"src/parser.ts\"}; duration=0.01s",
+      },
+      {
+        at: "2025-01-01T00:00:01.000Z",
+        kind: "tool",
+        status: "completed",
+        summary: "tool apply_patch completed",
+        detail: "guarded; args={\"path\":\"src/parser.ts\"}; duration=0.02s",
+      },
+    );
+    session.conversation.push(
+      { role: "user", content: "raw boomerang prompt", tokens: 4 },
+      { role: "assistant", content: "Parser fixed.", tokens: 3 },
+    );
+
+    const summary = completeBoomerang(session, "Parser fixed.");
+
+    assert.match(summary ?? "", /\[BOOMERANG COMPLETE\]/);
+    assert.match(summary ?? "", /Changed Files:\n- src\/parser\.ts/);
+    assert.match(summary ?? "", /Relevant Reads:\n- src\/parser\.ts/);
+    assert.match(summary ?? "", /Archivist: saved boomerang handoff/);
+    assert.equal(session.operationControls.boomerang.active, false);
+    assert.equal(session.conversation.length, 2);
+    assert.equal(session.conversation[0]?.content, "/boomerang fix parser");
+    assert.match(session.conversation[1]?.content ?? "", /Parser fixed/);
+
+    const rawStore = JSON.parse(await readFile(session.archivist.storagePath, "utf8")) as {
+      entries: Array<{ type: string; sourceCategory: string; tags: string[]; content: string }>;
+    };
+    assert.equal(rawStore.entries.length, 1);
+    assert.equal(rawStore.entries[0]?.type, "boomerang-handoff");
+    assert.equal(rawStore.entries[0]?.sourceCategory, "boomerang-handoff");
+    assert.ok(rawStore.entries[0]?.tags.includes("reseed"));
+    assert.match(rawStore.entries[0]?.content ?? "", /fix parser/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
 });
 
 test("runRuntimeCommand exposes and persists config and LSP settings", async () => {
@@ -532,7 +616,12 @@ test("runRuntimeCommand exposes and persists config and LSP settings", async () 
     const lspStatus = runRuntimeCommand(session, "/lsp");
     assert.equal(lspStatus?.ok, true);
     assert.match(lspStatus?.output ?? "", /^enabled: true$/m);
-    assert.match(lspStatus?.output ?? "", /no language server command configured/);
+    assert.match(lspStatus?.output ?? "", /^command: typescript-language-server$/m);
+
+    const lspSetup = runRuntimeCommand(session, "/lsp setup");
+    assert.equal(lspSetup?.ok, true);
+    assert.match(lspSetup?.output ?? "", /^lsp setup$/m);
+    assert.match(lspSetup?.output ?? "", /safety: no auto-download/);
 
     const persisted = await loadPersistedRuntimeState(cwd);
     assert.equal(persisted?.ui?.logoMode, "full");
@@ -565,6 +654,16 @@ test("runRuntimeCommand exposes LSP symbol and diagnostic slash commands", async
       "export function alpha() {}\n// TODO tighten diagnostics\nexport class Beta {}\n",
       "utf8",
     );
+    await writeFile(
+      path.join(cwd, "src", "regex.ts"),
+      "const pattern = /\\bTODO\\b|\\bFIXME\\b|eslint-disable|@ts-ignore/;\n",
+      "utf8",
+    );
+    await writeFile(
+      path.join(cwd, "src", "large.ts"),
+      `${"export const value = 1;\n".repeat(4000)}const code = \`\n`,
+      "utf8",
+    );
     const session = createSession();
     session.cwd = cwd;
     session.repo.root = cwd;
@@ -580,6 +679,12 @@ test("runRuntimeCommand exposes LSP symbol and diagnostic slash commands", async
     assert.equal(diagnostics?.ok, true);
     assert.match(diagnostics?.output ?? "", /^lsp diagnostics$/m);
     assert.match(diagnostics?.output ?? "", /TODO tighten diagnostics/);
+
+    const workspace = runRuntimeCommand(session, "/lsp check src");
+    assert.equal(workspace?.ok, true);
+    assert.match(workspace?.output ?? "", /^lsp workspace$/m);
+    assert.match(workspace?.output ?? "", /^problems: 1$/m);
+    assert.match(workspace?.output ?? "", /src\/sample\.ts:2 info \/\/ TODO tighten diagnostics/);
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }
@@ -674,6 +779,31 @@ test("runRuntimeCommand reports runtime status and style stack", async () => {
   const missingSentry = runRuntimeCommand(session, "/status --send-test-event");
   assert.equal(missingSentry?.ok, false);
   assert.match(missingSentry?.message ?? "", /usage: \/status/);
+});
+
+test("runRuntimeCommand reports doctor health with next actions", async () => {
+  const { runRuntimeCommand } = await import("../src/cli.js");
+  const session = createSession();
+  session.auth.loggedIn = false;
+  session.auth.status = "login missing";
+  session.operationControls.lastShellBlocker = {
+    command: "rm -rf notes.txt",
+    pattern: "\\brm\\s+-rf\\b",
+    reason: "recursive remove is destructive",
+    matchedText: "rm -rf",
+    source: "shell_command",
+    advice: "Use guarded file tools for scoped edits.",
+  };
+
+  const result = runRuntimeCommand(session, "/doctor");
+
+  assert.equal(result?.ok, true);
+  assert.match(result?.output ?? "", /^doctor$/m);
+  assert.match(result?.output ?? "", /status: attention/);
+  assert.match(result?.output ?? "", /provider auth not ready/);
+  assert.match(result?.output ?? "", /recent shell command blocked/);
+  assert.match(result?.output ?? "", /\/login/);
+  assert.match(result?.output ?? "", /\/why-blocked/);
 });
 
 test("formatRuntimeStatus compact includes turn state/objective/blocker", async () => {
@@ -1098,7 +1228,15 @@ test("runRuntimeCommand supports local tool commands", async () => {
 
     const blockedShell = runRuntimeCommand(session, "!rm -rf notes.txt");
     assert.equal(blockedShell?.ok, false);
-    assert.match(blockedShell?.message ?? "", /shell policy blocked command; destructive pattern matched/);
+    assert.match(blockedShell?.message ?? "", /shell policy blocked command/);
+    assert.match(blockedShell?.message ?? "", /reason: recursive remove is destructive/);
+    assert.equal(blockedShell?.activity, "command blocked · shell policy");
+
+    const whyBlocked = runRuntimeCommand(session, "/why-blocked");
+    assert.equal(whyBlocked?.ok, true);
+    assert.match(whyBlocked?.output ?? "", /lastShellBlocker/);
+    assert.match(whyBlocked?.output ?? "", /reason: recursive remove is destructive/);
+    assert.match(whyBlocked?.output ?? "", /command: rm -rf notes\.txt/);
 
     assert.deepEqual(runRuntimeCommand(session, "/hooks"), {
       ok: true,

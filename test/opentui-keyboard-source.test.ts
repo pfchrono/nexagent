@@ -153,6 +153,60 @@ test("OpenTUI renderer key source normalizes Ctrl+G and Ctrl+V variants", () => 
   source.dispose();
 });
 
+test("OpenTUI renderer key source treats control-code sequences as ctrl", () => {
+  const keyInput = new EventEmitter();
+  const source = createOpenTuiKeyboardSource({
+    on(event, handler) {
+      keyInput.on(event, handler);
+    },
+    off(event, handler) {
+      keyInput.off(event, handler);
+    },
+  });
+  const captured: Array<[string, boolean, string]> = [];
+
+  const unsubscribe = source.subscribe((event) => captured.push([event.name, event.ctrl, event.sequence]));
+  keyInput.emit("keypress", {
+    name: "g",
+    ctrl: false,
+    meta: false,
+    shift: false,
+    option: false,
+    sequence: "\x07",
+  });
+
+  assert.deepEqual(captured, [["g", true, "\x07"]]);
+  unsubscribe();
+  source.dispose();
+});
+
+test("OpenTUI renderer key source normalizes Ctrl+C variants", () => {
+  const keyInput = new EventEmitter();
+  const source = createOpenTuiKeyboardSource({
+    on(event, handler) {
+      keyInput.on(event, handler);
+    },
+    off(event, handler) {
+      keyInput.off(event, handler);
+    },
+  });
+  const captured: Array<[string, boolean]> = [];
+
+  const unsubscribe = source.subscribe((event) => captured.push([event.name, event.ctrl]));
+  keyInput.emit("keypress", {
+    name: "ctrl+c",
+    ctrl: false,
+    meta: false,
+    shift: false,
+    option: false,
+    sequence: "\x03",
+  });
+
+  assert.deepEqual(captured, [["c", true]]);
+  unsubscribe();
+  source.dispose();
+});
+
 test("OpenTUI renderer key source can fall back to raw stdin for startup keys", () => {
   const keyInput = new EventEmitter();
   const rawInput = new EventEmitter();

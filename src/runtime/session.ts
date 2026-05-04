@@ -86,6 +86,23 @@ export interface RuntimeApprovalRequest {
   summary: string;
 }
 
+export interface RuntimeShellBlockReport {
+  command: string;
+  pattern: string;
+  reason: string;
+  matchedText: string | null;
+  source: string;
+  advice: string;
+}
+
+export interface RuntimeBoomerangState {
+  active: boolean;
+  task: string | null;
+  startConversationIndex: number;
+  startEventIndex: number;
+  lastSummary: string | null;
+}
+
 export interface RuntimeOperationControlsState {
   requireApprovalForGuarded: boolean;
   yoloMode: boolean;
@@ -97,6 +114,8 @@ export interface RuntimeOperationControlsState {
   steerState: RuntimeSteerStatus | null;
   lastAppliedSteer: string | null;
   steerHistory: RuntimeSteerHistoryEntry[];
+  lastShellBlocker: RuntimeShellBlockReport | null;
+  boomerang: RuntimeBoomerangState;
 }
 
 export interface RuntimeSession extends RuntimeState {
@@ -216,6 +235,14 @@ export function createRuntimeOperationControlsState(): RuntimeOperationControlsS
     steerState: null,
     lastAppliedSteer: null,
     steerHistory: [],
+    lastShellBlocker: null,
+    boomerang: {
+      active: false,
+      task: null,
+      startConversationIndex: 0,
+      startEventIndex: 0,
+      lastSummary: null,
+    },
   };
 }
 

@@ -1,4 +1,4 @@
-import { flushSync, useTerminalDimensions } from "@opentui/react";
+import { flushSync, useRenderer, useTerminalDimensions } from "@opentui/react";
 import { execFileSync } from "node:child_process";
 import { useEffect, useRef, useState } from "react";
 
@@ -12,8 +12,10 @@ import {
   type RuntimeCommandResult,
 } from "../cli.js";
 import { executeProviderRequest, type ImageAttachment } from "../provider.js";
+import { cancelBoomerang, completeBoomerang } from "../runtime/boomerang.js";
 import { checkpointNexsightSession } from "../runtime/nexsight.js";
 import type { RuntimeSession } from "../runtime/session.js";
+import { formatTurnStartIntent } from "../runtime/turn-intent.js";
 import {
   maybeCompactConversation,
   recordConversationTurn,
@@ -49,7 +51,7 @@ const SKILL_PREVIEW_PREFIX = "skill:";
 const COMPOSER_CURSOR = "|";
 const ALT_V_UNSUPPORTED_MESSAGE = "No clipboard image found; use /attach <image-path>";
 const CTRL_V_UNSUPPORTED_MESSAGE = "clipboard text unavailable";
-const COPIED_RESULTS_NOTICE = "copied results to clipboard";
+const COPIED_RESULTS_NOTICE = "copied to clipboard";
 const PALETTE_VISIBLE_ROWS = 5;
 const PALETTE_CHROME_ROWS = 5;
 const TRACE_DETAIL_PALETTE_MIN_ROWS = 8;
@@ -60,6 +62,15 @@ const WIDE_COCKPIT_MIN_COLUMNS = 120;
 const IDLE_REFRESH_INTERVAL_MS = 1000;
 const RUNNING_REFRESH_INTERVAL_MS = 80;
 const MOUSE_SCROLL_LINES = 1;
+
+function summarizeBoomerangEvent(summary: string): string {
+  return summary
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(0, 8)
+    .join("\n");
+}
 
 interface OpenTuiMouseLikeEvent {
   type?: string;
@@ -83,6 +94,7 @@ export interface OpenTuiAppProps {
 
 export function OpenTuiApp({ view: initialView, session, keyboardSource, promptHistory = [], onPromptHistoryChange, onExit }: OpenTuiAppProps) {
   const { width, height } = useTerminalDimensions();
+  const renderer = useRenderer();
   const terminalWidth = width > 0 ? width : process.stdout.columns || 80;
   const terminalHeight = height > 0 ? height : process.stdout.rows || 24;
   const contentWidth = Math.max(20, terminalWidth - 2);
@@ -226,6 +238,10 @@ export function OpenTuiApp({ view: initialView, session, keyboardSource, promptH
     }
     if (key.ctrl && key.name === "v") {
       pasteTextFromClipboard();
+      return;
+    }
+    if (key.ctrl && key.name === "c") {
+      copySelectedText();
       return;
     }
     if (key.ctrl && key.name === "y") {
@@ -374,11 +390,16 @@ export function OpenTuiApp({ view: initialView, session, keyboardSource, promptH
   const cockpitRowBudget = showCockpitPanel ? compactCockpitLayout ? 6 : wideCockpitLayout ? 9 : 8 : 0;
   const composerPromptRows = renderComposerPromptRows(composer, contentWidth);
   const composerReservedRows = composerPanelHeight(composerPromptRows.length, Boolean(attachmentLine));
-  const configPanelWidth = Math.min(Math.max(52, Math.floor(contentWidth * 0.76)), Math.max(36, contentWidth - 4));
-  const configPanelLeft = Math.max(0, Math.floor((contentWidth - configPanelWidth) / 2));
+  const configPanelWidth = Math.min(Math.max(52, Math.floor(contentWidth * 0.38)), Math.max(36, contentWidth - 4));
+  const configPanelLeft = Math.max(0, contentWidth - configPanelWidth - 1);
   const configPanelRows = renderConfigPanelRows(view, configPanelWidth, configSelectedIndex);
-  const configPanelHeight = Math.min(Math.max(8, configPanelRows.length), Math.max(8, terminalHeight - composerReservedRows - STATUSLINE_RESERVED_ROWS - 6));
-  const configPanelTop = Math.max(3, Math.floor((terminalHeight - composerReservedRows - STATUSLINE_RESERVED_ROWS - configPanelHeight) / 2));
+  const configPanelHeight = Math.min(Math.max(8, configPanelRows.length), Math.max(8, terminalHeight - composerReservedRows - STATUSLINE_RESERVED_ROWS - 3));
+  const configPanelTop = 2;
+  const lspProblemsPanelWidth = Math.min(Math.max(34, Math.floor(contentWidth * 0.26)), Math.max(28, contentWidth - 4));
+  const lspProblemsPanelRows = renderLspProblemsPanelRows(view, lspProblemsPanelWidth);
+  const lspProblemsPanelHeight = Math.min(Math.max(4, lspProblemsPanelRows.length), 6);
+  const lspProblemsPanelLeft = Math.max(0, contentWidth - lspProblemsPanelWidth - 1);
+  const lspProblemsPanelTop = 2;
   const paletteTop = Math.max(4, terminalHeight - composerReservedRows - STATUSLINE_RESERVED_ROWS - paletteOverlayHeight - 1);
   const traceProgressAllRows = traceExpanded
     ? renderTraceProgressRows(view.traceBlocks, contentWidth)
@@ -442,7 +463,7 @@ export function OpenTuiApp({ view: initialView, session, keyboardSource, promptH
     previewLine,
     statusLine: `${String(terminalWidth)}x${String(terminalHeight)} · ${traceLabel} · ${shellNotice}`,
   });
-  const keyLine = "Keys: ↵ send · Esc clear · Tab complete | 📋 Ctrl+V text · Alt+V image | ↕ history · PgUp/PgDn scroll | ⌘ Ctrl+P cockpit · Ctrl+G config · Ctrl+T trace · Ctrl+Y copy · /quit";
+  const keyLine = "Keys: ↵ send · Esc clear · Tab complete | 📋 Ctrl+V text · Alt+V image | ↕ history · PgUp/PgDn scroll | ⌘ Ctrl+P cockpit · Ctrl+G config · Ctrl+T trace · Ctrl+C copy · Ctrl+Y latest · /quit";
 
   useEffect(() => {
     setTranscriptState((current) => handleOpenTuiTranscriptEvent(current, {
@@ -478,6 +499,25 @@ export function OpenTuiApp({ view: initialView, session, keyboardSource, promptH
               fg={row.fg}
               onMouseUp={row.selectable ? (event) => handleConfigRowClick(row, event) : undefined}
             >{row.text}</text>
+          ))}
+        </box>
+      ) : null}
+      {!configExpanded && view.lspProblems.visible ? (
+        <box
+          flexDirection="column"
+          width={lspProblemsPanelWidth}
+          height={lspProblemsPanelHeight}
+          position="absolute"
+          top={lspProblemsPanelTop}
+          left={lspProblemsPanelLeft + 1}
+          zIndex={88}
+          padding={1}
+          overflow="hidden"
+          shouldFill
+          backgroundColor="#000000"
+        >
+          {lspProblemsPanelRows.slice(0, lspProblemsPanelHeight).map((row) => (
+            <text key={row.key} width={lspProblemsPanelWidth} fg={row.fg}>{row.text}</text>
           ))}
         </box>
       ) : null}
@@ -674,6 +714,12 @@ export function OpenTuiApp({ view: initialView, session, keyboardSource, promptH
 
     const intent = createRuntimeCommandIntent(prompt, skillPreview);
     if (intent.kind === "runtime-command" && session) {
+      const normalizedInput = intent.input.trim().toLowerCase();
+      if (normalizedInput === "/config") {
+        setConfigExpanded(true);
+        setShellNotice("config shown");
+        return;
+      }
       const result = runRuntimeCommand(session, intent.input);
       const autoInvokeAfterSkill = Boolean(result?.ok && result.autoInvokeAfterSkill);
       if (result && !autoInvokeAfterSkill) {
@@ -681,9 +727,10 @@ export function OpenTuiApp({ view: initialView, session, keyboardSource, promptH
       }
       setShellNotice(result ? result.activity : "command routed");
       if (autoInvokeAfterSkill) {
-        void submitProviderPrompt(buildActiveSkillExecutionPrompt(session, intent.input), {
-          transcriptPrompt: formatActiveSkillTranscriptPrompt(session),
-          promptSummary: `active skill ${session.activeSkill?.name ?? "selected"} requested`,
+        const autoInvokeResult = result && result.ok ? result : null;
+        void submitProviderPrompt(autoInvokeResult?.invokePrompt ?? buildActiveSkillExecutionPrompt(session, intent.input), {
+          transcriptPrompt: autoInvokeResult?.transcriptPrompt ?? formatActiveSkillTranscriptPrompt(session),
+          promptSummary: autoInvokeResult?.promptSummary ?? `active skill ${session.activeSkill?.name ?? "selected"} requested`,
         });
         return;
       }
@@ -784,6 +831,12 @@ export function OpenTuiApp({ view: initialView, session, keyboardSource, promptH
       summary: display.promptSummary ?? "user prompt accepted",
       detail: formatPromptEventDetail(display.transcriptPrompt ?? prompt),
     });
+    recordRuntimeEvent(session, {
+      kind: "control",
+      status: "started",
+      summary: "turn intent",
+      detail: formatTurnStartIntent(display.transcriptPrompt ?? prompt),
+    });
     setRuntimeAction(session, "running", "provider request");
     refreshRuntimeView();
     setShellNotice("provider request started");
@@ -806,6 +859,15 @@ export function OpenTuiApp({ view: initialView, session, keyboardSource, promptH
         recordConversationTurn(session, "assistant", result.output);
         recordTurnTelemetry(session, prompt, result.output);
         checkpointNexsightSession(session, "turn");
+        const boomerangSummary = completeBoomerang(session, result.output);
+        if (boomerangSummary) {
+          recordRuntimeEvent(session, {
+            kind: "compact",
+            status: "completed",
+            summary: "boomerang summary captured",
+            detail: summarizeBoomerangEvent(boomerangSummary),
+          });
+        }
         setRuntimeAction(session, "ready", `response received · ${result.provider}`);
         setShellNotice(`response received · ${result.provider}`);
         if (attachmentsForTurn.length > 0) {
@@ -815,6 +877,7 @@ export function OpenTuiApp({ view: initialView, session, keyboardSource, promptH
       }
 
       setRuntimeAction(session, "error", result.message);
+      cancelBoomerang(session);
       recordRuntimeEvent(session, {
         kind: "provider",
         status: "failed",
@@ -834,6 +897,7 @@ export function OpenTuiApp({ view: initialView, session, keyboardSource, promptH
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setRuntimeAction(session, "error", message);
+      cancelBoomerang(session);
       recordRuntimeEvent(session, {
         kind: "provider",
         status: "failed",
@@ -917,8 +981,17 @@ export function OpenTuiApp({ view: initialView, session, keyboardSource, promptH
   function handleConfigRowClick(row: ConfigPanelRow, event: OpenTuiMouseLikeEvent): void {
     const rowIndex = configPanelRows.findIndex((candidate) => candidate.key === row.key);
     if (rowIndex >= 0) {
+      const wasSelected = rowIndex === configSelectedIndex;
       setConfigSelectedIndex(rowIndex);
-      setShellNotice(row.action ? `config action · ${row.action}` : "config selected");
+      if (wasSelected && row.action && session) {
+        const result = runRuntimeCommand(session, row.action);
+        if (result) {
+          recordCommandOutputEvent(row.action, result);
+          setShellNotice(result.activity);
+        }
+      } else {
+        setShellNotice(row.action ? `config action · ${row.action}` : "config selected");
+      }
     }
     event.stopPropagation();
     event.preventDefault();
@@ -1004,15 +1077,14 @@ export function OpenTuiApp({ view: initialView, session, keyboardSource, promptH
     setShellNotice("trace detail scroll");
   }
 
-  function copySelectedTranscriptBlock(): void {
-    const selectedBlock = transcriptBlocks[transcriptState.selectedBlockIndex] ?? transcriptBlocks[transcriptBlocks.length - 1];
-    const text = selectedBlock ? blockTextForCopy(selectedBlock, transcriptState) : "";
+  function copySelectedText(): void {
+    const text = renderer.getSelection()?.getSelectedText() ?? "";
     if (!text.trim()) {
-      setShellNotice("nothing selected to copy");
+      setShellNotice("no text selection");
       return;
     }
-    const copied = copyTextToClipboardOsc52(text);
-    setShellNotice(copied ? COPIED_RESULTS_NOTICE : "copy unavailable");
+    const copied = copyTextToClipboard(text);
+    setShellNotice(copied ? copyNotice(text) : "copy unavailable");
   }
 
   function copyLatestResultBlock(): void {
@@ -1024,8 +1096,8 @@ export function OpenTuiApp({ view: initialView, session, keyboardSource, promptH
       setShellNotice("nothing selected to copy");
       return;
     }
-    const copied = copyTextToClipboardOsc52(text);
-    setShellNotice(copied ? COPIED_RESULTS_NOTICE : "copy unavailable");
+    const copied = copyTextToClipboard(text);
+    setShellNotice(copied ? copyNotice(text) : "copy unavailable");
   }
 }
 
@@ -1379,14 +1451,38 @@ function createTranscriptRenderRow(options: {
   };
 }
 
-function blockTextForCopy(block: OpenTuiTranscriptBlock, state: OpenTuiTranscriptState): string {
-  const expanded = isBlockExpanded(state, block.id, block.collapsedByDefault);
-  const lines = expanded ? block.detailLines : block.summaryLines;
-  return [`${block.label}:`, ...lines].join("\n");
-}
-
 function blockTextForFullCopy(block: OpenTuiTranscriptBlock): string {
   return [`${block.label}:`, ...block.detailLines].join("\n");
+}
+
+function copyNotice(text: string): string {
+  return `${COPIED_RESULTS_NOTICE} (${String(text.length)} chars)`;
+}
+
+function copyTextToClipboard(text: string): boolean {
+  const clipboardCommands: ReadonlyArray<{ cmd: string; args: string[] }> = [
+    { cmd: "pbcopy", args: [] },
+    { cmd: "wl-copy", args: [] },
+    { cmd: "xclip", args: ["-selection", "clipboard"] },
+    { cmd: "xsel", args: ["--clipboard", "--input"] },
+    { cmd: "powershell.exe", args: ["-NoProfile", "-Command", "Set-Clipboard -Value ([Console]::In.ReadToEnd())"] },
+  ];
+
+  for (const candidate of clipboardCommands) {
+    try {
+      execFileSync(candidate.cmd, candidate.args, {
+        input: text,
+        encoding: "utf8",
+        stdio: ["pipe", "ignore", "ignore"],
+        timeout: 1000,
+      });
+      return true;
+    } catch {
+      // Try next clipboard transport.
+    }
+  }
+
+  return copyTextToClipboardOsc52(text);
 }
 
 function copyTextToClipboardOsc52(text: string): boolean {
@@ -1778,6 +1874,19 @@ function renderConfigPanelRows(view: OpenTuiRuntimeView, width: number, selected
   }
   rows.push({ key: "config-bottom", text: frameBottom(innerWidth), fg: "#f9e2af" });
   return rows.map((row) => ({ ...row, text: fitFrameLine(row.text, width) }));
+}
+
+function renderLspProblemsPanelRows(view: OpenTuiRuntimeView, width: number): Array<{ key: string; text: string; fg: string }> {
+  if (!view.lspProblems.visible) {
+    return [];
+  }
+  const [title = "Problems", count = "", last = "", action = ""] = view.lspProblems.rows;
+  return [
+    { key: "lsp-problems-title", text: fitLine(`! ${title}`, width), fg: "#f9e2af" },
+    { key: "lsp-problems-count", text: fitLine(count, width), fg: "#f38ba8" },
+    { key: "lsp-problems-last", text: fitLine(last, width), fg: "#cdd6f4" },
+    { key: "lsp-problems-action", text: fitLine(action, width), fg: "#89b4fa" },
+  ];
 }
 
 function configActionForRow(section: string, line: string): string | null {

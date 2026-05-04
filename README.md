@@ -16,7 +16,7 @@ Terminal-first AI coding harness for local operator-driven development.
 - Exposes guarded internal tools for repo reads, writes, diffs, searches, shell commands, and Archivist memory.
 - Exposes Nexsight tools for bounded code/data execution, local indexing, and context search with SQLite FTS when available.
 - Provides guarded web fetch/search and batch edit helpers for research and multi-file patch workflows.
-- Provides slash commands for status, provider/model/effort control, tools, memory, config, LSP, skill routing, mouse behavior, approvals, compaction, file reads/searches, diffs, and image attachments.
+- Provides slash commands for status, provider/model/effort control, tools, memory, config, LSP, skill routing, boomerang autonomous task handoffs, mouse behavior, approvals, compaction, file reads/searches, diffs, and image attachments.
 - Hydrates stdio MCP servers at startup from `.nexagent/mcp.json` or legacy `.mcp.json`, with per-server startup timeouts and deduped server selection.
 - Supports `$skill` shorthand for skill routing.
 - Supports `!<command>` for guarded shell command transcript output.
@@ -257,12 +257,16 @@ Inside TUI:
 - `/tools nexsight` — Nexsight store/status helpers
 - `/memory` — Archivist memory status, safe signal counters, and commands
 - `/memory --maintenance` — merge duplicate Archivist entries into recurrence records and refresh memory diagnostics
-- `/config` — inspect runtime config status for provider, UI, memory, LSP, and diagnostics
+- `/config` — open the interactive OpenTUI config side window; `/config status` prints provider, UI, memory, LSP, and diagnostics status
 - `/config [set] logo <full|condensed|off>` — persist startup logo mode
-- `/config [set] lsp <on|off>` and `/config [set] lsp-index <on|off>` — persist disabled-by-default LSP/code-intel toggles
-- `/lsp` — inspect local LSP status; disabled by default and never auto-downloads language servers
-- `/lsp symbols <path>` and `/lsp diagnostics <path>` — summarize local code intelligence for one path when LSP is configured
+- `/config [set] lsp <on|off>` and `/config [set] lsp-index <on|off>` — persist LSP/code-intel toggles
+- `/lsp` — inspect local LSP status; enabled by default with no auto-downloads and bounded TypeScript/static fallback
+- `/lsp setup` — show configured LSP command, resolved binary path, readiness, and install hint
+- `/lsp symbols <path>` and `/lsp diagnostics <path>` — summarize local code intelligence for one project path
+- `/lsp check [path]` — bounded workspace/file diagnostics scan that updates LSP problem cache shown in `/config`
 - `/skill` — list or route skills
+- `/boomerang <task>` — run an autonomous task, compact the turn into a handoff summary, and seed Archivist when memory is enabled
+- `/boomerang status` and `/boomerang cancel` — inspect or cancel active boomerang mode
 - `/attach <image-path>` — queue image attachment for HTTP transports
 - `/detach` — clear queued image attachments
 - `/mouse` — mouse mode status/config
@@ -271,7 +275,7 @@ Inside TUI:
 - `/diff`, `/rg`, `/find`, `/read`, `/ls`, `/pwd` — repo-local utility commands
 - `!<command>` — guarded shell command transcript output
 
-Roadmap notes for the full interactive config menu and real LSP manager live in `docs/config-menu-plan.md` and `docs/lsp-integration-plan.md`.
+Roadmap notes for deeper config/LSP work live in `docs/config-menu-plan.md` and `docs/lsp-integration-plan.md`.
 
 ## Nexsight
 

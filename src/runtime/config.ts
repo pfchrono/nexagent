@@ -754,9 +754,9 @@ function mergeUiSettings(resolved?: Partial<UiConfig>, source?: Partial<UiConfig
 
 function resolveLspConfig(settings?: Partial<LspConfig>): LspConfig {
   return {
-    enabled: settings?.enabled === true,
-    command: typeof settings?.command === "string" && settings.command.trim().length > 0 ? settings.command.trim() : null,
-    args: Array.isArray(settings?.args) ? settings.args.filter((arg): arg is string => typeof arg === "string").slice(0, 20) : [],
+    enabled: settings?.enabled ?? true,
+    command: typeof settings?.command === "string" && settings.command.trim().length > 0 ? settings.command.trim() : "typescript-language-server",
+    args: Array.isArray(settings?.args) ? settings.args.filter((arg): arg is string => typeof arg === "string").slice(0, 20) : ["--stdio"],
     indexArchivist: settings?.indexArchivist === true,
   };
 }

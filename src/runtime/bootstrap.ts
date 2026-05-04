@@ -166,9 +166,9 @@ function normalizeMcpRegistry(mcp: McpRegistrySummary): McpRegistrySummary {
 
 function createRuntimeLspState(runtime: RuntimeBootstrap): RuntimeState["lsp"] {
   const configured = runtime.config.lsp ?? {
-    enabled: false,
-    command: null,
-    args: [],
+    enabled: true,
+    command: "typescript-language-server",
+    args: ["--stdio"],
     indexArchivist: false,
   };
   return {

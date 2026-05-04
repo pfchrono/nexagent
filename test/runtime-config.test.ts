@@ -598,6 +598,22 @@ function respond(id, result) {
   }
 });
 
+test("loadMcpRegistrySummary validates MCP config shape", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-mcp-invalid-"));
+  const configPath = path.join(cwd, "mcp.json");
+
+  try {
+    await writeFile(configPath, '{"mcpServers":{"bad":{"args":"not-array"}}}\n', "utf8");
+
+    await assert.rejects(
+      () => loadMcpRegistrySummary(configPath),
+      /invalid MCP config .*mcpServers\.bad\.args/,
+    );
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test("loadMcpRegistrySummary expands MCP env placeholders from repo dotenv", async () => {
   const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-mcp-env-"));
   const serverPath = path.join(cwd, "mcp-server.mjs");
@@ -848,14 +864,14 @@ test("createRuntimeState exposes discovered instruction sources", () => {
       instructionSources,
       promptV2Summary: {
         assembly: "v2",
-        count: 60,
+        count: 63,
         stableSections: "identity, execution_contract, tool_routing, editing_safety, provider_guidance",
         dynamicSections: "repo_context, runtime_state",
         dynamicBoundary: "__NEXAGENT_PROMPT_DYNAMIC_BOUNDARY__",
         identity:
           "You are nexagent, a local terminal-first software engineering agent. | Primary job: complete repo-aware engineering work with tools, evidence, and verification; do not merely describe future work. | Repo-local instructions, skills, modes, and donor references are context overlays; direct user intent and core execution contract still control behavior.",
         executionContract:
-          "Actionable request means act in this turn: inspect, edit, run, verify, or report a real blocker. | Operate loop: understand goal, inspect state, choose best tool, execute, observe, recover from failures, verify, then answer with evidence. | Default to action for coding, debugging, testing, docs, repo inspection, and verification. Discuss only when user explicitly asks to brainstorm, compare, pla... | Do not end with a plan, promise, apology, self-correction, or ask-for-approval loop when tools can make progress. | Continue until task is done, verified, or genuinely blocked by missing access, approval gate, or unavailable external dependency. | When user says ok, yes, do that, same, continue, proceed, go ahead, start, finish, test, debug, implement, verify, or next, execute the most recent actionabl... | If user approves a sequence or asks for a no-hand-holding run, treat that as authorization to execute the sequence without asking for another target. | Do not ask user to say proceed, confirm, or continue after they gave a concrete task; execute or report the real blocker. | If user names a flow or goal without an exact file/script/test target, inspect repo state, choose the nearest representative target, and state the choice wit... | A missing user-selected target is not a blocker when repo evidence can identify scripts, tests, docs, or files to exercise. | Failed tool result means diagnose and vary path, query, command, or tool before stopping. | If a needed tool is unavailable, search repo-local scripts, node_modules/.bin, local user bins, MCP/tool registries, or current docs; install project-local d... | Final answer needs completed current-turn evidence or a named blocker. | Never claim file, test, tool, GSD, MCP, Nexsight, or runtime state without current-turn evidence.",
+          "Actionable request means act in this turn: inspect, edit, run, verify, or report a real blocker. | Operate loop: understand goal, inspect state, choose best tool, execute, observe, recover from failures, verify, then answer with evidence. | At turn start, the harness may display a short Attempting line. Treat it as orientation; do not repeat it unless useful. | Default to action for coding, debugging, testing, docs, repo inspection, and verification. Discuss only when user explicitly asks to brainstorm, compare, pla... | Do not end with a plan, promise, apology, self-correction, or ask-for-approval loop when tools can make progress. | Continue until task is done, verified, or genuinely blocked by missing access, approval gate, or unavailable external dependency. | When user says ok, yes, do that, same, continue, proceed, go ahead, start, finish, test, debug, implement, verify, or next, execute the most recent actionabl... | If user approves a sequence or asks for a no-hand-holding run, treat that as authorization to execute the sequence without asking for another target. | Do not ask user to say proceed, confirm, or continue after they gave a concrete task; execute or report the real blocker. | If user names a flow or goal without an exact file/script/test target, inspect repo state, choose the nearest representative target, and state the choice wit... | A missing user-selected target is not a blocker when repo evidence can identify scripts, tests, docs, or files to exercise. | Failed tool result means diagnose and vary path, query, command, or tool before stopping. | If a needed tool is unavailable, search repo-local scripts, node_modules/.bin, local user bins, MCP/tool registries, or current docs; install project-local d... | Final answer needs completed current-turn evidence or a named blocker, but keep it human-readable and compact. | Default final style: one short sentence for what changed, one short verification line if checks ran, one blocker line only if blocked. | Avoid long observed/verified/completed-evidence ledgers in chat unless user explicitly asks for audit detail or the artifact itself requires it. | Never claim file, test, tool, GSD, MCP, Nexsight, or runtime state without current-turn evidence.",
         toolRouting:
           "Use dedicated internal tools before generic shell when available. | Broad repo map/count/parse/compare/summarize -> nexsight_execute, nexsight_batch, nexsight_index, nexsight_search. | Use Nexsight like context-mode: run bounded code that prints distilled findings, index/search when useful, then answer from processed stdout/excerpts instead... | Nexsight execute rule: pass executable code or command plus reason when useful; do not pass only a natural-language task. | Nexsight result handling: parse stdout/stderr/envelopes, extract useful payload, cite source labels or paths, and run a narrower follow-up query when output ... | Exact small file read for editing or exact content -> read_file. | Exact symbol/text search -> search_content, search_files, or nexsight_search. | Precise edits -> apply_patch after reading target context. | Generated whole file -> write_file. | Multi-file mechanical edit -> batch_edit or Nexsight-assisted patch with validated insertion points. | Tests/build/git/local binaries -> shell_command. | Current web docs/URLs/facts -> web_fetch/web_search or relevant MCP docs tool. | Durable user/project fact -> archivist_save or archivist_checkpoint. | If stronger task-specific tool exists, use it before generic shell/listing. | If tool schema mismatch happens, correct call shape immediately and retry once.",
         editingSafety:
@@ -889,9 +905,9 @@ test("createRuntimeState exposes discovered instruction sources", () => {
         },
       },
       lsp: {
-        enabled: false,
-        command: null,
-        args: [],
+        enabled: true,
+        command: "typescript-language-server",
+        args: ["--stdio"],
         indexArchivist: false,
       },
       ui: {
@@ -1607,7 +1623,7 @@ test("runtime session starts fresh even when legacy persisted telemetry exists",
           retrieval: { used: false, sourceCategory: null, matchCount: 0, preview: null },
           writes: { used: false, action: null, sourceCategory: null, savedAt: null, entryCount: 0, preview: null },
         },
-        lsp: { enabled: false, command: null, args: [], indexArchivist: false },
+        lsp: { enabled: true, command: "typescript-language-server", args: ["--stdio"], indexArchivist: false },
         ui: { logoMode: "full" },
         repo: {
           root: cwd,

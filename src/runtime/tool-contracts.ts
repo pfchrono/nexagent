@@ -183,7 +183,7 @@ const TOOL_CONTRACTS: Record<InternalToolName, ToolContract> = {
   lsp_status: {
     name: "lsp_status",
     displayName: "lsp_status",
-    summary: "Report disabled-by-default LSP service status.",
+    summary: "Report enabled local LSP service status with bounded fallback.",
     evidence: "code-intel",
     writes: false,
     nexsight: false,

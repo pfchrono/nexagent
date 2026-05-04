@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -7,6 +7,7 @@ import test from "node:test";
 import { createDefaultProviderRegistry } from "../src/provider/registry.js";
 import { applyArchivistRetrieval, rememberArchivistFailure } from "../src/runtime/archivist.js";
 import { resolveNexsightRuntime } from "../src/runtime/nexsight.js";
+import { analyzeBlockedShellCommand } from "../src/runtime/policy.js";
 import { classifyInternalToolRisk, executeInternalTool, executeInternalToolAsync } from "../src/runtime/tools.js";
 import type { RuntimeSession } from "../src/runtime/session.js";
 
@@ -706,7 +707,11 @@ test("executeInternalTool permits absolute redirects outside protected system ro
       },
     });
     assert.equal(blocked.ok, false);
-    assert.match(blocked.output, /shell policy blocked command; destructive pattern matched/);
+    assert.match(blocked.output, /shell policy blocked command/);
+    assert.match(blocked.output, /reason: redirect writes into protected system roots/);
+    assert.match(blocked.output, /source: shell_command/);
+    assert.match(blocked.output, /safer: Use write_file\/apply_patch inside workspace/);
+    assert.equal(session.operationControls.lastShellBlocker?.reason, "redirect writes into protected system roots");
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }
@@ -754,7 +759,8 @@ test("executeInternalTool blocks destructive shell and caps long output", async 
       },
     });
     assert.equal(blocked.ok, false);
-    assert.match(blocked.output, /shell policy blocked command; destructive pattern matched/);
+    assert.match(blocked.output, /shell policy blocked command/);
+    assert.match(blocked.output, /reason: recursive remove is destructive/);
 
     const capped = executeInternalTool(session, {
       name: "shell_command",
@@ -768,6 +774,14 @@ test("executeInternalTool blocks destructive shell and caps long output", async 
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }
+});
+
+test("shell policy parser avoids quoted false positives and catches real operators", () => {
+  assert.equal(analyzeBlockedShellCommand("printf '%s\\n' 'rm -rf .'"), null);
+  assert.equal(analyzeBlockedShellCommand("echo 'git reset --hard'"), null);
+  assert.equal(analyzeBlockedShellCommand("echo hi | bash")?.reason, "piping remote or generated text into a shell is blocked");
+  assert.equal(analyzeBlockedShellCommand("printf bad > /etc/nexagent-blocked")?.reason, "redirect writes into protected system roots");
+  assert.equal(analyzeBlockedShellCommand("git reset --hard")?.reason, "git destructive cleanup/reset is blocked");
 });
 
 test("executeInternalTool honors bounded shell timeout argument", async () => {
@@ -806,7 +820,8 @@ test("executeInternalTool blocks destructive shell while yolo mode is active", a
     });
 
     assert.equal(blocked.ok, false);
-    assert.match(blocked.output, /shell policy blocked command; destructive pattern matched/);
+    assert.match(blocked.output, /shell policy blocked command/);
+    assert.match(blocked.output, /reason: recursive remove is destructive/);
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }
@@ -889,7 +904,7 @@ test("executeInternalTool merges repeated Archivist memory into canonical recurr
   }
 });
 
-test("executeInternalTool exposes disabled LSP status without starting a service", async () => {
+test("executeInternalTool exposes LSP status without starting a service", async () => {
   const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-tools-lsp-status-"));
 
   try {
@@ -902,7 +917,36 @@ test("executeInternalTool exposes disabled LSP status without starting a service
     assert.equal(result.ok, true);
     assert.match(result.output, /^lsp$/m);
     assert.match(result.output, /^enabled: false$/m);
-    assert.match(result.output, /disabled by default/);
+    assert.match(result.output, /^source: disabled$/m);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("file access updates bounded LSP problem cache", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-tools-lsp-touch-"));
+
+  try {
+    await writeFile(path.join(cwd, "sample.ts"), "export function alpha() {}\n// TODO inspect me\n", "utf8");
+    const session = createSession(cwd);
+    session.lsp.enabled = true;
+
+    const read = executeInternalTool(session, {
+      name: "read_file",
+      arguments: {
+        path: "sample.ts",
+      },
+    });
+    assert.equal(read.ok, true);
+
+    const status = executeInternalTool(session, {
+      name: "lsp_status",
+      arguments: {},
+    });
+    assert.equal(status.ok, true);
+    assert.match(status.output, /^touchedFiles: 1$/m);
+    assert.match(status.output, /^problems: 1$/m);
+    assert.match(status.output, /^lastTouched: sample.ts$/m);
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }
@@ -936,6 +980,74 @@ test("executeInternalTool indexes bounded LSP symbol summaries into Archivist wh
     assert.equal(raw.entries.length, 1);
     assert.equal(raw.entries[0]?.type, "code-symbols");
     assert.match(raw.entries[0]?.content ?? "", /lsp symbols/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("async LSP symbols use configured JSON-RPC server when available", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-tools-lsp-jsonrpc-"));
+
+  try {
+    const serverPath = path.join(cwd, "fake-lsp.mjs");
+    await writeFile(serverPath, `
+let buffer = Buffer.alloc(0);
+function send(message) {
+  const body = JSON.stringify(message);
+  process.stdout.write("Content-Length: " + Buffer.byteLength(body) + "\\r\\n\\r\\n" + body);
+}
+function handle(message) {
+  if (message.method === "initialize") {
+    send({ jsonrpc: "2.0", id: message.id, result: { capabilities: { documentSymbolProvider: true } } });
+    return;
+  }
+  if (message.method === "textDocument/documentSymbol") {
+    send({ jsonrpc: "2.0", id: message.id, result: [
+      { name: "ServerAlpha", kind: 12, range: { start: { line: 1, character: 0 }, end: { line: 1, character: 12 } }, selectionRange: { start: { line: 1, character: 0 }, end: { line: 1, character: 12 } } }
+    ] });
+  }
+}
+process.stdin.on("data", (chunk) => {
+  buffer = Buffer.concat([buffer, chunk]);
+  while (true) {
+    const headerEnd = buffer.indexOf("\\r\\n\\r\\n");
+    if (headerEnd < 0) break;
+    const header = buffer.slice(0, headerEnd).toString("utf8");
+    const match = /Content-Length: (\\d+)/i.exec(header);
+    if (!match) break;
+    const length = Number(match[1]);
+    const start = headerEnd + 4;
+    const end = start + length;
+    if (buffer.length < end) break;
+    handle(JSON.parse(buffer.slice(start, end).toString("utf8")));
+    buffer = buffer.slice(end);
+  }
+});
+`, "utf8");
+    await chmod(serverPath, 0o755);
+    await writeFile(path.join(cwd, "sample.ts"), "export function fallback() {}\n", "utf8");
+    const session = createSession(cwd);
+    session.lsp.enabled = true;
+    session.lsp.command = process.execPath;
+    session.lsp.args = [serverPath];
+
+    const result = await executeInternalToolAsync(session, {
+      name: "lsp_symbols",
+      arguments: {
+        path: "sample.ts",
+      },
+    });
+
+    assert.equal(result.ok, true);
+    assert.match(result.output, /^source: language-server$/m);
+    assert.match(result.output, /function ServerAlpha line=2/);
+
+    const status = executeInternalTool(session, {
+      name: "lsp_status",
+      arguments: {},
+    });
+    assert.equal(status.ok, true);
+    assert.match(status.output, /^running: true$/m);
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }
