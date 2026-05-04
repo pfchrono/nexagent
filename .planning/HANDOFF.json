@@ -1,24 +1,119 @@
 {
   "version": "1.0",
-  "timestamp": "2026-05-01T04:07:00.000Z",
-  "phase": "71",
-  "phase_name": "sentry-observability-and-diagnostics-integration",
-  "phase_dir": ".planning/phases/71-sentry-observability-and-diagnostics-integration",
-  "plan": null,
-  "task": null,
-  "total_tasks": 0,
-  "status": "ready_for_discussion",
-  "completed_tasks": [],
-  "remaining_tasks": [],
+  "timestamp": "2026-05-04T08:52:23.356Z",
+  "phase": "72",
+  "phase_name": "archivist-logov2-lsp-config-migration",
+  "phase_dir": ".planning/phases/72-archivist-logov2-lsp-config-migration",
+  "plan": 6,
+  "task": 6,
+  "total_tasks": 7,
+  "status": "paused",
+  "completed_tasks": [
+    {
+      "id": 1,
+      "name": "Archivist Provider Bridge and Recurrence Dedupe",
+      "status": "done"
+    },
+    {
+      "id": 2,
+      "name": "Session Continuity and Bounded Recall",
+      "status": "done"
+    },
+    {
+      "id": 3,
+      "name": "LogoV2 and Full /config OpenTUI App baseline",
+      "status": "done"
+    },
+    {
+      "id": 4,
+      "name": "LSP Service, Code Intelligence, and Provider Diagnostic Hardening baseline",
+      "status": "done"
+    },
+    {
+      "id": 5,
+      "name": "Runtime Command UX Gap Closure",
+      "status": "done"
+    }
+  ],
+  "remaining_tasks": [
+    {
+      "id": 6,
+      "name": "Imported Config Menu Plan",
+      "status": "not_started",
+      "plan": "72-06-PLAN.md"
+    },
+    {
+      "id": 7,
+      "name": "Imported LSP Integration Plan",
+      "status": "not_started",
+      "plan": "72-07-PLAN.md"
+    }
+  ],
   "blockers": [],
   "human_actions_pending": [],
   "decisions": [
     {
-      "decision": "Phase 70 is complete.",
-      "rationale": "Phase 70 executed, build/test validation passed, and 70-VERIFICATION.md status is passed.",
-      "phase": "70"
+      "decision": "Treat stale Phase 67/69 UAT audit items as reconciliation debt, not active blockers.",
+      "rationale": "Roadmap/progress evidence showed those phases were already complete; their UAT files were stale and were corrected before pausing.",
+      "phase": "72"
+    },
+    {
+      "decision": "Keep Phase 72 open for supplemental imported plans 72-06 and 72-07 before moving to Phase 73.",
+      "rationale": "User explicitly requested continuing Phase 72 first, then working on Phase 73.",
+      "phase": "72"
+    },
+    {
+      "decision": "Use focused regression evidence plus completed UAT to resume from plan 72-06 rather than reopening closed 72-01 through 72-05 work.",
+      "rationale": "72-UAT now reports 9/9 passing, 0 issues, and audit-uat reports no outstanding items.",
+      "phase": "72"
     }
   ],
-  "next_action": "Run $gsd-discuss-phase 71 or $gsd-plan-phase 71.",
-  "context_notes": "Phase 70 is complete. Phase 71 is parked for Sentry observability and diagnostics integration."
+  "uncommitted_files": [
+    ".planning/HANDOFF.json",
+    "AGENTS.md",
+    "README.md",
+    "src/cli.ts",
+    "src/cli/autocomplete.ts",
+    "src/cli/catalog.ts",
+    "src/opentui/App.tsx",
+    "src/opentui/composer-state.ts",
+    "src/opentui/entry.tsx",
+    "src/opentui/keyboard-source.ts",
+    "src/opentui/runtime-view.ts",
+    "src/provider.ts",
+    "src/runtime/boomerang.ts",
+    "src/runtime/bootstrap.ts",
+    "src/runtime/config.ts",
+    "src/runtime/instructions.ts",
+    "src/runtime/lsp.ts",
+    "src/runtime/persistence.ts",
+    "src/runtime/policy.ts",
+    "src/runtime/prompt-v2.ts",
+    "src/runtime/session.ts",
+    "src/runtime/tool-contracts.ts",
+    "src/runtime/tools.ts",
+    "src/runtime/turn-intent.ts",
+    "test/cli.test.ts",
+    "test/instructions.test.ts",
+    "test/opentui-app-shell.test.ts",
+    "test/opentui-command-surface.test.ts",
+    "test/opentui-composer-state.test.ts",
+    "test/opentui-keyboard-source.test.ts",
+    "test/opentui-runtime-view.test.ts",
+    "test/provider.test.ts",
+    "test/runtime-config.test.ts",
+    "test/tools.test.ts",
+    "src/runtime/btw.ts",
+    "src/runtime/extensions.ts",
+    "src/runtime/pi-compat.ts",
+    "src/runtime/questionnaire.ts",
+    "src/runtime/subagents.ts",
+    "src/runtime/todos.ts",
+    "src/runtime/tool-memory.ts",
+    "src/runtime/usage.ts",
+    "test/extensions.test.ts",
+    "test/turn-intent.test.ts"
+  ],
+  "next_action": "Read 72-06-PLAN.md, inspect current config/OpenTUI patterns, then implement the typed config menu and shared Ctrl+G /config panel behavior with focused tests.",
+  "context_notes": "Paused after reconciling stale 67/69 UAT blockers and completing Phase 72 UAT bookkeeping. Phase 72 core implementation is complete through 72-05; supplemental imported plans 72-06 and 72-07 remain before moving to Phase 73 archive evidence/traceability closure."
 }
