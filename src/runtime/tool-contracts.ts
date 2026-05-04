@@ -111,7 +111,7 @@ const TOOL_CONTRACTS: Record<InternalToolName, ToolContract> = {
   shell_command: {
     name: "shell_command",
     displayName: "shell_command",
-    summary: "Run guarded shell command with destructive patterns blocked.",
+    summary: "Run guarded shell command with protected OS root mutations blocked.",
     evidence: "shell",
     writes: true,
     nexsight: false,

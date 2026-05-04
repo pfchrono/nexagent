@@ -254,18 +254,21 @@ const REPO_INSTRUCTION_SOURCE_CANDIDATES = [
   { kind: "openspec", relativePath: "openspec" },
 ] as const;
 
-export async function loadHarnessConfig(cwd: string): Promise<HarnessConfig> {
+export async function loadHarnessConfig(cwd: string): Promise<HarnessConfig>;
+export async function loadHarnessConfig(cwd: unknown): Promise<HarnessConfig>;
+export async function loadHarnessConfig(cwd: unknown): Promise<HarnessConfig> {
+  const runtimeCwd = normalizeRuntimeCwd(cwd);
   const nexagentHome = resolveNexagentHome();
   const [globalConfig, globalSettings, globalLocalSettings, settings, localSettings, repoConfig, instructionSources] = await Promise.all([
     readJsonIfExists<NexagentConfig>(path.join(nexagentHome, NEXAGENT_CONFIG_BASENAME)),
     readJsonIfExists<NexagentSettings>(path.join(nexagentHome, NEXAGENT_SETTINGS_BASENAME)),
     readJsonIfExists<NexagentSettings>(path.join(nexagentHome, NEXAGENT_LOCAL_SETTINGS_BASENAME)),
-    readJsonIfExists<NexagentSettings>(path.join(cwd, NEXAGENT_SETTINGS_FILE)),
-    readJsonIfExists<NexagentSettings>(path.join(cwd, NEXAGENT_LOCAL_SETTINGS_FILE)),
-    readJsonIfExists<NexagentConfig>(path.join(cwd, NEXAGENT_CONFIG_FILE)),
-    discoverInstructionSources(cwd),
+    readJsonIfExists<NexagentSettings>(path.join(runtimeCwd, NEXAGENT_SETTINGS_FILE)),
+    readJsonIfExists<NexagentSettings>(path.join(runtimeCwd, NEXAGENT_LOCAL_SETTINGS_FILE)),
+    readJsonIfExists<NexagentConfig>(path.join(runtimeCwd, NEXAGENT_CONFIG_FILE)),
+    discoverInstructionSources(runtimeCwd),
   ]);
-  const importedClaude = await loadImportedClaudeSettings(cwd, nexagentHome, globalSettings, globalLocalSettings, settings, localSettings);
+  const importedClaude = await loadImportedClaudeSettings(runtimeCwd, nexagentHome, globalSettings, globalLocalSettings, settings, localSettings);
   const mergedConfig = mergeConfigSources(
     {
       provider: DEFAULT_PROVIDER,
@@ -278,16 +281,16 @@ export async function loadHarnessConfig(cwd: string): Promise<HarnessConfig> {
     mapNexagentSettings(globalSettings, nexagentHome),
     mapNexagentSettings(globalLocalSettings, nexagentHome),
     importedClaude?.values ?? {},
-    mapNexagentSettings(settings, cwd),
-    mapNexagentSettings(localSettings, cwd),
-    mapNexagentSettings(repoConfig, cwd),
+    mapNexagentSettings(settings, runtimeCwd),
+    mapNexagentSettings(localSettings, runtimeCwd),
+    mapNexagentSettings(repoConfig, runtimeCwd),
   );
   const providerRegistry = mergeProviderRegistryConfigs(globalConfig, repoConfig);
 
   const provider = mergedConfig.provider ?? DEFAULT_PROVIDER;
 
   return {
-    cwd,
+    cwd: runtimeCwd,
     productName: DEFAULT_PRODUCT_NAME,
     provider,
     providerRegistry,
@@ -303,20 +306,27 @@ export async function loadHarnessConfig(cwd: string): Promise<HarnessConfig> {
       },
       transport: mergedConfig.transport ?? {},
     },
-    mcpConfigPath: await resolveMcpConfigPath(cwd, nexagentHome, mergedConfig.mcpConfigPath),
+    mcpConfigPath: await resolveMcpConfigPath(runtimeCwd, nexagentHome, mergedConfig.mcpConfigPath),
     enabledMcpServers: normalizeServerNames(mergedConfig.enabledMcpServers),
     imports: {
       claude: importedClaude?.metadata ?? null,
     },
     instructionSources,
-    repo: await discoverRepoMetadata(cwd),
-    toolPolicy: createToolPolicy(cwd),
+    repo: await discoverRepoMetadata(runtimeCwd),
+    toolPolicy: createToolPolicy(runtimeCwd),
     hooks: mergedConfig.hooks ?? createEmptyHooksConfig(),
-    archivist: await resolveArchivistConfig(cwd, mergedConfig.archivist),
+    archivist: await resolveArchivistConfig(runtimeCwd, mergedConfig.archivist),
     lsp: resolveLspConfig(mergedConfig.lsp),
     ui: resolveUiConfig(mergedConfig.ui),
     compaction: resolveCompactionConfig(mergedConfig.compaction),
   };
+}
+
+function normalizeRuntimeCwd(cwd: unknown): string {
+  if (typeof cwd === "string" && cwd.trim()) {
+    return path.resolve(cwd);
+  }
+  return process.cwd();
 }
 
 async function loadImportedClaudeSettings(

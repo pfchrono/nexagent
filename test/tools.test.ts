@@ -746,7 +746,7 @@ test("executeInternalTool shows bounded git diff for changed repo file", async (
   }
 });
 
-test("executeInternalTool blocks destructive shell and caps long output", async () => {
+test("executeInternalTool blocks protected system shell writes and caps long output", async () => {
   const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-tools-shell-guard-"));
 
   try {
@@ -755,12 +755,12 @@ test("executeInternalTool blocks destructive shell and caps long output", async 
     const blocked = executeInternalTool(session, {
       name: "shell_command",
       arguments: {
-        command: "rm -rf .",
+        command: "rm -rf /etc/nexagent-blocked",
       },
     });
     assert.equal(blocked.ok, false);
     assert.match(blocked.output, /shell policy blocked command/);
-    assert.match(blocked.output, /reason: recursive remove is destructive/);
+    assert.match(blocked.output, /reason: recursive remove targets protected system roots/);
 
     const capped = executeInternalTool(session, {
       name: "shell_command",
@@ -779,9 +779,12 @@ test("executeInternalTool blocks destructive shell and caps long output", async 
 test("shell policy parser avoids quoted false positives and catches real operators", () => {
   assert.equal(analyzeBlockedShellCommand("printf '%s\\n' 'rm -rf .'"), null);
   assert.equal(analyzeBlockedShellCommand("echo 'git reset --hard'"), null);
-  assert.equal(analyzeBlockedShellCommand("echo hi | bash")?.reason, "piping remote or generated text into a shell is blocked");
+  assert.equal(analyzeBlockedShellCommand("echo hi | bash"), null);
+  assert.equal(analyzeBlockedShellCommand("git push origin main"), null);
+  assert.equal(analyzeBlockedShellCommand("git reset --hard"), null);
+  assert.equal(analyzeBlockedShellCommand("rm -rf ."), null);
   assert.equal(analyzeBlockedShellCommand("printf bad > /etc/nexagent-blocked")?.reason, "redirect writes into protected system roots");
-  assert.equal(analyzeBlockedShellCommand("git reset --hard")?.reason, "git destructive cleanup/reset is blocked");
+  assert.equal(analyzeBlockedShellCommand("rm -rf /etc/nexagent-blocked")?.reason, "recursive remove targets protected system roots");
 });
 
 test("executeInternalTool honors bounded shell timeout argument", async () => {
@@ -804,7 +807,7 @@ test("executeInternalTool honors bounded shell timeout argument", async () => {
   }
 });
 
-test("executeInternalTool blocks destructive shell while yolo mode is active", async () => {
+test("executeInternalTool blocks protected system shell while yolo mode is active", async () => {
   const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-tools-yolo-shell-guard-"));
 
   try {
@@ -815,13 +818,13 @@ test("executeInternalTool blocks destructive shell while yolo mode is active", a
     const blocked = executeInternalTool(session, {
       name: "shell_command",
       arguments: {
-        command: "rm -rf .",
+        command: "rm -rf /etc/nexagent-blocked",
       },
     });
 
     assert.equal(blocked.ok, false);
     assert.match(blocked.output, /shell policy blocked command/);
-    assert.match(blocked.output, /reason: recursive remove is destructive/);
+    assert.match(blocked.output, /reason: recursive remove targets protected system roots/);
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }

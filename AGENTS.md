@@ -29,7 +29,7 @@ Canonical guidance for coding agents working in `nexagent`.
 - slash commands including `/status`, `/status --sentry`, `/provider`, `/model`, `/effort`, `/tools`, `/memory`, `/memory --maintenance`, `/config`, `/lsp`, `/skill`, `/boomerang`, `/attach`, `/detach`, `/mouse`, `/approval`, `/compact`, `/diff`, `/rg`
 - `$skill` shorthand routed into `/skill`
 - guarded `!<command>` shell transcript command
-- `--yolo` session mode that bypasses guarded approvals while preserving destructive shell/tool blocks
+- `--yolo` session mode that bypasses guarded approvals while preserving protected OS-root shell/tool blocks
 - provider-gated multi-image attachment flow for HTTP transports, with `Alt+V` clipboard image paste and `/attach` path attach
 - startup MCP hydration from `.nexagent/mcp.json`, global `~/.nexagent/mcp.json`, and legacy `.mcp.json` with deduped server names and bounded startup timeouts
 - tags-only Sentry diagnostics for command, provider, tool, compaction, OpenTUI, startup, and memory signal failures; raw prompts/output/tool/file/transcript content stays out of Sentry unless explicitly opted in for AI span content
@@ -73,7 +73,7 @@ If a slash command changes, update `src/cli/catalog.ts`, README command docs, an
 - Keep runtime behavior grounded in tests.
 - Do not refactor unrelated systems during feature work.
 - Do not mass-add local state directories such as `.bun/`, `.nexagent/`, `.codex/`, `.npm/`, `.opencode/`, `.rtk/`, or generated scratch files.
-- Preserve destructive-command safety. `--yolo` is not permission to bypass destructive shell/tool blocks.
+- Preserve protected OS-root safety. `--yolo` is not permission to mutate critical system roots.
 - Treat uncommitted changes as user work unless you made them.
 
 ## Agent Workflow Guidelines

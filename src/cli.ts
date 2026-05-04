@@ -1041,7 +1041,7 @@ export function runRuntimeCommand(session: RuntimeSession, input: string): Runti
         command_name: command,
         failure_class: result.activity,
       },
-    }, { sendEvent: true });
+    }, { sendEvent: false });
     recordRuntimeEvent(session, toDiagnosticRuntimeEvent(diagnostic));
   }
   return result;

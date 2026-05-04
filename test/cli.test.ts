@@ -787,12 +787,12 @@ test("runRuntimeCommand reports doctor health with next actions", async () => {
   session.auth.loggedIn = false;
   session.auth.status = "login missing";
   session.operationControls.lastShellBlocker = {
-    command: "rm -rf notes.txt",
-    pattern: "\\brm\\s+-rf\\b",
-    reason: "recursive remove is destructive",
-    matchedText: "rm -rf",
+    command: "rm -rf /etc/nexagent-blocked",
+    pattern: "\\brm\\s+-r[f]?\\s+\\/(?:etc|usr|bin|sbin|var|opt|lib|boot|dev|proc|sys|run)",
+    reason: "recursive remove targets protected system roots",
+    matchedText: "rm -rf /etc/nexagent-blocked",
     source: "shell_command",
-    advice: "Use guarded file tools for scoped edits.",
+    advice: "Do not delete protected OS roots.",
   };
 
   const result = runRuntimeCommand(session, "/doctor");
@@ -1226,17 +1226,17 @@ test("runRuntimeCommand supports local tool commands", async () => {
       activity: "shell · printf 'hello\\n'",
     });
 
-    const blockedShell = runRuntimeCommand(session, "!rm -rf notes.txt");
+    const blockedShell = runRuntimeCommand(session, "!rm -rf /etc/nexagent-blocked");
     assert.equal(blockedShell?.ok, false);
     assert.match(blockedShell?.message ?? "", /shell policy blocked command/);
-    assert.match(blockedShell?.message ?? "", /reason: recursive remove is destructive/);
+    assert.match(blockedShell?.message ?? "", /reason: recursive remove targets protected system roots/);
     assert.equal(blockedShell?.activity, "command blocked · shell policy");
 
     const whyBlocked = runRuntimeCommand(session, "/why-blocked");
     assert.equal(whyBlocked?.ok, true);
     assert.match(whyBlocked?.output ?? "", /lastShellBlocker/);
-    assert.match(whyBlocked?.output ?? "", /reason: recursive remove is destructive/);
-    assert.match(whyBlocked?.output ?? "", /command: rm -rf notes\.txt/);
+    assert.match(whyBlocked?.output ?? "", /reason: recursive remove targets protected system roots/);
+    assert.match(whyBlocked?.output ?? "", /command: rm -rf \/etc\/nexagent-blocked/);
 
     assert.deepEqual(runRuntimeCommand(session, "/hooks"), {
       ok: true,

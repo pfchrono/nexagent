@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { createDefaultProviderRegistry } from "../src/provider/registry.js";
-import { createRuntimeState } from "../src/runtime/bootstrap.js";
+import { bootstrapRuntime, createRuntimeState } from "../src/runtime/bootstrap.js";
 import { loadHarnessConfig } from "../src/runtime/config.js";
 import { loadMcpRegistrySummary, shutdownMcpRegistry } from "../src/runtime/mcp.js";
 import { loadPersistedRuntimeState, savePersistedRuntimeState } from "../src/runtime/persistence.js";
@@ -176,6 +176,37 @@ test("loadHarnessConfig discovers repo-local instruction sources", async () => {
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }
+});
+
+test("loadHarnessConfig and bootstrapRuntime normalize invalid cwd inputs", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-invalid-cwd-"));
+  const previousCwd = process.cwd();
+
+  try {
+    process.chdir(cwd);
+
+    const config = await loadHarnessConfig({ path: cwd });
+    assert.equal(config.cwd, cwd);
+
+    const runtime = await bootstrapRuntime({ path: cwd });
+    assert.equal(runtime.config.cwd, cwd);
+  } finally {
+    process.chdir(previousCwd);
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("recordRuntimeEvent repairs partial session event stores", () => {
+  const partialSession = { id: "partial" } as unknown as Parameters<typeof recordRuntimeEvent>[0];
+
+  const event = recordRuntimeEvent(partialSession, {
+    kind: "command",
+    status: "failed",
+    summary: "command failed",
+  });
+
+  assert.equal(event.summary, "command failed");
+  assert.deepEqual(partialSession.events.map((entry) => entry.summary), ["command failed"]);
 });
 
 test("loadHarnessConfig reads global nexagent settings from NEXAGENT_HOME", async () => {

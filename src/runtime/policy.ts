@@ -4,24 +4,14 @@ import { parse, type ShellQuoteParseEntry } from "shell-quote";
 import type { RuntimeSession } from "./session.js";
 
 export const BLOCKED_SHELL_PATTERNS = [
-  /\brm\s+-rf\b/i,
-  /\brm\s+-r\b/i,
+  /\brm\s+-r[f]?\s+\/(?:etc|usr|bin|sbin|var|opt|lib|boot|dev|proc|sys|run)(?:\/|$)/i,
   /\bmv\b\s+.+\s+\/(?:etc|usr|bin|sbin|var|opt|lib|boot|dev|proc|sys|run)(?:\/|$)/i,
-  /\bchmod\b/i,
-  /\bchown\b/i,
-  /\bsudo\b/i,
-  /\bsu\b/i,
   /\bshutdown\b/i,
   /\breboot\b/i,
   /\bmkfs\b/i,
-  /\bdd\b/i,
-  /\bgit\s+push\b/i,
-  /\bgit\s+reset\s+--hard\b/i,
-  /\bgit\s+clean\b/i,
-  /\bfind\b[\s\S]*\b-delete\b/i,
+  /\bdd\b[\s\S]*\bof=\/(?:etc|usr|bin|sbin|var|opt|lib|boot|dev|proc|sys|run)(?:\/|$)/i,
+  /\bfind\b[\s\S]*\/(?:etc|usr|bin|sbin|var|opt|lib|boot|dev|proc|sys|run)(?:\/|$)[\s\S]*\b-delete\b/i,
   />\s*\/(?:etc|usr|bin|sbin|var|opt|lib|boot|dev|proc|sys|run)(?:\/|$)/,
-  /\|\s*sh\b/i,
-  /\|\s*bash\b/i,
 ] as const;
 
 function normalizeRoot(root: string): string {
@@ -137,17 +127,6 @@ function analyzeParsedShellCommand(command: string): ShellPolicyBlockAnalysis | 
         };
       }
     }
-    if (isOperator(entry) && entry.op === "|") {
-      const nextCommand = nextStringToken(tokens, index + 1);
-      if (nextCommand && /^(?:sh|bash)$/.test(path.basename(nextCommand).toLowerCase())) {
-        return {
-          pattern: /\|\s*bash\b/i,
-          matchedText: `| ${nextCommand}`,
-          reason: "piping remote or generated text into a shell is blocked",
-          advice: adviseForBlockedShellPattern(/\|\s*bash\b/i),
-        };
-      }
-    }
   }
 
   for (const commandTokens of splitShellCommands(tokens)) {
@@ -155,12 +134,14 @@ function analyzeParsedShellCommand(command: string): ShellPolicyBlockAnalysis | 
     if (!name) {
       continue;
     }
-    if (name === "rm" && commandTokens.slice(1).some((token) => /^-[^-]*r/.test(token) || token === "--recursive")) {
+    if (name === "rm"
+      && commandTokens.slice(1).some((token) => /^-[^-]*r/.test(token) || token === "--recursive")
+      && commandTokens.slice(1).some(isProtectedShellPath)) {
       return {
-        pattern: /\brm\s+-rf\b/i,
-        matchedText: commandTokens.slice(0, 2).join(" "),
-        reason: "recursive remove is destructive",
-        advice: adviseForBlockedShellPattern(/\brm\s+-rf\b/i),
+        pattern: /\brm\s+-r[f]?\s+\/(?:etc|usr|bin|sbin|var|opt|lib|boot|dev|proc|sys|run)(?:\/|$)/i,
+        matchedText: commandTokens.join(" "),
+        reason: "recursive remove targets protected system roots",
+        advice: adviseForBlockedShellPattern(/\brm\s+-r[f]?\s+\/(?:etc|usr|bin|sbin|var|opt|lib|boot|dev|proc|sys|run)(?:\/|$)/i),
       };
     }
     if (name === "mv" && commandTokens.length > 2 && isProtectedShellPath(commandTokens[commandTokens.length - 1] ?? "")) {
@@ -171,7 +152,15 @@ function analyzeParsedShellCommand(command: string): ShellPolicyBlockAnalysis | 
         advice: "Use write_file/apply_patch inside workspace; never move files into protected roots.",
       };
     }
-    if (["chmod", "chown", "sudo", "su", "shutdown", "reboot", "mkfs", "dd"].includes(name)) {
+    if ((name === "chmod" || name === "chown") && commandTokens.slice(1).some(isProtectedShellPath)) {
+      return {
+        pattern: new RegExp(`\\b${name}\\b`, "i"),
+        matchedText: commandTokens.join(" "),
+        reason: "permission mutation targets protected system roots",
+        advice: "Do not change permissions or ownership under protected OS roots.",
+      };
+    }
+    if (["shutdown", "reboot", "mkfs"].includes(name)) {
       return {
         pattern: new RegExp(`\\b${name}\\b`, "i"),
         matchedText: name,
@@ -179,35 +168,19 @@ function analyzeParsedShellCommand(command: string): ShellPolicyBlockAnalysis | 
         advice: adviseForBlockedShellPattern(new RegExp(`\\b${name}\\b`, "i")),
       };
     }
-    if (name === "git" && commandTokens[1] === "push") {
+    if (name === "dd" && commandTokens.some((token) => /^of=/.test(token) && isProtectedShellPath(token.slice(3)))) {
       return {
-        pattern: /\bgit\s+push\b/i,
-        matchedText: "git push",
-        reason: "network publish is blocked from guarded shell",
-        advice: adviseForBlockedShellPattern(/\bgit\s+push\b/i),
+        pattern: /\bdd\b[\s\S]*\bof=\/(?:etc|usr|bin|sbin|var|opt|lib|boot|dev|proc|sys|run)(?:\/|$)/i,
+        matchedText: commandTokens.join(" "),
+        reason: "raw disk/file write targets protected system roots",
+        advice: "Do not run raw writes against protected OS roots.",
       };
     }
-    if (name === "git" && commandTokens[1] === "reset" && commandTokens.includes("--hard")) {
-      return {
-        pattern: /\bgit\s+reset\s+--hard\b/i,
-        matchedText: "git reset --hard",
-        reason: "git destructive cleanup/reset is blocked",
-        advice: adviseForBlockedShellPattern(/\bgit\s+reset\s+--hard\b/i),
-      };
-    }
-    if (name === "git" && commandTokens[1] === "clean") {
-      return {
-        pattern: /\bgit\s+clean\b/i,
-        matchedText: "git clean",
-        reason: "git destructive cleanup/reset is blocked",
-        advice: adviseForBlockedShellPattern(/\bgit\s+clean\b/i),
-      };
-    }
-    if (name === "find" && commandTokens.includes("-delete")) {
+    if (name === "find" && commandTokens.includes("-delete") && commandTokens.slice(1).some(isProtectedShellPath)) {
       return {
         pattern: /\bfind\b[\s\S]*\b-delete\b/i,
         matchedText: "find -delete",
-        reason: "find -delete is destructive",
+        reason: "find -delete targets protected system roots",
         advice: adviseForBlockedShellPattern(/\bfind\b[\s\S]*\b-delete\b/i),
       };
     }
@@ -237,19 +210,6 @@ function splitShellCommands(tokens: ShellQuoteParseEntry[]): string[][] {
   return commands;
 }
 
-function nextStringToken(tokens: ShellQuoteParseEntry[], start: number): string | null {
-  for (let index = start; index < tokens.length; index += 1) {
-    const token = tokens[index];
-    if (typeof token === "string") {
-      return token;
-    }
-    if (isOperator(token) && ["&&", "||", ";"].includes(token.op)) {
-      return null;
-    }
-  }
-  return null;
-}
-
 function isOperator(entry: ShellQuoteParseEntry): entry is { op: string } {
   return typeof entry === "object" && entry !== null && "op" in entry;
 }
@@ -268,24 +228,21 @@ function describeBlockedShellPattern(pattern: RegExp): string {
     return "redirect writes into protected system roots";
   }
   if (source.includes("rm\\s+-rf") || source.includes("rm\\s+-r")) {
-    return "recursive remove is destructive";
+    return "recursive remove targets protected system roots";
   }
-  if (source.includes("git\\s+reset") || source.includes("git\\s+clean")) {
-    return "git destructive cleanup/reset is blocked";
+  if (source.includes("chmod") || source.includes("chown")) {
+    return "permission mutation targets protected system roots";
   }
-  if (source.includes("git\\s+push")) {
-    return "network publish is blocked from guarded shell";
+  if (source.includes("shutdown") || source.includes("reboot") || source.includes("mkfs")) {
+    return "OS-level destructive command is blocked";
   }
-  if (source.includes("chmod") || source.includes("chown") || source.includes("sudo") || source.includes("su")) {
-    return "privilege or permission mutation is blocked";
-  }
-  if (source.includes("\\|\\s*sh") || source.includes("\\|\\s*bash")) {
-    return "piping remote or generated text into a shell is blocked";
+  if (source.includes("\\bdd")) {
+    return "raw disk/file write targets protected system roots";
   }
   if (source.includes("find") && source.includes("-delete")) {
-    return "find -delete is destructive";
+    return "find -delete targets protected system roots";
   }
-  return "destructive shell pattern matched";
+  return "protected system path mutation matched";
 }
 
 function adviseForBlockedShellPattern(pattern: RegExp): string {
@@ -294,13 +251,7 @@ function adviseForBlockedShellPattern(pattern: RegExp): string {
     return "Use write_file/apply_patch inside workspace; never redirect into /etc, /usr, /bin, /var, or other protected roots.";
   }
   if (source.includes("rm\\s+-rf") || source.includes("rm\\s+-r") || source.includes("find") && source.includes("-delete")) {
-    return "Use guarded file tools for scoped edits, or ask operator for explicit cleanup target before deleting.";
+    return "Do not delete protected OS roots.";
   }
-  if (source.includes("git\\s+reset") || source.includes("git\\s+clean")) {
-    return "Use git_diff/git_status and apply_patch; do not discard work from shell.";
-  }
-  if (source.includes("\\|\\s*sh") || source.includes("\\|\\s*bash")) {
-    return "Download/read script first, inspect it, then run explicit safe commands.";
-  }
-  return "Use the narrow internal tool for the intended change, or run a non-destructive inspection command.";
+  return "Avoid mutating protected OS roots.";
 }

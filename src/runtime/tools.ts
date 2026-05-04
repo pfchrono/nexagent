@@ -227,7 +227,7 @@ export function getInternalToolDefinitions(): readonly InternalToolDefinition[] 
     },
     {
       name: "shell_command",
-      description: "Run guarded shell command inside repo cwd with destructive patterns blocked and capped output.",
+      description: "Run guarded shell command inside repo cwd with protected OS root mutations blocked and capped output.",
       inputSchema: {
         type: "object",
         properties: {
@@ -999,10 +999,10 @@ function executeShellCommandTool(session: RuntimeSession, command: string, args:
     const report = {
       command: normalized,
       pattern: blockedPattern.source,
-      reason: analysis?.reason ?? "destructive shell pattern matched",
+      reason: analysis?.reason ?? "protected system path mutation matched",
       matchedText: analysis?.matchedText ?? null,
       source: session.activeSkill ? `skill ${session.activeSkill.name}` : "shell_command",
-      advice: analysis?.advice ?? "Use the narrow internal tool for the intended change, or run a non-destructive inspection command.",
+      advice: analysis?.advice ?? "Avoid mutating protected OS roots.",
     };
     session.operationControls.lastShellBlocker = report;
     return fail("shell_command", formatShellPolicyBlockReport(report));

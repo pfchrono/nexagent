@@ -62,10 +62,13 @@ export interface RuntimeOperationControlsDefaults {
   requireApprovalForGuarded: boolean;
 }
 
-export async function bootstrapRuntime(cwd: string): Promise<RuntimeBootstrap> {
+export async function bootstrapRuntime(cwd: string): Promise<RuntimeBootstrap>;
+export async function bootstrapRuntime(cwd: unknown): Promise<RuntimeBootstrap>;
+export async function bootstrapRuntime(cwd: unknown): Promise<RuntimeBootstrap> {
   const config = await loadHarnessConfig(cwd);
-  const mcp = await loadMcpRegistrySummary(config.mcpConfigPath, config.enabledMcpServers, { cwd });
-  const persisted = await loadPersistedRuntimeState(cwd);
+  const runtimeCwd = config.cwd;
+  const mcp = await loadMcpRegistrySummary(config.mcpConfigPath, config.enabledMcpServers, { cwd: runtimeCwd });
+  const persisted = await loadPersistedRuntimeState(runtimeCwd);
   const auth = mergeRuntimeAuth(await probeCodexAuthState(), persisted);
 
   return {

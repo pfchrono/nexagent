@@ -1425,7 +1425,7 @@ async function executeToolWithRuntimeActivity(session: RuntimeSession, call: Int
   });
   if (!result.ok) {
     const failureClass = classifyToolFailure(result.output);
-    const diagnosticClass = isMcpUnavailableFailure(call, failureClass) ? "tool.mcp_unavailable" : "tool.failed";
+    const diagnosticClass = classifyToolDiagnostic(call, failureClass);
     recordRuntimeDiagnostic(session, {
       class: diagnosticClass,
       attributes: {
@@ -1568,11 +1568,24 @@ function formatToolDuration(durationMs: number): string {
 }
 
 function recordRuntimeDiagnostic(session: RuntimeSession, input: RuntimeDiagnosticInput): void {
-  const event = captureSentryDiagnostic(input, { sendEvent: true });
+  const event = captureSentryDiagnostic(input, { sendEvent: false });
+  if (event.severity === "error") {
+    captureSentryDiagnostic(event, { sendEvent: true });
+  }
   if (event.severity === "error") {
     logSentryError(event.summary, event.attributes);
   }
   recordRuntimeEvent(session, toDiagnosticRuntimeEvent(event));
+}
+
+function classifyToolDiagnostic(call: InternalToolCall, failureClass: string): RuntimeDiagnosticInput["class"] {
+  if (isMcpUnavailableFailure(call, failureClass)) {
+    return "tool.mcp_unavailable";
+  }
+  if (failureClass === "policy_blocked" || failureClass === "blocked_tool") {
+    return "tool.blocked";
+  }
+  return "tool.failed";
 }
 
 function formatToolArgumentsPreview(value: unknown): string {

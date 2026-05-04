@@ -430,7 +430,7 @@ test("executeProviderRequest gives recovery hint after blocked shell tool", asyn
             exitCode: 0,
             stdout: "",
             stderr: "",
-            output: '<nexagent_tool_call>{"name":"shell_command","arguments":{"command":"rm -rf ."}} </nexagent_tool_call>',
+            output: '<nexagent_tool_call>{"name":"shell_command","arguments":{"command":"rm -rf /etc/nexagent-blocked"}} </nexagent_tool_call>',
           };
         }
 
@@ -454,7 +454,10 @@ test("executeProviderRequest gives recovery hint after blocked shell tool", asyn
   assert.match(prompts[1] ?? "", /shell policy blocked command/);
   assert.match(prompts[1] ?? "", /Recovery hint:/);
   assert.match(prompts[1] ?? "", /Use write_file\/apply_patch\/batch_edit/);
-  assert.equal(session.operationControls.lastShellBlocker?.reason, "recursive remove is destructive");
+  assert.equal(session.operationControls.lastShellBlocker?.reason, "recursive remove targets protected system roots");
+  const diagnostic = session.events.find((event) => event.kind === "control" && event.summary.includes("tool.blocked"));
+  assert.match(diagnostic?.detail ?? "", /failure_class=policy_blocked/);
+  assert.equal(session.events.some((event) => event.kind === "control" && event.summary.includes("tool.failed") && /policy_blocked/.test(event.detail ?? "")), false);
 });
 
 test("executeProviderRequest returns partial result when tool budget is exhausted", async () => {

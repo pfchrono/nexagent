@@ -20,7 +20,7 @@ Terminal-first AI coding harness for local operator-driven development.
 - Hydrates stdio MCP servers at startup from `.nexagent/mcp.json` or legacy `.mcp.json`, with per-server startup timeouts and deduped server selection.
 - Supports `$skill` shorthand for skill routing.
 - Supports `!<command>` for guarded shell command transcript output.
-- Supports `--yolo` session mode for guarded approval bypass while preserving destructive shell/tool blocks.
+- Supports `--yolo` session mode for guarded approval bypass while preserving protected OS-root shell/tool blocks.
 - Supports `--debug`, `--debugfile <path.log>`, and `--verbose` for diagnostic logs.
 - Supports `/caveman-mode` and `/deadpoolmode` instruction overlays for precise user-facing prose style while preserving code, tool calls, JSON, commands, paths, stack traces, and quoted errors unchanged.
 - Shows cockpit-style TUI panels for turn metadata, warning/error lanes, structured actions/results, risk/outcome state, recovery actions, navigation hints, terminal capabilities, MCP/LSP status, and compact key hints.
@@ -311,7 +311,7 @@ These guardrails are not a replacement for review. They reduce common harness fa
 
 ## Safety Model
 
-Internal tools are repo-local and guarded. Shell output is bounded. Destructive shell patterns remain blocked, including in `--yolo` mode.
+Internal tools are repo-local and guarded. Shell output is bounded. Shell policy blocks protected OS-root mutations and obvious OS-level destructive commands, including in `--yolo` mode; normal repo/network commands such as `git push` are not blocked by shell policy.
 
 Do not treat `--yolo` as permission to run destructive commands.
 

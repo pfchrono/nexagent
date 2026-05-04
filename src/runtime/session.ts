@@ -342,6 +342,9 @@ export function recordRuntimeEvent(
   session: RuntimeSession,
   event: Omit<RuntimeEvent, "at"> & { at?: string },
 ): RuntimeEvent {
+  if (!Array.isArray(session.events)) {
+    session.events = [];
+  }
   const entry: RuntimeEvent = {
     at: event.at ?? new Date().toISOString(),
     kind: event.kind,
