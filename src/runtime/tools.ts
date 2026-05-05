@@ -1394,44 +1394,83 @@ function executeShellCommandTool(session: RuntimeSession, command: string, args:
   }
 
   try {
-    const result = spawnSync("bash", ["-lc", normalized], {
-      cwd: session.cwd,
+    const result = runShellCommandWithOutputAccumulator(normalized, session.cwd, timeoutMs);
+
+    if (result.timedOut) {
+      return fail("shell_command", `shell timed out after ${String(timeoutMs)}ms\n${result.output}`);
+    }
+
+    if (result.error && result.status === null) {
+      return fail("shell_command", `shell failed: ${result.error.message}`);
+    }
+
+    if ((result.status ?? 0) !== 0) {
+      return fail("shell_command", `shell exit ${String(result.status ?? 1)}\n${result.output}`);
+    }
+
+    return ok("shell_command", withNexsightRouteHint(result.output));
+  } catch (error) {
+    return fail("shell_command", `shell failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+interface ShellCommandRunResult {
+  status: number | null;
+  timedOut: boolean;
+  output: string;
+  error: Error | null;
+}
+
+class ShellOutputAccumulator {
+  private readonly chunks: string[] = [];
+
+  append(chunk: unknown): void {
+    if (chunk === null || chunk === undefined) {
+      return;
+    }
+    const text = String(chunk).trimEnd();
+    if (text.length > 0) {
+      this.chunks.push(text);
+    }
+  }
+
+  toCappedOutput(): string {
+    const transcript = this.chunks.join("\n");
+    return capShellOutput(transcript.length > 0 ? transcript : "(no output)");
+  }
+}
+
+function runShellCommandWithOutputAccumulator(command: string, cwd: string, timeoutMs: number): ShellCommandRunResult {
+  const outputAccumulator = new ShellOutputAccumulator();
+
+  try {
+    const stdout = execFileSync("bash", ["-lc", command], {
+      cwd,
       encoding: "utf8",
       env: {
         ...process.env,
       },
       timeout: timeoutMs,
+      stdio: ["ignore", "pipe", "pipe"],
     });
-
-    if (result.error) {
-      if ((result.error as NodeJS.ErrnoException).code === "ETIMEDOUT") {
-        const transcript = [
-          result.stdout?.trimEnd() ?? "",
-          result.stderr?.trimEnd() ?? "",
-        ].filter((value) => value.length > 0).join("\n");
-        const capped = capShellOutput(transcript.length > 0 ? transcript : "(no output)");
-        return fail("shell_command", `shell timed out after ${String(timeoutMs)}ms\n${capped}`);
-      }
-      return fail("shell_command", `shell failed: ${result.error.message}`);
-    }
-
-    const transcript = [
-      result.stdout?.trimEnd() ?? "",
-      result.stderr?.trimEnd() ?? "",
-    ].filter((value) => value.length > 0).join("\n");
-    const capped = capShellOutput(transcript.length > 0 ? transcript : "(no output)");
-
-    if (result.signal === "SIGTERM") {
-      return fail("shell_command", `shell timed out after ${String(timeoutMs)}ms\n${capped}`);
-    }
-
-    if ((result.status ?? 0) !== 0) {
-      return fail("shell_command", `shell exit ${String(result.status ?? 1)}\n${capped}`);
-    }
-
-    return ok("shell_command", withNexsightRouteHint(capped));
+    outputAccumulator.append(stdout);
+    return {
+      status: 0,
+      timedOut: false,
+      output: outputAccumulator.toCappedOutput(),
+      error: null,
+    };
   } catch (error) {
-    return fail("shell_command", `shell failed: ${error instanceof Error ? error.message : String(error)}`);
+    const result = error as NodeJS.ErrnoException & { status?: number | null; signal?: NodeJS.Signals | null; stdout?: string | Buffer; stderr?: string | Buffer };
+    outputAccumulator.append(result.stdout);
+    outputAccumulator.append(result.stderr);
+    const timedOut = result.code === "ETIMEDOUT" || result.signal === "SIGTERM";
+    return {
+      status: typeof result.status === "number" ? result.status : null,
+      timedOut,
+      output: outputAccumulator.toCappedOutput(),
+      error: error instanceof Error ? error : new Error(String(error)),
+    };
   }
 }
 
