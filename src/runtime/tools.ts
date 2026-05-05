@@ -495,6 +495,7 @@ export function getInternalToolDefinitions(): readonly InternalToolDefinition[] 
               type: "object",
               properties: {
                 content: { type: "string" },
+                text: { type: "string" },
                 subject: { type: "string" },
                 title: { type: "string" },
                 task: { type: "string" },
@@ -516,6 +517,7 @@ export function getInternalToolDefinitions(): readonly InternalToolDefinition[] 
               type: "object",
               properties: {
                 content: { type: "string" },
+                text: { type: "string" },
                 subject: { type: "string" },
                 title: { type: "string" },
                 task: { type: "string" },
@@ -1647,7 +1649,7 @@ function normalizeTodoToolArguments(args: Record<string, unknown>): Record<strin
 
   return {
     action: "create",
-    subject: asString(first.subject ?? first.content ?? first.task ?? first.title, ""),
+    subject: asString(first.subject ?? first.content ?? first.text ?? first.task ?? first.title, ""),
     description: asOptionalString(first.description ?? first.detail),
     activeForm: asOptionalString(first.activeForm ?? first.active ?? first.doing),
     status: first.status,

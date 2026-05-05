@@ -254,7 +254,7 @@ test("internal tool argument guard accepts known legacy aliases", async () => {
       arguments: {
         items: [
           {
-            content: "Inspect alias support",
+            text: "Inspect alias support",
             status: "in_progress",
           },
         ],
