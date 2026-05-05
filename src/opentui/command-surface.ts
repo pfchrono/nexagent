@@ -112,6 +112,24 @@ function rowsForInput(
   completion: PromptCompletionResult,
   selectedIndex: number,
 ): CommandPaletteRow[] {
+  if (/^\/provider\s*$/i.test(trimmed) || /^\/provider\s+\S*$/i.test(trimmed)) {
+    const query = trimmed.replace(/^\/provider\s*/, "").toLowerCase();
+    const options = [
+      { label: "status", hint: "show provider, transport, auth, and capabilities", value: "/provider status" },
+      { label: "transport cli-exec", hint: "use local CLI transport", value: "/provider transport cli-exec" },
+      { label: "transport http-responses", hint: "use OpenAI-compatible HTTP responses", value: "/provider transport http-responses" },
+      { label: "transport codex-http", hint: "use Codex ChatGPT HTTP transport", value: "/provider transport codex-http" },
+    ];
+    const matches = rankByQuery(options, query, (entry) => entry.label);
+    const selected = clampIndex(selectedIndex, matches.length);
+    return matches.map((entry, index) => ({
+      label: entry.label,
+      hint: entry.hint,
+      value: entry.value,
+      selected: index === selected,
+    }));
+  }
+
   if (/^\/model(?:\s+list)?\s*$/i.test(trimmed)) {
     const selected = clampIndex(selectedIndex, CODEX_MODEL_CATALOG.length);
     return CODEX_MODEL_CATALOG.map((entry, index) => ({
@@ -293,6 +311,9 @@ function surfaceTitle(trimmed: string, completion: PromptCompletionResult): stri
   }
   if (/^\/effort(?:\s+\S*)?$/i.test(trimmed) || /^\/model\s+\S+\s+\S*$/i.test(trimmed)) {
     return "Effort";
+  }
+  if (/^\/provider(?:\s+\S*)?$/i.test(trimmed)) {
+    return "Provider";
   }
   if (trimmed.startsWith("/") && !trimmed.includes(" ")) {
     return "/ Commands";

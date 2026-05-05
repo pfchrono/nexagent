@@ -143,6 +143,8 @@ test("OpenTUI app shell renders live view fields and Phase 66 command surfaces",
   assert.match(source, /renderConfigPanelRows/);
   assert.match(source, /renderLspProblemsPanelRows/);
   assert.match(source, /view\.lspProblems\.visible/);
+  assert.match(source, /lsp-problems-latest/);
+  assert.match(source, /frameTop\(` \$\{title\} `, innerWidth\)/);
   assert.match(source, /lspProblemsPanelWidth/);
   assert.match(source, /renderLogoRows/);
   assert.match(source, /view\.logo\.frames/);

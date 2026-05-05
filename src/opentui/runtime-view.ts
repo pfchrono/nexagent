@@ -282,10 +282,10 @@ function createLspProblemsView(session: RuntimeSession): OpenTuiLspProblemsView 
   const lastTouched = lsp.lastTouchedPath ?? null;
   const rows = visible
     ? [
-      "Problems",
-      `${String(lsp.problemCount)} issue${lsp.problemCount === 1 ? "" : "s"}`,
-      lastTouched ? `last ${lastTouched}` : "last none",
-      lastTouched ? `/lsp diagnostics ${lastTouched}` : "/lsp workspace",
+      "LSP problems",
+      `count ${String(lsp.problemCount)} issue${lsp.problemCount === 1 ? "" : "s"}`,
+      lastTouched ? `latest ${lastTouched}` : "latest none",
+      lastTouched ? `open /lsp diagnostics ${lastTouched}` : "open /lsp workspace",
     ]
     : [];
   return {

@@ -258,11 +258,16 @@ test("internal tool argument guard accepts known legacy aliases", async () => {
             text: "Inspect alias support",
             status: "in_progress",
           },
+          {
+            text: "Verify alias support",
+            status: "pending",
+          },
         ],
       },
     });
     assert.equal(todo.ok, true);
     assert.match(todo.output, /\[>\] todo-1 Inspect alias support/);
+    assert.match(todo.output, /\[ \] todo-2 Verify alias support/);
 
     const shell = executeInternalTool(session, {
       name: "shell_command",
@@ -391,8 +396,42 @@ test("todo tool creates, advances, completes, and lists visual tasks", async () 
     assert.equal(listed.ok, true);
     assert.match(listed.output, /todos/);
     assert.match(listed.output, /\[x\] todo-1 Inspecting repo/);
-    assert.deepEqual(formatTodoOverlayRows(session.todos, 80), []);
+    assert.deepEqual(formatTodoOverlayRows(session.todos, 80), [{
+      key: "todo-todo-1",
+      text: "[x] Inspecting repo",
+      fg: "#6c7086",
+    }]);
     assert.equal(formatTodoPromptSummary(session.todos), null);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("todo items alias replaces visible list with completed, active, and pending rows", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-todo-items-list-"));
+  try {
+    const session = createSession(cwd);
+
+    const result = executeInternalTool(session, {
+      name: "todo",
+      arguments: {
+        items: [
+          { content: "Inspect repo", status: "completed" },
+          { content: "Run focused tests", status: "in_progress" },
+          { content: "Write findings", status: "pending" },
+        ],
+      },
+    });
+
+    assert.equal(result.ok, true);
+    assert.match(result.output, /\[>\] todo-2 Run focused tests/);
+    assert.match(result.output, /\[ \] todo-3 Write findings/);
+    assert.match(result.output, /\[x\] todo-1 Inspect repo/);
+    assert.deepEqual(formatTodoOverlayRows(session.todos, 80).map((row) => row.text), [
+      "[>] Run focused tests",
+      "[ ] Write findings",
+      "[x] Inspect repo",
+    ]);
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }

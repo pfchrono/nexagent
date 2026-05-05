@@ -53,6 +53,17 @@ test("OpenTUI command surface offers model and effort picker rows", () => {
   assert.ok(directEffortSurface.rows.some((row) => row.value === "/effort xhigh"));
 });
 
+test("OpenTUI command surface offers provider control rows", () => {
+  const bareProviderSurface = createCommandSurface(process.cwd(), "/provider ");
+  const transportSurface = createCommandSurface(process.cwd(), "/provider http");
+
+  assert.equal(bareProviderSurface.title, "Provider");
+  assert.ok(bareProviderSurface.rows.some((row) => row.value === "/provider status"));
+  assert.ok(bareProviderSurface.rows.some((row) => row.value === "/provider transport cli-exec"));
+  assert.ok(bareProviderSurface.rows.some((row) => row.value === "/provider transport http-responses"));
+  assert.equal(transportSurface.rows[0]?.value, "/provider transport http-responses");
+});
+
 test("OpenTUI command surface resolves skill preview", () => {
   const cwd = makeSkillWorkspace(["alpha"]);
   const preview = resolveSkillPreview(cwd, "$alp");

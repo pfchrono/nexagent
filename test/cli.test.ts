@@ -1102,6 +1102,20 @@ test("runRuntimeCommand dispatches sync extension commands", async () => {
   assert.match(runRuntimeCommand(session, "/extensions")?.output ?? "", /commands: 1/);
 });
 
+test("runRuntimeCommand exposes extension tools in tool policy", async () => {
+  const { runRuntimeCommand } = await import("../src/cli.js");
+  const { createRuntimeExtensionHost } = await import("../src/runtime/extensions.js");
+  const empty = createSession();
+  const session = createSession();
+  const host = createRuntimeExtensionHost();
+  host.status = "configured";
+  host.tools.set("sample_tool", { name: "sample_tool", description: "sample extension tool" });
+  session.extensions = host;
+
+  assert.match(runRuntimeCommand(empty, "/tools")?.output ?? "", /^extensionTools: none$/m);
+  assert.match(runRuntimeCommand(session, "/tools")?.output ?? "", /^extensionTools: sample_tool$/m);
+});
+
 test("runRuntimeCommand maps /scip symbols to LSP summary", async () => {
   const { runRuntimeCommand } = await import("../src/cli.js");
   const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-scip-"));

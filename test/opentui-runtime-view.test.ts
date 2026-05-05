@@ -179,10 +179,10 @@ test("createOpenTuiRuntimeView exposes compact LSP problems panel data", async (
     assert.equal(view.lspProblems.count, 1);
     assert.equal(view.lspProblems.lastTouched, "sample.ts");
     assert.deepEqual(view.lspProblems.rows, [
-      "Problems",
-      "1 issue",
-      "last sample.ts",
-      "/lsp diagnostics sample.ts",
+      "LSP problems",
+      "count 1 issue",
+      "latest sample.ts",
+      "open /lsp diagnostics sample.ts",
     ]);
   } finally {
     await rm(cwd, { recursive: true, force: true });

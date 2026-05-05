@@ -35,6 +35,25 @@ export interface RuntimeTodoToolArgs {
   owner?: string;
   metadata?: Record<string, unknown>;
   includeDeleted?: boolean;
+  items?: RuntimeTodoItem[];
+  todos?: RuntimeTodoItem[];
+}
+
+interface RuntimeTodoItem {
+  content?: string;
+  text?: string;
+  subject?: string;
+  title?: string;
+  task?: string;
+  status?: RuntimeTodoStatus;
+  activeForm?: string;
+  active?: string;
+  doing?: string;
+  description?: string;
+  detail?: string;
+  blockedBy?: string[];
+  owner?: string;
+  metadata?: Record<string, unknown>;
 }
 
 const STATUS_ORDER: RuntimeTodoStatus[] = ["in_progress", "pending", "completed", "deleted"];
@@ -57,6 +76,15 @@ export function createRuntimeTodoState(value?: Partial<RuntimeTodoState> | null)
 }
 
 export function executeTodoTool(session: RuntimeSession, args: Record<string, unknown>): { ok: boolean; tool: "todo"; output: string } {
+  const listAlias = Array.isArray(args.items) ? args.items : Array.isArray(args.todos) ? args.todos : null;
+  if (listAlias && args.action === undefined) {
+    const result = replaceTodosFromItems(session.todos, listAlias);
+    if (!result.ok) {
+      return { ok: false, tool: "todo", output: result.output };
+    }
+    return { ok: true, tool: "todo", output: result.output };
+  }
+
   const parsed = parseTodoArgs(args);
   const action = parsed.action ?? "list";
   const result = mutateTodos(session.todos, parsed, action);
@@ -82,7 +110,7 @@ export function formatTodosCommandOutput(state: RuntimeTodoState, mode = "active
 }
 
 export function formatTodoOverlayRows(state: RuntimeTodoState, width: number): Array<{ key: string; text: string; fg: string }> {
-  const active = sortedTodos(state.tasks).filter((task) => task.status === "in_progress" || task.status === "pending");
+  const active = sortedTodos(state.tasks).filter((task) => task.status === "in_progress" || task.status === "pending" || task.status === "completed");
   if (active.length === 0) {
     return [];
   }
@@ -241,7 +269,47 @@ function parseTodoArgs(args: Record<string, unknown>): RuntimeTodoToolArgs {
     owner: typeof args.owner === "string" ? args.owner : undefined,
     metadata: args.metadata && typeof args.metadata === "object" && !Array.isArray(args.metadata) ? args.metadata as Record<string, unknown> : undefined,
     includeDeleted: args.includeDeleted === true,
+    items: todoItems(args.items),
+    todos: todoItems(args.todos),
   };
+}
+
+function replaceTodosFromItems(state: RuntimeTodoState, rawItems: unknown[]): { ok: boolean; output: string } {
+  if (rawItems.length === 0) {
+    state.tasks = [];
+    state.updatedAt = new Date().toISOString();
+    return { ok: true, output: "todos cleared" };
+  }
+
+  const parsed = rawItems.map(parseTodoItem).filter((item): item is RuntimeTodoItem => Boolean(item));
+  if (parsed.length === 0) {
+    return { ok: false, output: "todo items require subject" };
+  }
+
+  const now = new Date().toISOString();
+  const tasks: RuntimeTodoTask[] = parsed.map((item, index) => ({
+    id: `todo-${String(index + 1)}`,
+    subject: todoItemSubject(item),
+    description: cleanOptional(item.description ?? item.detail),
+    activeForm: cleanOptional(item.activeForm ?? item.active ?? item.doing),
+    status: item.status && item.status !== "deleted" ? item.status : "pending",
+    blockedBy: uniqueIds(item.blockedBy ?? []),
+    owner: cleanOptional(item.owner),
+    metadata: sanitizeMetadata(item.metadata),
+    createdAt: now,
+    updatedAt: now,
+  }));
+  if (tasks.some((task) => !task.subject)) {
+    return { ok: false, output: "todo subject cannot be empty" };
+  }
+  const validation = validateTodoGraph(tasks);
+  if (!validation.ok) {
+    return validation;
+  }
+  state.tasks = tasks;
+  state.nextId = tasks.length + 1;
+  state.updatedAt = now;
+  return { ok: true, output: formatTodosCommandOutput(state, "active") };
 }
 
 function validateStatusTransition(from: RuntimeTodoStatus, to: RuntimeTodoStatus): { ok: boolean; output: string } {
@@ -381,6 +449,41 @@ function isTodoStatus(value: unknown): value is RuntimeTodoStatus {
 
 function stringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0).map((item) => item.trim()) : [];
+}
+
+function todoItems(value: unknown): RuntimeTodoItem[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  return value.map(parseTodoItem).filter((item): item is RuntimeTodoItem => Boolean(item));
+}
+
+function parseTodoItem(value: unknown): RuntimeTodoItem | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const item = value as Record<string, unknown>;
+  const status = typeof item.status === "string" && isTodoStatus(item.status) ? item.status : undefined;
+  return {
+    content: typeof item.content === "string" ? item.content : undefined,
+    text: typeof item.text === "string" ? item.text : undefined,
+    subject: typeof item.subject === "string" ? item.subject : undefined,
+    title: typeof item.title === "string" ? item.title : undefined,
+    task: typeof item.task === "string" ? item.task : undefined,
+    status,
+    activeForm: typeof item.activeForm === "string" ? item.activeForm : undefined,
+    active: typeof item.active === "string" ? item.active : undefined,
+    doing: typeof item.doing === "string" ? item.doing : undefined,
+    description: typeof item.description === "string" ? item.description : undefined,
+    detail: typeof item.detail === "string" ? item.detail : undefined,
+    blockedBy: stringArray(item.blockedBy),
+    owner: typeof item.owner === "string" ? item.owner : undefined,
+    metadata: item.metadata && typeof item.metadata === "object" && !Array.isArray(item.metadata) ? item.metadata as Record<string, unknown> : undefined,
+  };
+}
+
+function todoItemSubject(item: RuntimeTodoItem): string {
+  return (item.subject ?? item.content ?? item.text ?? item.task ?? item.title ?? "").trim();
 }
 
 function uniqueIds(values: string[]): string[] {

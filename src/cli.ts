@@ -3611,6 +3611,7 @@ function formatOperationControlsStatus(session: RuntimeSession): string {
 
 function formatToolPolicyStatus(session: RuntimeSession, detailMode: DetailMode = "compact"): string {
   const internalTools = getInternalToolDefinitions().map((tool) => tool.name).join(", ");
+  const extensionTools = [...(session.extensions?.tools.keys() ?? [])].sort().join(", ") || "none";
   return formatDiagnosticSection("tool-policy", detailMode, [
     ["mode", session.toolPolicy.mode],
     ["readable", (session.toolPolicy.readRoots ?? ["all non-protected paths"]).join(" | ")],
@@ -3621,6 +3622,7 @@ function formatToolPolicyStatus(session: RuntimeSession, detailMode: DetailMode 
     ["shell", session.toolPolicy.shell],
     ["shellGuard", "repo-pinned; destructive-blocked"],
     ["internalTools", internalTools],
+    ["extensionTools", extensionTools],
     ["ripgrep", hasRipgrep() ? "available" : "missing"],
   ], [
     ["mode", session.toolPolicy.mode],
@@ -3633,6 +3635,7 @@ function formatToolPolicyStatus(session: RuntimeSession, detailMode: DetailMode 
     ["writes", session.toolPolicy.writes],
     ["deletes", session.toolPolicy.deletes],
     ["internalTools", internalTools],
+    ["extensionTools", extensionTools],
     ["ripgrep", hasRipgrep() ? "available" : "missing"],
   ]).join("\n");
 }

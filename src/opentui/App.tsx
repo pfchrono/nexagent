@@ -2412,12 +2412,14 @@ function renderLspProblemsPanelRows(view: OpenTuiRuntimeView, width: number): Ar
     return [];
   }
   const [title = "Problems", count = "", last = "", action = ""] = view.lspProblems.rows;
+  const innerWidth = Math.max(12, width - 4);
   return [
-    { key: "lsp-problems-title", text: fitLine(`! ${title}`, width), fg: "#f9e2af" },
-    { key: "lsp-problems-count", text: fitLine(count, width), fg: "#f38ba8" },
-    { key: "lsp-problems-last", text: fitLine(last, width), fg: "#cdd6f4" },
-    { key: "lsp-problems-action", text: fitLine(action, width), fg: "#89b4fa" },
-  ];
+    { key: "lsp-problems-top", text: frameTop(` ${title} `, innerWidth), fg: "#f9e2af" },
+    { key: "lsp-problems-count", text: frameBody(count, innerWidth), fg: "#f38ba8" },
+    { key: "lsp-problems-latest", text: frameBody(last, innerWidth), fg: "#cdd6f4" },
+    { key: "lsp-problems-action", text: frameBody(action, innerWidth), fg: "#89b4fa" },
+    { key: "lsp-problems-bottom", text: frameBottom(innerWidth), fg: "#f9e2af" },
+  ].map((row) => ({ ...row, text: fitFrameLine(row.text, width) }));
 }
 
 function configActionForRow(section: string, line: string): string | null {

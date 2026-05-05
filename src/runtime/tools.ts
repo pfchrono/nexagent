@@ -494,7 +494,7 @@ export function getInternalToolDefinitions(): readonly InternalToolDefinition[] 
           includeDeleted: { type: "boolean", description: "Include deleted tombstones in list output." },
           items: {
             type: "array",
-            description: "Legacy create-list alias. First item creates one todo.",
+            description: "Legacy create-list alias. Replaces the visible todo list with these items.",
             items: {
               type: "object",
               properties: {
@@ -505,6 +505,8 @@ export function getInternalToolDefinitions(): readonly InternalToolDefinition[] 
                 task: { type: "string" },
                 status: { type: "string" },
                 activeForm: { type: "string" },
+                active: { type: "string" },
+                doing: { type: "string" },
                 description: { type: "string" },
                 detail: { type: "string" },
                 blockedBy: { type: "array", items: { type: "string" } },
@@ -516,7 +518,7 @@ export function getInternalToolDefinitions(): readonly InternalToolDefinition[] 
           },
           todos: {
             type: "array",
-            description: "Legacy create-list alias. First item creates one todo.",
+            description: "Legacy create-list alias. Replaces the visible todo list with these items.",
             items: {
               type: "object",
               properties: {
@@ -527,6 +529,8 @@ export function getInternalToolDefinitions(): readonly InternalToolDefinition[] 
                 task: { type: "string" },
                 status: { type: "string" },
                 activeForm: { type: "string" },
+                active: { type: "string" },
+                doing: { type: "string" },
                 description: { type: "string" },
                 detail: { type: "string" },
                 blockedBy: { type: "array", items: { type: "string" } },
@@ -1675,21 +1679,11 @@ function normalizeTodoToolArguments(args: Record<string, unknown>): Record<strin
     return args;
   }
 
-  const first = items.find((item): item is Record<string, unknown> => isRecord(item));
-  if (!first) {
+  if (items.length === 0) {
     return { ...args, action: "clear" };
   }
 
-  return {
-    action: "create",
-    subject: asString(first.subject ?? first.content ?? first.text ?? first.task ?? first.title, ""),
-    description: asOptionalString(first.description ?? first.detail),
-    activeForm: asOptionalString(first.activeForm ?? first.active ?? first.doing),
-    status: first.status,
-    blockedBy: first.blockedBy,
-    owner: first.owner,
-    metadata: first.metadata,
-  };
+  return args;
 }
 
 interface ShellCommandRunResult {
