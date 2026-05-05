@@ -739,6 +739,17 @@ function createCockpitWarnings(session: RuntimeSession): OpenTuiCockpitWarningRo
       action: "inspect trace or retry after fix",
     });
   }
+  const failedTurnEvent = latestFailedTurnEvent(session);
+  if (failedTurnEvent && session.action.status !== "error") {
+    const failedMessage = splitTranscriptLines(failedTurnEvent.detail ?? failedTurnEvent.summary)[0]
+      ?? firstLine(failedTurnEvent.detail ?? failedTurnEvent.summary);
+    warnings.push({
+      severity: failedTurnEvent.status === "blocked" ? "blocking" : "warning",
+      type: failedTurnEvent.kind,
+      message: failedMessage,
+      action: "open trace detail or retry after fix",
+    });
+  }
   const failedMcpServers = session.mcpRegistry?.statuses?.filter((status) => status.status === "failed") ?? [];
   if (failedMcpServers.length > 0) {
     warnings.push({
@@ -763,12 +774,14 @@ function createCockpitLadder(session: RuntimeSession, fallbackObjective: string)
   const latestPrompt = latestEventSummary(session, (event) => event.kind === "prompt");
   const latestActive = latestEventSummary(session, (event) => event.status === "started" || event.status === "queued");
   const latestAction = latestEventSummary(session, (event) => event.kind === "tool" || event.kind === "command" || event.kind === "provider");
-  const latestResult = latestEventSummary(session, (event) => event.status === "completed" || event.status === "failed" || event.kind === "assistant");
+  const latestAssistantResult = latestAssistantResultSummary(session);
+  const latestFailedResult = latestEventSummary(session, (event) => event.status === "failed" || event.status === "blocked");
+  const latestCompletedResult = latestEventSummary(session, (event) => event.status === "completed" && event.kind !== "prompt");
   return {
     intent: latestPrompt ?? fallbackObjective,
     plan: session.action.pending ? session.action.detail : "ready",
-    act: latestAction ?? latestActive ?? "idle",
-    result: latestResult ?? (session.action.status === "error" ? session.action.detail : "pending"),
+    act: latestActive ?? latestAction ?? "idle",
+    result: latestAssistantResult ?? latestFailedResult ?? latestCompletedResult ?? (session.action.status === "error" ? session.action.detail : "pending"),
   };
 }
 
@@ -778,6 +791,25 @@ function latestEventSummary(
 ): string | null {
   const event = [...session.events].reverse().find(predicate);
   return event ? firstLine(event.summary) : null;
+}
+
+function latestFailedTurnEvent(session: RuntimeSession): RuntimeSession["events"][number] | null {
+  return [...session.events].reverse().find((event) =>
+    (event.kind === "tool" || event.kind === "command" || event.kind === "provider")
+    && (event.status === "failed" || event.status === "blocked")
+  ) ?? null;
+}
+
+function latestAssistantResultSummary(session: RuntimeSession): string | null {
+  const event = [...session.events].reverse().find((candidate) =>
+    candidate.kind === "assistant" && candidate.status === "completed"
+  );
+  if (!event) {
+    return null;
+  }
+  const content = event.detail && event.detail !== event.summary ? event.detail : event.summary;
+  const sanitized = sanitizeAssistantTranscriptText(content);
+  return splitTranscriptLines(sanitized).map((line) => line.trim()).find(Boolean) ?? null;
 }
 
 function createBlock(options: {

@@ -750,6 +750,67 @@ test("OpenTUI cockpit view maps approval warnings ladder and memory split", () =
   assert.doesNotMatch(JSON.stringify(view.cockpit.memory), /hidden preview|hidden write/);
 });
 
+test("OpenTUI cockpit result prefers assistant output over generic event summary", () => {
+  const session = createSession();
+  session.events = [
+    {
+      at: "2026-04-30T00:00:01.000Z",
+      kind: "prompt",
+      status: "completed",
+      summary: "summarize repo",
+    },
+    {
+      at: "2026-04-30T00:00:02.000Z",
+      kind: "tool",
+      status: "completed",
+      summary: "tool read_file completed",
+      detail: "README.md read",
+    },
+    {
+      at: "2026-04-30T00:00:03.000Z",
+      kind: "assistant",
+      status: "completed",
+      summary: "assistant response completed",
+      detail: "Repo summary ready.\nSecond line.",
+    },
+  ];
+
+  const view = createOpenTuiRuntimeView(session);
+
+  assert.equal(view.cockpit.ladder.intent, "summarize repo");
+  assert.equal(view.cockpit.ladder.act, "tool read_file completed");
+  assert.equal(view.cockpit.ladder.result, "Repo summary ready.");
+});
+
+test("OpenTUI cockpit promotes latest failed turn event", () => {
+  const session = createSession();
+  session.events = [
+    {
+      at: "2026-04-30T00:00:01.000Z",
+      kind: "prompt",
+      status: "completed",
+      summary: "run tests",
+    },
+    {
+      at: "2026-04-30T00:00:02.000Z",
+      kind: "command",
+      status: "failed",
+      summary: "command test failed",
+      detail: "bun test exited 1\nstack omitted",
+    },
+  ];
+
+  const view = createOpenTuiRuntimeView(session);
+
+  assert.equal(view.cockpit.ladder.result, "command test failed");
+  assert.deepEqual(view.cockpit.warnings.find((warning) => warning.type === "command"), {
+    severity: "warning",
+    type: "command",
+    message: "bun test exited 1",
+    action: "open trace detail or retry after fix",
+  });
+});
+
 test("OpenTUI memory diagnostics fallback is counts-only", () => {
   const session = createSession();
   session.archivist.retrieval = { used: false, sourceCategory: null, matchCount: 0, preview: "hidden retrieval" };
