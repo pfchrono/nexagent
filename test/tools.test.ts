@@ -8,7 +8,7 @@ import { createDefaultProviderRegistry } from "../src/provider/registry.js";
 import { applyArchivistRetrieval, rememberArchivistFailure } from "../src/runtime/archivist.js";
 import { resolveNexsightRuntime } from "../src/runtime/nexsight.js";
 import { analyzeBlockedShellCommand, analyzeSafeGitCommand } from "../src/runtime/policy.js";
-import { classifyInternalToolRisk, executeInternalTool, executeInternalToolAsync } from "../src/runtime/tools.js";
+import { classifyInternalToolRisk, executeInternalTool, executeInternalToolAsync, getInternalToolFunctionDefinitions } from "../src/runtime/tools.js";
 import type { RuntimeSession } from "../src/runtime/session.js";
 
 function createSession(cwd: string): RuntimeSession {
@@ -275,6 +275,29 @@ test("internal tool argument guard accepts known legacy aliases", async () => {
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }
+});
+
+test("internal strict tool schemas expose compatibility aliases", () => {
+  const functions = new Map(getInternalToolFunctionDefinitions().map((definition) => [definition.name, definition]));
+  const propertiesFor = (name: string): Record<string, unknown> => {
+    const parameters = functions.get(name)?.parameters;
+    assert.equal(typeof parameters, "object");
+    assert.notEqual(parameters, null);
+    const properties = (parameters as { properties?: unknown }).properties;
+    assert.equal(typeof properties, "object");
+    assert.notEqual(properties, null);
+    return properties as Record<string, unknown>;
+  };
+
+  assert.ok("timeout" in propertiesFor("shell_command"));
+  assert.ok("items" in propertiesFor("todo"));
+  assert.ok("operations" in propertiesFor("batch_edit"));
+  assert.ok("query" in propertiesFor("search_content"));
+  assert.ok("query" in propertiesFor("search_files"));
+  assert.ok("path" in propertiesFor("git_status"));
+  assert.ok("lang" in propertiesFor("nexsight_execute"));
+  assert.ok("path" in propertiesFor("lsp_navigation"));
+  assert.ok("char" in propertiesFor("lsp_navigation"));
 });
 
 test("executeInternalTool writes and patches file inside guarded repo roots", async () => {
