@@ -1089,8 +1089,8 @@ async function resolveGitDir(repoRoot: string): Promise<string | null> {
 async function discoverInstructionSources(cwd: string): Promise<RepoInstructionSource[]> {
   const discovered = await Promise.all(
     REPO_INSTRUCTION_SOURCE_CANDIDATES.map(async ({ kind, relativePath }) => {
-      const absolutePath = path.join(cwd, relativePath);
-      return (await pathExists(absolutePath)) ? await describeInstructionSource(kind, absolutePath) : null;
+      const absolutePath = await resolveInstructionCandidatePath(cwd, relativePath);
+      return absolutePath ? await describeInstructionSource(kind, absolutePath) : null;
     }),
   );
 
@@ -1103,6 +1103,28 @@ async function discoverInstructionSources(cwd: string): Promise<RepoInstructionS
   }
 
   return instructionSources;
+}
+
+async function resolveInstructionCandidatePath(cwd: string, relativePath: string): Promise<string | null> {
+  const absolutePath = path.join(cwd, relativePath);
+  if (await pathExists(absolutePath)) {
+    return absolutePath;
+  }
+
+  const parentPath = path.dirname(absolutePath);
+  const targetName = path.basename(relativePath).toLowerCase();
+
+  try {
+    const entries = await readdir(parentPath, { withFileTypes: true });
+    const match = entries.find((entry) => entry.name.toLowerCase() === targetName);
+    return match ? path.join(parentPath, match.name) : null;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR") {
+      return null;
+    }
+    throw error;
+  }
 }
 
 async function describeInstructionSource(kind: string, absolutePath: string): Promise<RepoInstructionSource> {
@@ -1203,7 +1225,7 @@ async function summarizeMcpRegistryDetail(filePath: string): Promise<string | nu
 }
 
 async function readInstructionPreview(filePath: string, maxLines = DETAIL_PREVIEW_LINES): Promise<string | null> {
-  const content = await readTrimmedFile(filePath);
+  const content = stripInstructionFrontmatter(await readTrimmedFile(filePath));
   if (!content) {
     return null;
   }
@@ -1216,6 +1238,15 @@ async function readInstructionPreview(filePath: string, maxLines = DETAIL_PREVIE
     .map((line) => truncatePreview(line));
 
   return previewLines.length > 0 ? previewLines.join("\n") : null;
+}
+
+function stripInstructionFrontmatter(content: string | null): string | null {
+  if (!content) {
+    return null;
+  }
+
+  const withoutFrontmatter = content.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, "").trim();
+  return withoutFrontmatter.length > 0 ? withoutFrontmatter : null;
 }
 
 function truncatePreview(value: string): string {

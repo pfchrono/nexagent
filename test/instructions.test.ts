@@ -445,3 +445,33 @@ test("loadHarnessConfig summarizes material instruction sources", async () => {
     await rm(cwd, { recursive: true, force: true });
   }
 });
+
+test("loadHarnessConfig accepts case-variant context files and strips frontmatter", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-config-context-"));
+
+  try {
+    await writeFile(
+      path.join(cwd, "agents.md"),
+      "---\ntitle: ignored\n---\n# Repo Guardrails\nUse canonical repo rules.\n",
+      "utf8",
+    );
+    await writeFile(
+      path.join(cwd, "claude.md"),
+      "---\ndescription: shim metadata\n---\nCompatibility shim only.\n",
+      "utf8",
+    );
+
+    const config = await loadHarnessConfig(cwd);
+    const sourceByKind = new Map(config.instructionSources.map((source) => [source.kind, source]));
+
+    assert.equal(path.basename(sourceByKind.get("AGENTS.md")?.path ?? ""), "agents.md");
+    assert.match(sourceByKind.get("AGENTS.md")?.summary ?? "", /AGENTS\.md: # Repo Guardrails/);
+    assert.match(sourceByKind.get("AGENTS.md")?.detail ?? "", /Use canonical repo rules\./);
+    assert.doesNotMatch(sourceByKind.get("AGENTS.md")?.detail ?? "", /title: ignored/);
+    assert.equal(path.basename(sourceByKind.get("CLAUDE.md")?.path ?? ""), "claude.md");
+    assert.match(sourceByKind.get("CLAUDE.md")?.summary ?? "", /CLAUDE\.md: Compatibility shim only\./);
+    assert.doesNotMatch(sourceByKind.get("CLAUDE.md")?.detail ?? "", /description: shim metadata/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
