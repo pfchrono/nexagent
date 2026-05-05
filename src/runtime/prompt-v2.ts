@@ -148,7 +148,7 @@ function buildCoreSections(): PromptV2Section[] {
       content: [
         "Actionable request means act in this turn: inspect, edit, run, verify, or report a real blocker.",
         "Operate loop: understand goal, inspect state, choose best tool, execute, observe, recover from failures, verify, then answer with evidence.",
-        "At turn start, the harness may display a short Attempting line. Treat it as orientation; do not repeat it unless useful.",
+        "At turn start, emit one short model-authored intent only when the provider prompt asks for the intent tag; do not use canned Attempting phrasing.",
         "Default to action for coding, debugging, testing, docs, repo inspection, and verification. Discuss only when user explicitly asks to brainstorm, compare, plan, or pause.",
         "Do not end with a plan, promise, apology, self-correction, or ask-for-approval loop when tools can make progress.",
         "Continue until task is done, verified, or genuinely blocked by missing access, approval gate, or unavailable external dependency.",

@@ -16,7 +16,6 @@ import { beginBtwTurn, buildBtwInjectPrompt, cancelBtwTurn, clearBtwThread, comp
 import { formatSubagentsStatus } from "./runtime/subagents.js";
 import { initializeRuntimeDebug, writeDebugLog, type RuntimeDebugOptions } from "./runtime/debug.js";
 import { buildPromptV2, summarizePromptV2 } from "./runtime/prompt-v2.js";
-import { formatTurnStartIntent } from "./runtime/turn-intent.js";
 import { checkpointNexsightSession, getNexsightStats, purgeNexsight, searchNexsight } from "./runtime/nexsight.js";
 import { emitTerminalNotification, formatSessionColorSwatch, getSessionColorCode, getSessionColorIndex, getSessionEmoji, notifyThresholdMs, SESSION_COLORS, SESSION_EMOJIS } from "./runtime/pi-compat.js";
 import { createRuntimeExtensionArgs, createRuntimeExtensionContext, findRuntimeExtensionCommand, formatRuntimeExtensionsStatus } from "./runtime/extensions.js";
@@ -960,12 +959,6 @@ export async function runPromptCommand(session: RuntimeSession, prompt: string):
     status: "queued",
     summary: promptSummary ?? "user prompt accepted",
     detail: formatPromptEventDetail(transcriptPrompt),
-  });
-  recordRuntimeEvent(session, {
-    kind: "control",
-    status: "started",
-    summary: "turn intent",
-    detail: formatTurnStartIntent(transcriptPrompt),
   });
   setRuntimeAction(session, "running", "provider request");
 

@@ -27,7 +27,6 @@ import { savePersistedRuntimeState } from "../runtime/persistence.js";
 import { formatSubagentOverlayRows } from "../runtime/subagents.js";
 import { formatTodoOverlayRows } from "../runtime/todos.js";
 import { beginGoalTurn, completeGoalTurn, formatGoalOverlayRows, type GoalContinuation } from "../runtime/goal.js";
-import { formatTurnStartIntent } from "../runtime/turn-intent.js";
 import {
   maybeCompactConversation,
   recordConversationTurn,
@@ -1101,12 +1100,6 @@ export function OpenTuiApp({ view: initialView, session, keyboardSource, promptH
       status: "queued",
       summary: display.promptSummary ?? "user prompt accepted",
       detail: formatPromptEventDetail(display.transcriptPrompt ?? prompt),
-    });
-    recordRuntimeEvent(session, {
-      kind: "control",
-      status: "started",
-      summary: "turn intent",
-      detail: formatTurnStartIntent(display.transcriptPrompt ?? prompt),
     });
     setRuntimeAction(session, "running", "provider request");
     refreshRuntimeView();

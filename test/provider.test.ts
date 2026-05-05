@@ -246,6 +246,75 @@ test("executeProviderRequest returns codex output", async () => {
   });
 });
 
+test("executeProviderRequest records model-authored intent and strips tag from final output", async () => {
+  const session = createSession();
+
+  const result = await executeProviderRequest(
+    {
+      session,
+      prompt: "say hi",
+    },
+    {
+      exec: async (request) => {
+        assert.match(request.prompt, /<nexagent_intent>\.\.\.<\/nexagent_intent>/);
+        return {
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+          output: "<nexagent_intent>Inspect request, then answer briefly.</nexagent_intent>\nhello world\n",
+        };
+      },
+      http: async () => {
+        throw new Error("http should not be used");
+      },
+      codexHttp: async () => {
+        throw new Error("codex-http should not be used");
+      },
+    },
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.output, "hello world");
+  assert.equal(
+    session.events.find((event) => event.summary === "model turn intent")?.detail,
+    "Inspect request, then answer briefly.",
+  );
+});
+
+test("executeProviderRequest records model intent before executing first tool", async () => {
+  const session = createSession();
+
+  const result = await executeProviderRequest(
+    {
+      session,
+      prompt: "read package",
+    },
+    {
+      exec: async (request) => ({
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+        output: request.prompt.includes("tool todo completed")
+          ? "Read package evidence."
+          : '<nexagent_intent>Track task before answering.</nexagent_intent>\n<nexagent_tool_call>{"name":"todo","arguments":{"action":"create","subject":"Answer request","status":"in_progress"}}</nexagent_tool_call>',
+      }),
+      http: async () => {
+        throw new Error("http should not be used");
+      },
+      codexHttp: async () => {
+        throw new Error("codex-http should not be used");
+      },
+    },
+  );
+
+  assert.equal(result.ok, true);
+  const intentIndex = session.events.findIndex((event) => event.summary === "model turn intent");
+  const toolIndex = session.events.findIndex((event) => event.summary === "tool todo completed");
+  assert.notEqual(intentIndex, -1);
+  assert.notEqual(toolIndex, -1);
+  assert.equal(intentIndex < toolIndex, true);
+});
+
 test("executeProviderRequest fires extension lifecycle and injects guidance", async () => {
   const session = createSession();
   const host = createRuntimeExtensionHost();

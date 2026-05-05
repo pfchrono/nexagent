@@ -135,6 +135,7 @@ export interface CodexInvokers {
 }
 
 const JSON_BODY_TOOL_CALL_PATTERN = /<(?:nexagent_)?tool_call>([\s\S]+?)<\/(?:nexagent_)?tool_call>/i;
+const MODEL_INTENT_PATTERN = /<nexagent_intent>([\s\S]*?)<\/nexagent_intent>/i;
 const INTERNAL_TOOL_TAG_NAMES = [
   "read_file",
   "write_file",
@@ -235,6 +236,7 @@ async function executeProviderRequestImpl(
     });
     await applyArchivistRetrieval(request.session, request.prompt);
     const assembled = await assemblePrompt(request);
+    assembled.prompt = `${assembled.prompt}\n\nTurn-start intent protocol:\n- Before your first tool call or final answer, emit exactly one short model-authored intent line as <nexagent_intent>...</nexagent_intent>.\n- Keep it under 120 characters, specific to this turn, and do not use canned \"Attempting\" phrasing.\n- After that intent tag, continue normally.`;
     const extensionMessages = await collectExtensionSystemMessages(request.session, request.prompt);
     if (extensionMessages.length > 0) {
       assembled.prompt = `${assembled.prompt}\n\nExtension guidance:\n${extensionMessages.map((message) => `- ${message}`).join("\n")}`;
@@ -314,7 +316,11 @@ async function executeProviderRequestImpl(
         return createCodexFailure(provider, model, invocation.stderr, invocation.stdout, transport.id);
       }
 
-      const output = invocation.output.trimEnd();
+      const intent = extractModelIntent(invocation.output);
+      if (intent) {
+        recordModelIntent(request.session, intent);
+      }
+      const output = stripModelIntent(invocation.output).trimEnd();
       if (output.length === 0) {
         return createEmptyOutputFailure(provider, model, transport.id);
       }
@@ -522,7 +528,11 @@ async function executeProviderRequestImpl(
         if (finalInvocation.exitCode !== 0) {
           return createCodexFailure(provider, model, finalInvocation.stderr, finalInvocation.stdout, transport.id);
         }
-        const finalOutput = finalInvocation.output.trimEnd();
+        const finalIntent = extractModelIntent(finalInvocation.output);
+        if (finalIntent) {
+          recordModelIntent(request.session, finalIntent);
+        }
+        const finalOutput = stripModelIntent(finalInvocation.output).trimEnd();
         if (finalOutput.length > 0 && !parseInternalToolCall(finalOutput) && !containsToolCallMarkup(finalOutput)) {
           const missingObligation = createMissingRequiredEvidenceFailureIfAny(
             request,
@@ -1594,6 +1604,33 @@ function parseInternalToolCall(output: string): InternalToolCall | null {
   return parseAttributeStyleToolCall(output) ?? parseBareInternalToolTag(output);
 }
 
+function extractModelIntent(output: string): string | null {
+  const match = output.match(MODEL_INTENT_PATTERN);
+  const intent = match?.[1]?.replace(/\s+/g, " ").trim();
+  if (!intent) {
+    return null;
+  }
+  return intent.length > 140 ? `${intent.slice(0, 137)}...` : intent;
+}
+
+function stripModelIntent(output: string): string {
+  return output.replace(MODEL_INTENT_PATTERN, "").trimStart();
+}
+
+function recordModelIntent(session: RuntimeSession, intent: string): void {
+  const lastPromptIndex = [...session.events].map((event) => event.kind).lastIndexOf("prompt");
+  const events = lastPromptIndex >= 0 ? session.events.slice(lastPromptIndex) : session.events;
+  if (events.some((event) => event.kind === "control" && event.summary === "model turn intent")) {
+    return;
+  }
+  recordRuntimeEvent(session, {
+    kind: "control",
+    status: "started",
+    summary: "model turn intent",
+    detail: intent,
+  });
+}
+
 function parseToolCallJson(value: string): InternalToolCall | null {
   const trimmed = value.trim();
   for (const candidate of [trimmed, escapeControlCharsInJsonStrings(trimmed)]) {
@@ -1868,7 +1905,11 @@ async function maybeSynthesizeAfterRepeatedGuidance(
     return createCodexFailure(request.session.provider, model, finalInvocation.stderr, finalInvocation.stdout, adapter);
   }
 
-  const finalOutput = finalInvocation.output.trimEnd();
+  const finalIntent = extractModelIntent(finalInvocation.output);
+  if (finalIntent) {
+    recordModelIntent(request.session, finalIntent);
+  }
+  const finalOutput = stripModelIntent(finalInvocation.output).trimEnd();
   if (finalOutput.length === 0) {
     return createEmptyOutputFailure(request.session.provider, model, adapter);
   }

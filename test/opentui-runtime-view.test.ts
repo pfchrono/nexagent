@@ -415,18 +415,18 @@ test("createOpenTuiRuntimeView surfaces turn token metrics in chat control rows"
   assert.equal(view.statusline.lastOutputTokens, 11);
 });
 
-test("createOpenTuiRuntimeView shows compact turn intent at turn start", () => {
+test("createOpenTuiRuntimeView shows model-authored turn intent", () => {
   const session = createSession();
   session.events = [
     { at: "2025-01-01T00:00:01.000Z", kind: "prompt", status: "queued", summary: "user prompt accepted", detail: "verify config copy" },
-    { at: "2025-01-01T00:00:01.100Z", kind: "control", status: "started", summary: "turn intent", detail: "Attempting: Running verification and inspecting failures if they appear" },
+    { at: "2025-01-01T00:00:01.100Z", kind: "control", status: "started", summary: "model turn intent", detail: "Inspect config copy path, then verify failing checks." },
   ];
 
   const view = createOpenTuiRuntimeView(session);
 
   assert.deepEqual(view.transcriptBlocks.map((block) => block.label), ["you", "agent"]);
   assert.equal(view.transcriptBlocks[1]?.collapsedByDefault, false);
-  assert.equal(view.transcriptBlocks[1]?.detailLines[0], "Attempting: Running verification and inspecting failures if they appear");
+  assert.equal(view.transcriptBlocks[1]?.detailLines[0], "Inspect config copy path, then verify failing checks.");
 });
 
 test("createOpenTuiRuntimeView expands edit tool diff previews in chat", () => {

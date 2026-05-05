@@ -694,7 +694,7 @@ function isUserFacingControlEvent(event: RuntimeSession["events"][number]): bool
 }
 
 function isTurnIntentEvent(event: RuntimeSession["events"][number]): boolean {
-  return event.kind === "control" && event.status === "started" && event.summary === "turn intent";
+  return event.kind === "control" && event.status === "started" && event.summary === "model turn intent";
 }
 
 function formatRuntimeTranscriptLabel(event: RuntimeSession["events"][number]): string {
