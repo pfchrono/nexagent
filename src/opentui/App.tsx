@@ -543,11 +543,12 @@ export function OpenTuiApp({ view: initialView, session, keyboardSource, promptH
   const goalRows = session ? formatGoalOverlayRows(session.goal, Math.max(12, contentWidth - 6)) : [];
   const subagentRows = session ? formatSubagentOverlayRows(session.subagents, Math.max(12, contentWidth - 6)) : [];
   const todoRows = session ? formatTodoOverlayRows(session.todos, Math.max(12, contentWidth - 6)) : [];
+  const todoStatusRows = renderTodoStatusRows(todoRows, contentWidth);
+  const todoReservedRows = todoStatusRows.length;
   const extensionWidgetRows = [
     ...goalRows,
     ...subagentRows,
     ...btwRows,
-    ...todoRows,
     ...extensionCustomRows,
     ...(session?.extensions
       ? [...session.extensions.widgets.entries()].flatMap(([id, lines]) => lines.map((line, index) => ({ key: `extension-widget-${id}-${String(index)}`, text: sanitizeExtensionUiText(line) })))
@@ -555,21 +556,22 @@ export function OpenTuiApp({ view: initialView, session, keyboardSource, promptH
   ];
   const composerPromptRows = renderComposerPromptRows(composer, contentWidth);
   const composerReservedRows = composerPanelHeight(composerPromptRows.length + extensionWidgetRows.length, Boolean(attachmentLine));
+  const bottomReservedRows = composerReservedRows + todoReservedRows;
   const configPanelWidth = Math.min(Math.max(52, Math.floor(contentWidth * 0.38)), Math.max(36, contentWidth - 4));
   const configPanelLeft = Math.max(0, contentWidth - configPanelWidth - 1);
   const configPanelRows = renderConfigPanelRows(view, configPanelWidth, configSelectedIndex);
-  const configPanelHeight = Math.min(Math.max(8, configPanelRows.length), Math.max(8, terminalHeight - composerReservedRows - STATUSLINE_RESERVED_ROWS - 3));
+  const configPanelHeight = Math.min(Math.max(8, configPanelRows.length), Math.max(8, terminalHeight - bottomReservedRows - STATUSLINE_RESERVED_ROWS - 3));
   const configPanelTop = 2;
   const lspProblemsPanelWidth = Math.min(Math.max(34, Math.floor(contentWidth * 0.26)), Math.max(28, contentWidth - 4));
   const lspProblemsPanelRows = renderLspProblemsPanelRows(view, lspProblemsPanelWidth);
   const lspProblemsPanelHeight = Math.min(Math.max(4, lspProblemsPanelRows.length), 6);
   const lspProblemsPanelLeft = Math.max(0, contentWidth - lspProblemsPanelWidth - 1);
   const lspProblemsPanelTop = 2;
-  const paletteTop = Math.max(4, terminalHeight - composerReservedRows - STATUSLINE_RESERVED_ROWS - paletteOverlayHeight - 1);
+  const paletteTop = Math.max(4, terminalHeight - bottomReservedRows - STATUSLINE_RESERVED_ROWS - paletteOverlayHeight - 1);
   const askPanelWidth = askPanel?.width ?? paletteWidth;
   const askPanelHeight = askPanel?.rows.length ?? 0;
   const askPanelLeft = Math.max(0, Math.floor((contentWidth - askPanelWidth) / 2));
-  const askPanelTop = Math.max(4, terminalHeight - composerReservedRows - STATUSLINE_RESERVED_ROWS - askPanelHeight - 1);
+  const askPanelTop = Math.max(4, terminalHeight - bottomReservedRows - STATUSLINE_RESERVED_ROWS - askPanelHeight - 1);
   const traceProgressAllRows = traceExpanded
     ? renderTraceProgressRows(view.traceBlocks, contentWidth)
     : [];
@@ -584,7 +586,7 @@ export function OpenTuiApp({ view: initialView, session, keyboardSource, promptH
   const traceDetailPaletteLeft = Math.max(0, Math.floor((contentWidth - traceDetailPaletteWidth) / 2));
   const traceDetailPaletteHeight = Math.max(
     TRACE_DETAIL_PALETTE_MIN_ROWS,
-    Math.min(Math.max(TRACE_DETAIL_PALETTE_MIN_ROWS, terminalHeight - composerReservedRows - STATUSLINE_RESERVED_ROWS - 7), Math.floor(terminalHeight * 0.56)),
+    Math.min(Math.max(TRACE_DETAIL_PALETTE_MIN_ROWS, terminalHeight - bottomReservedRows - STATUSLINE_RESERVED_ROWS - 7), Math.floor(terminalHeight * 0.56)),
   );
   const traceDetailVisibleRows = Math.max(1, traceDetailPaletteHeight - 4);
   const traceDetailPaletteRows = activeTraceProgressRow
@@ -595,9 +597,9 @@ export function OpenTuiApp({ view: initialView, session, keyboardSource, promptH
       visibleRows: traceDetailVisibleRows,
     })
     : [];
-  const traceDetailPaletteTop = Math.max(4, Math.floor((terminalHeight - composerReservedRows - STATUSLINE_RESERVED_ROWS - traceDetailPaletteHeight) / 2));
+  const traceDetailPaletteTop = Math.max(4, Math.floor((terminalHeight - bottomReservedRows - STATUSLINE_RESERVED_ROWS - traceDetailPaletteHeight) / 2));
   const progressRowBudget = traceProgressRows.length;
-  const transcriptViewportHeight = Math.max(1, terminalHeight - 8 - cockpitRowBudget - progressRowBudget - STATUSLINE_RESERVED_ROWS - composerReservedRows);
+  const transcriptViewportHeight = Math.max(1, terminalHeight - 8 - cockpitRowBudget - progressRowBudget - STATUSLINE_RESERVED_ROWS - bottomReservedRows);
   const transcriptBlocks = view.transcriptBlocks;
   const transcriptRenderRows = flattenTranscriptBlocks(transcriptBlocks, transcriptState, contentWidth);
   const transcriptMetrics: TranscriptMetrics = {
@@ -836,7 +838,7 @@ export function OpenTuiApp({ view: initialView, session, keyboardSource, promptH
         width={contentWidth}
         height={STATUSLINE_RESERVED_ROWS}
         position="absolute"
-        top={Math.max(1, terminalHeight - composerReservedRows - STATUSLINE_RESERVED_ROWS)}
+        top={Math.max(1, terminalHeight - bottomReservedRows - STATUSLINE_RESERVED_ROWS)}
         left={1}
         zIndex={79}
         padding={0}
@@ -845,6 +847,22 @@ export function OpenTuiApp({ view: initialView, session, keyboardSource, promptH
           <text key={row.key} width={contentWidth} fg={row.fg}>{row.text}</text>
         ))}
       </box>
+      {todoReservedRows > 0 ? (
+        <box
+          flexDirection="column"
+          width={contentWidth}
+          height={todoReservedRows}
+          position="absolute"
+          top={Math.max(1, terminalHeight - composerReservedRows - todoReservedRows)}
+          left={1}
+          zIndex={80}
+          padding={0}
+        >
+          {todoStatusRows.map((row) => (
+            <text key={row.key} width={contentWidth} fg={row.fg}>{row.text}</text>
+          ))}
+        </box>
+      ) : null}
       <box
         flexDirection="column"
         width={contentWidth}
@@ -2029,6 +2047,23 @@ function createAskPanel(
 
 function composerPanelHeight(promptRowCount: number, hasAttachment: boolean): number {
   return 5 + promptRowCount + (hasAttachment ? 1 : 0);
+}
+
+function renderTodoStatusRows(
+  todoRows: Array<{ key: string; text: string; fg: string }>,
+  width: number,
+): Array<{ key: string; text: string; fg: string }> {
+  if (todoRows.length === 0) {
+    return [];
+  }
+  return [
+    { key: "todo-status-divider", text: fitLine("─".repeat(Math.max(0, width)), width), fg: "#6c7086" },
+    ...todoRows.map((row) => ({
+      key: `todo-status-${row.key}`,
+      text: fitLine(row.text, width),
+      fg: row.fg,
+    })),
+  ];
 }
 
 function renderComposerLine(composer: OpenTuiComposerState, width: number, attachmentPrefix = ""): string {

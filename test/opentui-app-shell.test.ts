@@ -120,7 +120,8 @@ test("OpenTUI app shell renders live view fields and Phase 66 command surfaces",
   assert.match(source, /History/);
   assert.match(source, /paletteFooterLine/);
   assert.match(source, /paletteOverlayHeight = PALETTE_VISIBLE_ROWS \+ PALETTE_CHROME_ROWS/);
-  assert.match(source, /terminalHeight - composerReservedRows - STATUSLINE_RESERVED_ROWS - paletteOverlayHeight - 1/);
+  assert.match(source, /bottomReservedRows = composerReservedRows \+ todoReservedRows/);
+  assert.match(source, /terminalHeight - bottomReservedRows - STATUSLINE_RESERVED_ROWS - paletteOverlayHeight - 1/);
   assert.match(source, /palette-\$\{String\(index\)\}-\$\{row\.selected \? "selected" : "row"\}-\$\{row\.value\}/);
   assert.match(source, /transcriptPositionLabel/);
   assert.match(source, /view\.cockpit\.approval\.pendingTool/);
@@ -215,7 +216,8 @@ test("OpenTUI app shell renders live view fields and Phase 66 command surfaces",
   assert.match(source, /formatSubagentOverlayRows\(session\.subagents/);
   assert.match(source, /\.\.\.subagentRows/);
   assert.match(source, /formatTodoOverlayRows\(session\.todos/);
-  assert.match(source, /\.\.\.todoRows/);
+  assert.match(source, /renderTodoStatusRows\(todoRows, contentWidth\)/);
+  assert.match(source, /todo-status-divider/);
   assert.match(source, /formatContextTokenNumber\(options\.statusline\.contextUsed\)/);
   assert.match(source, /formatContextTokenNumber\(options\.statusline\.contextWindow\)/);
   assert.match(source, /formatMemoryBytes\(options\.statusline\.memoryUsedBytes\)/);
