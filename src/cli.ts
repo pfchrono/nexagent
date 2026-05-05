@@ -3829,6 +3829,13 @@ function getAvailableModelsForProvider(session: RuntimeSession, provider: string
     supportedInApi: true,
     defaultReasoningEffort: "medium" as const,
     supportedReasoningEfforts: ["low", "medium", "high", "xhigh"] as const,
+    thinkingLevelMetadata: {
+      defaultThinkingLevel: "medium" as const,
+      supportedThinkingLevels: ["minimal", "low", "medium", "high"] as const,
+      providerControls: [
+        { provider: "openai" as const, transportModes: ["http-responses"] as const, parameter: "reasoning.effort" },
+      ],
+    },
     contextWindow: 0,
     maxContextWindow: 0,
   }];

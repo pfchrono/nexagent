@@ -406,6 +406,13 @@ function createConfiguredModel(id: string): CodexModelDefinition {
     supportedInApi: true,
     defaultReasoningEffort: "medium",
     supportedReasoningEfforts: ["low", "medium", "high", "xhigh"],
+    thinkingLevelMetadata: {
+      defaultThinkingLevel: "medium",
+      supportedThinkingLevels: ["minimal", "low", "medium", "high"],
+      providerControls: [
+        { provider: "openai", transportModes: ["http-responses"], parameter: "reasoning.effort" },
+      ],
+    },
     contextWindow: 0,
     maxContextWindow: 0,
   };

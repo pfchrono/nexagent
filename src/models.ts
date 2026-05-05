@@ -1,5 +1,18 @@
 export type CodexReasoningEffort = "low" | "medium" | "high" | "xhigh";
+export type CodexThinkingLevel = "minimal" | "low" | "medium" | "high";
 export type CodexModelFamily = "codex" | "gpt";
+
+export interface CodexThinkingLevelControl {
+  provider: "codex" | "openai" | "codex-cli";
+  transportModes: readonly string[];
+  parameter: string;
+}
+
+export interface CodexThinkingLevelMetadata {
+  defaultThinkingLevel: CodexThinkingLevel;
+  supportedThinkingLevels: readonly CodexThinkingLevel[];
+  providerControls: readonly CodexThinkingLevelControl[];
+}
 
 export interface CodexModelDefinition {
   id: string;
@@ -9,6 +22,7 @@ export interface CodexModelDefinition {
   supportedInApi: boolean;
   defaultReasoningEffort: CodexReasoningEffort;
   supportedReasoningEfforts: readonly CodexReasoningEffort[];
+  thinkingLevelMetadata: CodexThinkingLevelMetadata;
   contextWindow: number;
   maxContextWindow: number;
   additionalSpeedTiers?: readonly string[];
@@ -16,6 +30,20 @@ export interface CodexModelDefinition {
 }
 
 const GPT_5_REASONING_EFFORTS = ["low", "medium", "high", "xhigh"] as const;
+const GPT_5_THINKING_LEVELS = ["minimal", "low", "medium", "high"] as const;
+const GPT_5_THINKING_LEVEL_CONTROLS = [
+  { provider: "codex", transportModes: ["codex-http"], parameter: "thinkingLevel" },
+  { provider: "openai", transportModes: ["http-responses"], parameter: "reasoning.effort" },
+  { provider: "codex-cli", transportModes: ["cli-exec"], parameter: "model_reasoning_effort" },
+] as const;
+
+function createThinkingLevelMetadata(defaultThinkingLevel: CodexThinkingLevel): CodexThinkingLevelMetadata {
+  return {
+    defaultThinkingLevel,
+    supportedThinkingLevels: GPT_5_THINKING_LEVELS,
+    providerControls: GPT_5_THINKING_LEVEL_CONTROLS,
+  };
+}
 
 export const CODEX_MODEL_CATALOG: readonly CodexModelDefinition[] = [
   {
@@ -26,6 +54,7 @@ export const CODEX_MODEL_CATALOG: readonly CodexModelDefinition[] = [
     supportedInApi: true,
     defaultReasoningEffort: "medium",
     supportedReasoningEfforts: GPT_5_REASONING_EFFORTS,
+    thinkingLevelMetadata: createThinkingLevelMetadata("medium"),
     contextWindow: 272000,
     maxContextWindow: 1000000,
     additionalSpeedTiers: ["fast"],
@@ -38,6 +67,7 @@ export const CODEX_MODEL_CATALOG: readonly CodexModelDefinition[] = [
     supportedInApi: true,
     defaultReasoningEffort: "medium",
     supportedReasoningEfforts: GPT_5_REASONING_EFFORTS,
+    thinkingLevelMetadata: createThinkingLevelMetadata("medium"),
     contextWindow: 272000,
     maxContextWindow: 272000,
     additionalSpeedTiers: ["fast"],
@@ -50,6 +80,7 @@ export const CODEX_MODEL_CATALOG: readonly CodexModelDefinition[] = [
     supportedInApi: true,
     defaultReasoningEffort: "medium",
     supportedReasoningEfforts: GPT_5_REASONING_EFFORTS,
+    thinkingLevelMetadata: createThinkingLevelMetadata("medium"),
     contextWindow: 272000,
     maxContextWindow: 272000,
   },
@@ -61,6 +92,7 @@ export const CODEX_MODEL_CATALOG: readonly CodexModelDefinition[] = [
     supportedInApi: true,
     defaultReasoningEffort: "medium",
     supportedReasoningEfforts: GPT_5_REASONING_EFFORTS,
+    thinkingLevelMetadata: createThinkingLevelMetadata("medium"),
     contextWindow: 272000,
     maxContextWindow: 272000,
     upgrade: "gpt-5.4",
@@ -73,6 +105,7 @@ export const CODEX_MODEL_CATALOG: readonly CodexModelDefinition[] = [
     supportedInApi: false,
     defaultReasoningEffort: "high",
     supportedReasoningEfforts: GPT_5_REASONING_EFFORTS,
+    thinkingLevelMetadata: createThinkingLevelMetadata("high"),
     contextWindow: 128000,
     maxContextWindow: 128000,
   },
@@ -84,6 +117,7 @@ export const CODEX_MODEL_CATALOG: readonly CodexModelDefinition[] = [
     supportedInApi: true,
     defaultReasoningEffort: "medium",
     supportedReasoningEfforts: GPT_5_REASONING_EFFORTS,
+    thinkingLevelMetadata: createThinkingLevelMetadata("medium"),
     contextWindow: 272000,
     maxContextWindow: 272000,
     upgrade: "gpt-5.4",
@@ -134,6 +168,23 @@ export function normalizeCodexReasoningEffort(value: string | null | undefined):
   return normalized === "low" || normalized === "medium" || normalized === "high" || normalized === "xhigh"
     ? normalized
     : null;
+}
+
+export function normalizeCodexThinkingLevel(value: string | null | undefined): CodexThinkingLevel | null {
+  if (!value) {
+    return null;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "min" || normalized === "none") {
+    return "minimal";
+  }
+  return normalized === "minimal" || normalized === "low" || normalized === "medium" || normalized === "high"
+    ? normalized
+    : null;
+}
+
+export function getCodexThinkingLevelMetadata(model: string | null): CodexThinkingLevelMetadata | null {
+  return getCodexModelDefinition(model)?.thinkingLevelMetadata ?? null;
 }
 
 export function isCodexApiSupportedModel(model: string | null): boolean {
