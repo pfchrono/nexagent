@@ -962,6 +962,30 @@ test("executeInternalTool runs guarded shell command inside repo cwd", async () 
   }
 });
 
+test("executeInternalTool preserves accumulated shell stdout and stderr on failure", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-tools-shell-accumulator-"));
+
+  try {
+    const session = createSession(cwd);
+    const result = executeInternalTool(session, {
+      name: "shell_command",
+      arguments: {
+        command: "printf 'out-one\\nout-two\\n'; printf 'err-one\\nerr-two\\n' >&2; exit 7",
+      },
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.tool, "shell_command");
+    assert.match(result.output, /shell exit 7/);
+    assert.match(result.output, /out-one/);
+    assert.match(result.output, /out-two/);
+    assert.match(result.output, /err-one/);
+    assert.match(result.output, /err-two/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test("safe-git blocks high-risk git shell commands", async () => {
   const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-tools-safe-git-"));
 
