@@ -341,6 +341,42 @@ test("assemblePrompt includes compacted conversation context when present", asyn
   }
 });
 
+test("assemblePrompt normalizes context-file casing and frontmatter", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-instructions-context-"));
+
+  try {
+    const session = createSession(cwd);
+    session.instructionSources = [
+      {
+        kind: "agents.md",
+        path: path.join(cwd, "agents.md"),
+        layer: "repoBehavior",
+        summary: "---\ntitle: ignored\n---\nRepo agent instructions",
+        detail: "---\ntitle: ignored\n---\nUse normalized repo instructions.",
+      },
+      {
+        kind: "claude.md",
+        path: path.join(cwd, "claude.md"),
+        layer: "repoBehavior",
+        summary: "---\ndescription: ignored\n---\nRepo Claude instructions",
+        detail: "---\ndescription: ignored\n---\nCompatibility shim only.",
+      },
+    ];
+
+    const assembled = await assemblePrompt({
+      session,
+      prompt: "Ship fix now",
+    });
+
+    assert.match(assembled.prompt, /AGENTS\.md\n\s+Use normalized repo instructions\./);
+    assert.match(assembled.prompt, /CLAUDE\.md\n\s+Compatibility shim only\./);
+    assert.doesNotMatch(assembled.prompt, /title: ignored/);
+    assert.doesNotMatch(assembled.prompt, /description: ignored/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test("assemblePrompt injects Free-Code-style caveman and deadpool sections", async () => {
   const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-instructions-style-"));
 

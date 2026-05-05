@@ -93,9 +93,10 @@ export interface AssembledPrompt {
 }
 
 export async function assemblePrompt(request: { session: InstructionContext; prompt: string }): Promise<AssembledPrompt> {
+  const session = normalizePromptInstructionContext(request.session);
   const useV2 = request.session.prompt?.assembly !== "legacy";
   if (useV2) {
-    const v3 = buildPromptV3({ session: request.session, prompt: request.prompt });
+    const v3 = buildPromptV3({ session, prompt: request.prompt });
     return {
       layers: null,
       v2: v3.v2,
@@ -103,10 +104,40 @@ export async function assemblePrompt(request: { session: InstructionContext; pro
     };
   }
 
-  const layers = buildPromptLayers(request.session, request.prompt);
+  const layers = buildPromptLayers(session, request.prompt);
   return {
     layers,
     v2: null,
     prompt: serializePromptLayers(layers),
   };
+}
+
+function normalizePromptInstructionContext(session: InstructionContext): InstructionContext {
+  let changed = false;
+  const instructionSources = session.instructionSources.map((source) => {
+    const kind = canonicalizeCaseInsensitiveContextFileKind(source.kind);
+    const summary = stripInstructionFrontmatter(source.summary);
+    const detail = source.detail ? stripInstructionFrontmatter(source.detail) : undefined;
+    changed ||= kind !== source.kind || summary !== source.summary || detail !== source.detail;
+    return detail === undefined ? { ...source, kind, summary, detail: undefined } : { ...source, kind, summary, detail };
+  });
+
+  return changed ? { ...session, instructionSources } : session;
+}
+
+function canonicalizeCaseInsensitiveContextFileKind(kind: string): string {
+  switch (kind.toUpperCase()) {
+    case "AGENTS.MD":
+      return "AGENTS.md";
+    case "CLAUDE.MD":
+      return "CLAUDE.md";
+    case "README.MD":
+      return "README.md";
+    default:
+      return kind;
+  }
+}
+
+function stripInstructionFrontmatter(content: string): string {
+  return content.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, "").trim();
 }
