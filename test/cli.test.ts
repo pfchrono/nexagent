@@ -711,6 +711,47 @@ test("recordTurnTelemetry writes Pi-compatible usage JSONL consumed by /usage", 
   }
 });
 
+test("recordTurnTelemetry honors NEXAGENT_SESSION_DIR for isolated usage sessions", async () => {
+  const { runRuntimeCommand } = await import("../src/cli.js");
+  const { recordRuntimeEvent, recordTurnTelemetry } = await import("../src/runtime/session.js");
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-session-dir-cwd-"));
+  const sessionDir = await mkdtemp(path.join(tmpdir(), "nexagent-session-dir-"));
+  const previousSessionDir = process.env.NEXAGENT_SESSION_DIR;
+  const previousPiDir = process.env.PI_CODING_AGENT_DIR;
+  try {
+    process.env.NEXAGENT_SESSION_DIR = sessionDir;
+    process.env.PI_CODING_AGENT_DIR = path.join(cwd, "pi-agent");
+    const session = createSession();
+    session.cwd = cwd;
+    session.repo.root = cwd;
+    session.id = "isolated-session";
+    recordRuntimeEvent(session, { kind: "prompt", status: "queued", summary: "user prompt accepted", detail: "inspect usage" });
+    recordRuntimeEvent(session, { kind: "control", status: "completed", summary: "turn run completed", detail: "duration=1.00s; turn_in~7; turn_out~11" });
+    recordTurnTelemetry(session, "inspect usage", "usage checked");
+
+    const usagePath = path.join(sessionDir, "isolated-session.jsonl");
+    const jsonl = await readFile(usagePath, "utf8");
+    const result = runRuntimeCommand(session, "/usage");
+
+    assert.match(jsonl, /"type":"session"/);
+    assert.match(jsonl, /"input":7/);
+    assert.match(result?.output ?? "", /all time · Pi-compatible JSONL · sessions 1 · messages 1 · tokens 18 · cost n\/a/);
+  } finally {
+    if (previousSessionDir === undefined) {
+      delete process.env.NEXAGENT_SESSION_DIR;
+    } else {
+      process.env.NEXAGENT_SESSION_DIR = previousSessionDir;
+    }
+    if (previousPiDir === undefined) {
+      delete process.env.PI_CODING_AGENT_DIR;
+    } else {
+      process.env.PI_CODING_AGENT_DIR = previousPiDir;
+    }
+    await rm(cwd, { recursive: true, force: true });
+    await rm(sessionDir, { recursive: true, force: true });
+  }
+});
+
 test("runRuntimeCommand queues boomerang autonomous task", async () => {
   const { runRuntimeCommand } = await import("../src/cli.js");
   const session = createSession();

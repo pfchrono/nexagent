@@ -2,6 +2,7 @@ import { appendFileSync, mkdirSync, readdirSync, readFileSync, writeFileSync } f
 import { homedir } from "node:os";
 import path from "node:path";
 
+import { resolveNexagentSessionDir } from "./paths.js";
 import type { RuntimeSession } from "./session.js";
 
 export interface PiUsageMessage {
@@ -78,12 +79,12 @@ export function loadPiUsageMessages(cwd: string): PiUsageMessage[] {
 }
 
 export function getNexagentUsageFilePath(session: RuntimeSession): string {
-  return path.join(session.cwd, ".nexagent", "usage", "sessions", `${sanitizeFileSegment(session.id)}.jsonl`);
+  return path.join(resolveNexagentSessionDir(session.cwd), `${sanitizeFileSegment(session.id)}.jsonl`);
 }
 
 function getUsageSearchRoots(cwd: string): string[] {
   const roots = [
-    path.join(cwd, ".nexagent", "usage", "sessions"),
+    resolveNexagentSessionDir(cwd),
     path.join(process.env.PI_CODING_AGENT_DIR || path.join(homedir(), ".pi", "agent"), "sessions"),
   ];
   return Array.from(new Set(roots));
