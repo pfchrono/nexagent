@@ -2142,8 +2142,12 @@ function isNonActionableDeferral(output: string): boolean {
     "ran ",
     "committed ",
   ].some((phrase) => lower.includes(phrase));
+  const inventedTransportBlockerBeforeVerification =
+    /\bblocked\b[\s\S]{0,120}\btransport (?:hiccup|error|failure)\b/i.test(text)
+    && /\bbefore\b[\s\S]{0,120}\b(?:verification|verify|final verification)\b/i.test(text);
 
-  return (activationOnly || asksForUserToContinue || admitsNoAction || selfCorrectionOnly) && !concreteCompletionEvidence;
+  return inventedTransportBlockerBeforeVerification
+    || ((activationOnly || asksForUserToContinue || admitsNoAction || selfCorrectionOnly) && !concreteCompletionEvidence);
 }
 
 function claimsFileMutation(output: string): boolean {

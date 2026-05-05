@@ -2279,6 +2279,80 @@ test("executeProviderRequest catches say-proceed deferrals after direct tasks", 
   });
 });
 
+test("executeProviderRequest catches invented transport blocker before verification", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-provider-invented-transport-blocker-"));
+
+  try {
+    const session = createSession();
+    session.cwd = cwd;
+    session.repo.root = cwd;
+    session.toolPolicy.allowedRoots = [cwd];
+    const prompts: string[] = [];
+
+    const result = await executeProviderRequest(
+      {
+        session,
+        prompt: "write phase-plan.md and verify it",
+      },
+      {
+        exec: async (request) => {
+          prompts.push(request.prompt);
+          if (prompts.length === 1) {
+            return {
+              exitCode: 0,
+              stdout: "",
+              stderr: "",
+              output: '<nexagent_tool_call>{"name":"todo","arguments":{"items":[{"content":"Write plan","status":"in_progress"},{"content":"Verify plan","status":"pending"}]}}</nexagent_tool_call>',
+            };
+          }
+          if (prompts.length === 2) {
+            return {
+              exitCode: 0,
+              stdout: "",
+              stderr: "",
+              output: '<nexagent_tool_call>{"name":"write_file","arguments":{"path":"phase-plan.md","content":"# Phase 74\\n"}}</nexagent_tool_call>',
+            };
+          }
+          if (prompts.length === 3) {
+            return {
+              exitCode: 0,
+              stdout: "",
+              stderr: "",
+              output: "Blocked by a transport hiccup before I could run the final verification pass; observed work already completed: created phase-plan.md.",
+            };
+          }
+          return {
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            output: "Created phase-plan.md. Verification passed with focused readback.",
+          };
+        },
+        http: async () => {
+          throw new Error("http should not be used");
+        },
+        codexHttp: async () => {
+          throw new Error("codex-http should not be used");
+        },
+      },
+    );
+
+    assert.equal(prompts.length, 4);
+    assert.match(prompts[3] ?? "", /The previous response deferred action/);
+    assert.deepEqual(result, {
+      ok: true,
+      provider: "codex",
+      model: "gpt-5.4",
+      transport: "codex",
+      adapter: "codex-cli-exec",
+      fallbackApplied: false,
+      output: "Created phase-plan.md. Verification passed with focused readback.",
+    });
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test("executeProviderRequest catches apology-only self-correction loops", async () => {
   const session = createSession();
   const prompts: string[] = [];
