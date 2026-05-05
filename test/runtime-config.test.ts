@@ -366,6 +366,54 @@ test("loadHarnessConfig merges global and repo provider registry JSON", async ()
   }
 });
 
+test("loadHarnessConfig accepts comments and trailing commas in provider registry JSON", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-jsonc-provider-registry-"));
+  const nexagentHome = await mkdtemp(path.join(tmpdir(), "nexagent-home-"));
+
+  try {
+    await mkdir(path.join(cwd, ".nexagent"));
+    await writeFile(
+      path.join(nexagentHome, "config.json"),
+      `{
+        // Global defaults should still load before repo override.
+        "modelProviders": {
+          "local": {
+            "name": "Local",
+            "baseUrl": "http://localhost:1234/v1",
+            "models": ["global-model",],
+          },
+        },
+      }
+`,
+      "utf8",
+    );
+    await writeFile(
+      path.join(cwd, ".nexagent", "config.json"),
+      `{
+        "modelProviders": {
+          "local": {
+            /* Repo config keeps normal provider warning behavior. */
+            "models": ["repo-model",],
+            "extraField": true,
+          },
+        },
+      }
+`,
+      "utf8",
+    );
+
+    const config = await withNexagentHome(nexagentHome, () => loadHarnessConfig(cwd));
+
+    assert.equal(config.providerRegistry?.providers.local.name, "Local");
+    assert.equal(config.providerRegistry?.providers.local.baseUrl, "http://localhost:1234/v1");
+    assert.deepEqual(config.providerRegistry?.providers.local.modelIds, ["repo-model"]);
+    assert.ok(config.providerRegistry?.warnings.includes("modelProviders.local: unknown field extraField"));
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+    await rm(nexagentHome, { recursive: true, force: true });
+  }
+});
+
 test("loadHarnessConfig imports enabled Claude MCP servers", async () => {
   const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-claude-import-"));
   const nexagentHome = await mkdtemp(path.join(tmpdir(), "nexagent-home-"));
@@ -637,6 +685,36 @@ test("loadMcpRegistrySummary validates MCP config shape", async () => {
       () => loadMcpRegistrySummary(configPath),
       /invalid MCP config .*mcpServers\.bad\.args/,
     );
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("loadMcpRegistrySummary accepts comments and trailing commas in JSON config", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-mcp-jsonc-"));
+  const configPath = path.join(cwd, "mcp.json");
+
+  try {
+    await writeFile(
+      configPath,
+      `{
+        "mcpServers": {
+          // Disabled server avoids process startup while proving config parse.
+          "fake": {
+            "command": "node",
+            "disabled": true,
+          },
+        },
+      }
+`,
+      "utf8",
+    );
+
+    const registry = await loadMcpRegistrySummary(configPath);
+
+    assert.deepEqual(registry.serverNames, ["fake"]);
+    assert.equal(registry.statuses[0]?.status, "skipped");
+    assert.equal(registry.statuses[0]?.message, "disabled");
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }

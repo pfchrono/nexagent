@@ -4,6 +4,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 import { mergeProviderRegistryConfigs, type ProviderConfigInput, type ProviderRegistry } from "../provider/registry.js";
+import { parseJsonConfig } from "./jsonc.js";
 import { readMcpConfigFile, writeMcpConfigFile } from "./mcp.js";
 import { resolveNexagentHome, resolvePathFromBase } from "./paths.js";
 
@@ -1289,7 +1290,7 @@ async function pathExists(filePath: string): Promise<boolean> {
 async function readJsonIfExists<T>(filePath: string): Promise<T | null> {
   try {
     const raw = await readFile(filePath, "utf8");
-    return JSON.parse(raw) as T;
+    return parseJsonConfig(raw) as T;
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
 

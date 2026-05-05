@@ -4,6 +4,8 @@ import path from "node:path";
 import pLimit from "p-limit";
 import { z } from "zod";
 
+import { parseJsonConfig } from "./jsonc.js";
+
 export interface McpServerDefinition {
   command?: string;
   args?: string[];
@@ -177,7 +179,7 @@ export async function readMcpConfigFile(filePath: string): Promise<McpConfigFile
 }
 
 function parseMcpConfigJson(raw: string, filePath: string): McpConfigFile {
-  const parsed = JSON.parse(raw) as unknown;
+  const parsed = parseJsonConfig(raw);
   const result = McpConfigFileSchema.safeParse(parsed);
   if (!result.success) {
     const issue = result.error.issues[0];
