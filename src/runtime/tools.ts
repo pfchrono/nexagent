@@ -533,6 +533,7 @@ export function getInternalToolDefinitions(): readonly InternalToolDefinition[] 
             items: {
               type: "object",
               properties: {
+                id: { type: "string" },
                 content: { type: "string" },
                 text: { type: "string" },
                 subject: { type: "string" },
@@ -557,6 +558,7 @@ export function getInternalToolDefinitions(): readonly InternalToolDefinition[] 
             items: {
               type: "object",
               properties: {
+                id: { type: "string" },
                 content: { type: "string" },
                 text: { type: "string" },
                 subject: { type: "string" },

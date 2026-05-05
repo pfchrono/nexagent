@@ -460,6 +460,31 @@ test("todo items alias replaces visible list with completed, active, and pending
   }
 });
 
+test("todo items alias accepts model-provided ids", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-todo-items-ids-"));
+
+  try {
+    const session = createSession(cwd);
+    const result = executeInternalTool(session, {
+      name: "todo",
+      arguments: {
+        items: [
+          { id: "todo-4", content: "Inspect current state", status: "completed" },
+          { id: "todo-9", content: "Run next step", status: "in_progress", blockedBy: ["todo-4"] },
+        ],
+      },
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(session.todos.tasks[0]?.id, "todo-4");
+    assert.equal(session.todos.tasks[1]?.id, "todo-9");
+    assert.equal(session.todos.nextId, 10);
+    assert.match(result.output, /\[>\] todo-9 Run next step blockedBy:todo-4/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test("todo tool treats empty items alias as clear", async () => {
   const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-todo-clear-alias-"));
   try {

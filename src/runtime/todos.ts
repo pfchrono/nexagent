@@ -40,6 +40,7 @@ export interface RuntimeTodoToolArgs {
 }
 
 interface RuntimeTodoItem {
+  id?: string;
   content?: string;
   text?: string;
   subject?: string;
@@ -288,7 +289,7 @@ function replaceTodosFromItems(state: RuntimeTodoState, rawItems: unknown[]): { 
 
   const now = new Date().toISOString();
   const tasks: RuntimeTodoTask[] = parsed.map((item, index) => ({
-    id: `todo-${String(index + 1)}`,
+    id: cleanTodoId(item.id) ?? `todo-${String(index + 1)}`,
     subject: todoItemSubject(item),
     description: cleanOptional(item.description ?? item.detail),
     activeForm: cleanOptional(item.activeForm ?? item.active ?? item.doing),
@@ -307,7 +308,7 @@ function replaceTodosFromItems(state: RuntimeTodoState, rawItems: unknown[]): { 
     return validation;
   }
   state.tasks = tasks;
-  state.nextId = tasks.length + 1;
+  state.nextId = tasks.reduce((max, task) => Math.max(max, numericTodoId(task.id) ?? 0), 0) + 1;
   state.updatedAt = now;
   return { ok: true, output: formatTodosCommandOutput(state, "active") };
 }
@@ -465,6 +466,7 @@ function parseTodoItem(value: unknown): RuntimeTodoItem | null {
   const item = value as Record<string, unknown>;
   const status = typeof item.status === "string" && isTodoStatus(item.status) ? item.status : undefined;
   return {
+    id: typeof item.id === "string" ? item.id : undefined,
     content: typeof item.content === "string" ? item.content : undefined,
     text: typeof item.text === "string" ? item.text : undefined,
     subject: typeof item.subject === "string" ? item.subject : undefined,
@@ -480,6 +482,16 @@ function parseTodoItem(value: unknown): RuntimeTodoItem | null {
     owner: typeof item.owner === "string" ? item.owner : undefined,
     metadata: item.metadata && typeof item.metadata === "object" && !Array.isArray(item.metadata) ? item.metadata as Record<string, unknown> : undefined,
   };
+}
+
+function cleanTodoId(value?: string): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed && /^[A-Za-z0-9._:-]+$/.test(trimmed) ? trimmed : undefined;
+}
+
+function numericTodoId(value: string): number | null {
+  const match = /^todo-(\d+)$/.exec(value);
+  return match ? Number.parseInt(match[1] ?? "0", 10) : null;
 }
 
 function todoItemSubject(item: RuntimeTodoItem): string {
