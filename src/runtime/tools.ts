@@ -114,6 +114,7 @@ export function getInternalToolDefinitions(): readonly InternalToolDefinition[] 
           endLine: { type: "number", description: "Optional 1-based last line to render." },
           end_line: { type: "number", description: "Legacy alias for endLine." },
           maxLines: { type: "number", description: "Optional maximum lines to render in compact mode." },
+          limit: { type: "number", description: "Legacy alias for maxLines." },
           compact: { type: "boolean", description: "Render a bounded numbered preview instead of raw full content." },
         },
         required: ["path"],
@@ -335,8 +336,10 @@ export function getInternalToolDefinitions(): readonly InternalToolDefinition[] 
         type: "object",
         properties: {
           root: { type: "string", description: "Repo-local root or file path. Defaults to cwd." },
+          paths: { type: "array", items: { type: "string" }, description: "Legacy alias. First path is used as root." },
           pattern: { type: "string", description: "Optional glob suffix, such as *.ts or *.md." },
           query: { type: "string", description: "Optional terms; only files containing matching terms are included." },
+          reason: { type: "string", description: "Short reason for using Nexsight." },
           mode: { type: "string", description: "Read mode per file: map, signatures, outline, lines:N-M, full, or auto." },
           limit: { type: "number", description: "Maximum matching files, capped at 80." },
           maxCharsPerFile: { type: "number", description: "Maximum source chars per file, capped at 120000." },
@@ -699,12 +702,13 @@ export function getInternalToolFunctionDefinitions(): ReadonlyArray<Record<strin
 const TOOL_ARGUMENT_COMPAT_ALIASES: Partial<Record<InternalToolName, ReadonlyArray<string>>> = {
   batch_edit: ["operations", "changes"],
   git_status: ["path"],
-  read_file: ["start_line", "end_line"],
+  read_file: ["start_line", "end_line", "limit"],
   search_content: ["query"],
   search_files: ["query"],
   shell_command: ["cwd", "workdir", "timeout", "timeout_ms", "timeoutMs", "maxOutputChars", "max_output_chars"],
   todo: ["items", "todos"],
   nexsight_execute: ["lang"],
+  nexsight_gather: ["paths", "reason"],
   lsp_navigation: ["path", "char"],
 };
 
@@ -1041,7 +1045,7 @@ async function executeReadFileTool(session: RuntimeSession, args: Record<string,
 
 function formatReadFileOutput(session: RuntimeSession, targetPath: string, content: string, args: Record<string, unknown>): string {
   const lineRange = resolveReadFileLineRange(args);
-  const maxLines = clampPositiveInteger(asNumber(args.maxLines, READ_FILE_COMPACT_LINE_LIMIT), 1, READ_FILE_COMPACT_LINE_LIMIT);
+  const maxLines = clampPositiveInteger(asNumber(args.maxLines ?? args.limit, READ_FILE_COMPACT_LINE_LIMIT), 1, READ_FILE_COMPACT_LINE_LIMIT);
   const lines = content.split(/\r?\n/);
   if (lineRange) {
     return renderReadFileLines(session, targetPath, lines, lineRange.startLine, lineRange.endLine, "range");
@@ -1983,7 +1987,7 @@ function executeNexsightReadTool(session: RuntimeSession, args: Record<string, u
 }
 
 function executeNexsightGatherTool(session: RuntimeSession, args: Record<string, unknown>): InternalToolResult {
-  const inputPath = asOptionalString(args.root);
+  const inputPath = asOptionalString(args.root) ?? firstString(args.paths);
   if (inputPath) {
     const targetPath = resolveRepoPath(session, inputPath);
     const policyFailure = validateReadToolPath(session, targetPath);
@@ -2232,6 +2236,10 @@ function asStringArray(value: unknown): string[] | undefined {
     return undefined;
   }
   return value.filter((item): item is string => typeof item === "string");
+}
+
+function firstString(value: unknown): string | undefined {
+  return Array.isArray(value) ? value.find((item): item is string => typeof item === "string" && item.trim().length > 0) : undefined;
 }
 
 function capShellOutput(output: string): string {

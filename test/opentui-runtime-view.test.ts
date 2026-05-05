@@ -213,6 +213,8 @@ test("createOpenTuiRuntimeView surfaces MCP hydration health", () => {
     "hydrated 1/2",
     "tools 2",
     "failed sentry",
+    "toolOwners filesystem:2",
+    "reason sentry: Authorization Expired",
   ]);
   assert.deepEqual(view.cockpit.warnings.find((warning) => warning.type === "mcp"), {
     severity: "warning",

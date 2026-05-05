@@ -8,10 +8,14 @@ import { createCommandSurface, createRuntimeCommandIntent, resolveSkillPreview }
 
 test("OpenTUI command surface lists slash command palette rows", () => {
   const surface = createCommandSurface(process.cwd(), "/st");
+  const notifyTestSurface = createCommandSurface(process.cwd(), "/notify-t");
+  const emojiTestSurface = createCommandSurface(process.cwd(), "/emoji-t");
 
   assert.equal(surface.title, "/ Commands");
   assert.ok(surface.rows.some((row) => row.label === "/status"));
   assert.ok(surface.rows.some((row) => row.hint.startsWith("session · ")));
+  assert.equal(notifyTestSurface.rows[0]?.value, "/notify-test ");
+  assert.equal(emojiTestSurface.rows[0]?.value, "/emoji-test ");
 });
 
 test("OpenTUI command surface fuzzy-ranks commands, models, effort, and skills", () => {

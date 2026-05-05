@@ -529,6 +529,8 @@ test("runRuntimeCommand exposes command catalog through help", async () => {
     "/mouse [status|mode <auto|scroll|select>] - show or set transcript mouse interaction mode",
     "/usage - show current session usage statistics with provider/model token totals",
     "/todos [pending|in_progress|completed|all|clear] - show or clear visual task checklist used by model planning",
+    "/notify-test - send a test terminal notification",
+    "/emoji-test - print available session emoji markers",
     "/config [status] | /config [set] <logo|lsp|lsp-index> <value> - inspect or mutate persisted runtime configuration",
     "/lsp [status|setup|health|warm|mode <on|off>|symbols <path>|diagnostics <path>|check [path]|nav <operation> [path] [line] [character]] - inspect enabled local LSP code intelligence with bounded fallback",
     "/memory [status|--verbose|--maintenance|save <text>|checkpoint [reason]|session [focus]] - inspect, maintain, or persist archivist memory/checkpoints",

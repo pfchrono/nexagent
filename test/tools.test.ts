@@ -309,6 +309,7 @@ test("internal strict tool schemas expose compatibility aliases", () => {
 
   assert.ok("start_line" in propertiesFor("read_file"));
   assert.ok("end_line" in propertiesFor("read_file"));
+  assert.ok("limit" in propertiesFor("read_file"));
   assert.ok("cwd" in propertiesFor("shell_command"));
   assert.ok("workdir" in propertiesFor("shell_command"));
   assert.ok("timeout" in propertiesFor("shell_command"));
@@ -320,6 +321,8 @@ test("internal strict tool schemas expose compatibility aliases", () => {
   assert.ok("query" in propertiesFor("search_files"));
   assert.ok("path" in propertiesFor("git_status"));
   assert.ok("lang" in propertiesFor("nexsight_execute"));
+  assert.ok("paths" in propertiesFor("nexsight_gather"));
+  assert.ok("reason" in propertiesFor("nexsight_gather"));
   assert.ok("path" in propertiesFor("lsp_navigation"));
   assert.ok("char" in propertiesFor("lsp_navigation"));
 });
@@ -780,6 +783,13 @@ test("executeInternalTool runs nexsight execute and local index search", async (
     assert.match(gatherResult.output, /api\.ts/);
     assert.match(gatherResult.output, /export function loadUser/);
 
+    const gatherPathsAliasResult = executeInternalTool(session, {
+      name: "nexsight_gather",
+      arguments: { paths: ["."], reason: "compat smoke", pattern: "*.ts", query: "loadUser", mode: "signatures", limit: 10 },
+    });
+    assert.equal(gatherPathsAliasResult.ok, true);
+    assert.match(gatherPathsAliasResult.output, /api\.ts/);
+
     assert.equal(classifyInternalToolRisk({
       name: "nexsight_execute",
       arguments: {
@@ -934,6 +944,24 @@ test("executeInternalTool read_file accepts snake_case line range aliases", asyn
     assert.match(result.output, /^3 \| three$/m);
     assert.match(result.output, /^5 \| five$/m);
     assert.doesNotMatch(result.output, /one/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("executeInternalTool read_file accepts limit alias for compact output", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-read-file-limit-"));
+  try {
+    await writeFile(path.join(cwd, "sample.txt"), "one\ntwo\nthree\nfour\n", "utf8");
+    const session = createSession(cwd);
+
+    const result = executeInternalTool(session, {
+      name: "read_file",
+      arguments: { path: "sample.txt", compact: true, limit: 2 },
+    });
+
+    assert.equal(result.ok, true);
+    assert.match(result.output, /^\[read_file compact: sample\.txt lines 1-2 of 5\]/);
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }

@@ -2697,7 +2697,7 @@ function renderCockpitPanelRows(options: {
   const top = `╭${title}${"─".repeat(Math.max(0, innerWidth - title.length))}╮`;
   const bottom = `╰${"─".repeat(innerWidth + 2)}╯`;
   const warningLine = options.warningRows.length > 0
-    ? options.warningRows.map((warning) => `${warning.type} ${warning.message}`).join(" | ")
+    ? options.warningRows.map(formatCockpitWarningLine).join(" | ")
     : "clear";
   const overflow = options.warningOverflow > 0 ? ` (+${String(options.warningOverflow)})` : "";
   const body = [
@@ -2713,4 +2713,9 @@ function renderCockpitPanelRows(options: {
     ...body.map((line) => fitLine(`│ ${line.padEnd(innerWidth)} │`, options.width)),
     fitLine(bottom, options.width),
   ];
+}
+
+function formatCockpitWarningLine(warning: OpenTuiRuntimeView["cockpit"]["warnings"][number]): string {
+  const icon = warning.severity === "blocking" ? "!" : warning.severity === "warning" ? "~" : "i";
+  return `${icon} ${warning.type}: ${warning.message} -> ${warning.action}`;
 }

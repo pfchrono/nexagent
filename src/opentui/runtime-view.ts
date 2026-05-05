@@ -217,8 +217,20 @@ function createConfigSections(session: RuntimeSession): OpenTuiConfigSectionView
       ? `failed ${failedMcpServers.map((status) => status.name).join(", ")}`
       : "failed none",
   ];
+  const toolOwners = hydratedMcpServers
+    .filter((status) => status.toolCount > 0)
+    .map((status) => `${status.name}:${String(status.toolCount)}`);
+  if (toolOwners.length > 0) {
+    mcpRows.push(`toolOwners ${toolOwners.join(", ")}`);
+  }
+  for (const status of failedMcpServers.slice(0, 3)) {
+    mcpRows.push(`reason ${status.name}: ${status.message ?? "unknown"}`);
+  }
   if (skippedMcpServers.length > 0) {
     mcpRows.push(`skipped ${skippedMcpServers.map((status) => status.name).join(", ")}`);
+  }
+  for (const status of skippedMcpServers.slice(0, 3)) {
+    mcpRows.push(`skipReason ${status.name}: ${status.message ?? "disabled"}`);
   }
   const lsp = getLspStatus(session);
   const lspState = lsp.enabled
