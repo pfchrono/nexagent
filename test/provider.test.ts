@@ -2375,6 +2375,91 @@ test("executeProviderRequest blocks repeated file-change claims without write ev
   }
 });
 
+test("executeProviderRequest allows repo-state recommendations that mention uncommitted files", async () => {
+  const session = createSession();
+  const output = [
+    "Observed: repo is mid-step with uncommitted edits in `src/runtime/tools.ts` and `test/tools.test.ts` adding `text` as a todo-item alias.",
+    "Next step: finish/verify the current `todo` alias compatibility change first, then create/plan Phase 74 for remaining OpenTUI work.",
+    "Verification not run this turn.",
+  ].join("\n");
+
+  const result = await executeProviderRequest(
+    {
+      session,
+      prompt: "examine the local repo and see what our next step would be",
+    },
+    {
+      exec: async () => ({
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+        output,
+      }),
+      http: async () => {
+        throw new Error("http should not be used");
+      },
+      codexHttp: async () => {
+        throw new Error("codex-http should not be used");
+      },
+    },
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.output, output);
+  assert.equal(
+    session.events.some((event) => event.summary === "write evidence gate blocked assistant response"),
+    false,
+  );
+});
+
+test("executeProviderRequest prunes finished todos at turn end", async () => {
+  const session = createSession();
+  session.todos.tasks.push(
+    {
+      id: "todo-1",
+      subject: "Already done",
+      status: "completed",
+      blockedBy: [],
+      createdAt: "2026-05-05T00:00:00.000Z",
+      updatedAt: "2026-05-05T00:01:00.000Z",
+    },
+    {
+      id: "todo-2",
+      subject: "Still active",
+      status: "in_progress",
+      blockedBy: [],
+      createdAt: "2026-05-05T00:02:00.000Z",
+      updatedAt: "2026-05-05T00:02:00.000Z",
+    },
+  );
+  session.todos.nextId = 3;
+
+  const result = await executeProviderRequest(
+    {
+      session,
+      prompt: "continue",
+    },
+    {
+      exec: async () => ({
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+        output: "Continuing active task.",
+      }),
+      http: async () => {
+        throw new Error("http should not be used");
+      },
+      codexHttp: async () => {
+        throw new Error("codex-http should not be used");
+      },
+    },
+  );
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(session.todos.tasks.map((task) => task.id), ["todo-2"]);
+  assert.notEqual(session.todos.updatedAt, null);
+});
+
 test("executeProviderRequest requires write evidence when user asks for a file write", async () => {
   const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-provider-required-write-"));
 

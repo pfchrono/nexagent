@@ -8,6 +8,7 @@ import { createDefaultProviderRegistry } from "../src/provider/registry.js";
 import { applyArchivistRetrieval, rememberArchivistFailure } from "../src/runtime/archivist.js";
 import { resolveNexsightRuntime } from "../src/runtime/nexsight.js";
 import { analyzeBlockedShellCommand, analyzeSafeGitCommand } from "../src/runtime/policy.js";
+import { formatTodoOverlayRows, formatTodoPromptSummary } from "../src/runtime/todos.js";
 import { classifyInternalToolRisk, executeInternalTool, executeInternalToolAsync, getInternalToolFunctionDefinitions } from "../src/runtime/tools.js";
 import type { RuntimeSession } from "../src/runtime/session.js";
 
@@ -375,6 +376,8 @@ test("todo tool creates, advances, completes, and lists visual tasks", async () 
     assert.equal(listed.ok, true);
     assert.match(listed.output, /todos/);
     assert.match(listed.output, /\[x\] todo-1 Inspecting repo/);
+    assert.deepEqual(formatTodoOverlayRows(session.todos, 80), []);
+    assert.equal(formatTodoPromptSummary(session.todos), null);
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }

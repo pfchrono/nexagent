@@ -2103,24 +2103,39 @@ function isNonActionableDeferral(output: string): boolean {
 }
 
 function claimsFileMutation(output: string): boolean {
-  const lower = output.toLowerCase();
-  const mutationClaim = [
-    "done — applied",
-    "done - applied",
-    "applied directly",
-    "i updated",
-    "updated readme",
-    "updated `readme",
-    "readme now includes",
-    "i added",
-    "added sections",
-    "wrote ",
-    "created ",
-    "modified ",
-    "changed ",
-  ].some((phrase) => lower.includes(phrase));
-  const fileMention = /\b(readme|\.md|\.ts|\.tsx|\.json|file|files)\b/i.test(output);
-  return mutationClaim && fileMention;
+  return output
+    .split(/[\n.!?;]+/)
+    .map((segment) => segment.trim())
+    .filter(Boolean)
+    .some((segment) => {
+      if (isPlanningOrObservationSegment(segment)) {
+        return false;
+      }
+      const lower = segment.toLowerCase();
+      const mutationClaim = [
+        "done — applied",
+        "done - applied",
+        "applied directly",
+        "i updated",
+        "updated readme",
+        "updated `readme",
+        "readme now includes",
+        "i added",
+        "added sections",
+        "wrote ",
+        "created ",
+        "modified ",
+        "changed ",
+      ].some((phrase) => lower.includes(phrase));
+      const fileMention = /\b(readme|\.md|\.ts|\.tsx|\.json|file|files)\b/i.test(segment);
+      return mutationClaim && fileMention;
+    });
+}
+
+function isPlanningOrObservationSegment(segment: string): boolean {
+  return /^(?:observed|observation|next step|recommendation|recommended|plan|todo)\s*:/i.test(segment)
+    || /\buncommitted edits?\b/i.test(segment)
+    || /\b(?:should|need to|needs to|would|will)\s+(?:create|update|write|modify|change|add|plan)\b/i.test(segment);
 }
 
 function claimsUnsupportedWriteCompletion(output: string, priorWriteEvidenceNudges: number): boolean {

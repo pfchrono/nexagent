@@ -82,7 +82,7 @@ export function formatTodosCommandOutput(state: RuntimeTodoState, mode = "active
 }
 
 export function formatTodoOverlayRows(state: RuntimeTodoState, width: number): Array<{ key: string; text: string; fg: string }> {
-  const active = sortedTodos(state.tasks).filter((task) => task.status !== "deleted");
+  const active = sortedTodos(state.tasks).filter((task) => task.status === "in_progress" || task.status === "pending");
   if (active.length === 0) {
     return [];
   }
@@ -107,11 +107,21 @@ export function formatTodoPromptSummary(state?: RuntimeTodoState | null): string
   if (!state) {
     return null;
   }
-  const tasks = sortedTodos(state.tasks).filter((task) => task.status !== "deleted");
+  const tasks = sortedTodos(state.tasks).filter((task) => task.status === "in_progress" || task.status === "pending");
   if (tasks.length === 0) {
     return null;
   }
   return tasks.slice(0, 12).map((task) => `${task.id} [${task.status}] ${task.activeForm || task.subject}`).join(" | ");
+}
+
+export function pruneFinishedTurnTodos(state: RuntimeTodoState): boolean {
+  const active = state.tasks.filter((task) => task.status === "in_progress" || task.status === "pending");
+  if (active.length === state.tasks.length) {
+    return false;
+  }
+  state.tasks = active;
+  state.updatedAt = new Date().toISOString();
+  return true;
 }
 
 function mutateTodos(
