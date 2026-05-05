@@ -68,6 +68,25 @@ export class TurnRun {
     output: string,
   ): MissingTurnEvidence | null {
     const evidence = this.collectEvidence(sinceIndex, toolTranscript);
+    const missingRequired = this.evaluateRequiredEvidence(sinceIndex, toolTranscript, output);
+    if (missingRequired) {
+      return missingRequired;
+    }
+    if (claimsNexsightWork(output) && !evidence.hasNexsightEvidence) {
+      return "Nexsight";
+    }
+    if (claimsTestExecution(output) && !evidence.hasTestEvidence && !hasPatchPreviewSmokeEvidence(output, evidence)) {
+      return "test";
+    }
+    return null;
+  }
+
+  evaluateRequiredEvidence(
+    sinceIndex: number,
+    toolTranscript: string[],
+    output: string,
+  ): MissingTurnEvidence | null {
+    const evidence = this.collectEvidence(sinceIndex, toolTranscript);
     if (this.obligations.requiresNexsightEvidence && !evidence.hasNexsightEvidence) {
       return "Nexsight";
     }
@@ -82,12 +101,6 @@ export class TurnRun {
     }
     if (this.obligations.requiresAskEvidence && !evidence.hasAskEvidence && !hasDiscussionDecisionEvidence(output, evidence)) {
       return "ask user";
-    }
-    if (claimsNexsightWork(output) && !evidence.hasNexsightEvidence) {
-      return "Nexsight";
-    }
-    if (claimsTestExecution(output) && !evidence.hasTestEvidence && !hasPatchPreviewSmokeEvidence(output, evidence)) {
-      return "test";
     }
     return null;
   }

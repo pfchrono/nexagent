@@ -15,7 +15,7 @@ import {
 } from "./instrument.js";
 import { applyArchivistRetrieval, rememberArchivistFailure, rememberArchivistRecovery } from "./runtime/archivist.js";
 import { writeDebugLog } from "./runtime/debug.js";
-import { hasAskEvidence, hasNexsightEvidence, hasTodoEvidence, hasToolEvidence, hasWriteEvidence } from "./runtime/evidence.js";
+import { hasWriteEvidence } from "./runtime/evidence.js";
 import { assemblePrompt } from "./runtime/instructions.js";
 import {
   isNexsightToolCall,
@@ -194,6 +194,44 @@ const FINAL_TOOL_STEP_NUDGE = [
   "If another tool is still required, the harness may start one bounded continuation cycle with the tool count reset.",
   "After that continuation cycle, it will return a partial result instead of failing the turn.",
 ].join(" ");
+const INTERNAL_TOOL_TRANSCRIPT_LABEL = "Internal tool transcript:";
+type RequiredEvidenceNudgeState = Partial<Record<MissingTurnEvidence, number>>;
+interface RequiredEvidenceNudge {
+  label: MissingTurnEvidence;
+  summary: string;
+  content: string;
+}
+type RequiredEvidenceRecovery =
+  | { kind: "retry"; prompt: string; usedFallback?: boolean }
+  | { kind: "fallback-success"; result: ProviderResult }
+  | { kind: "blocked"; result: ProviderFailure };
+const REQUIRED_EVIDENCE_NUDGE: Partial<Record<MissingTurnEvidence, RequiredEvidenceNudge>> = {
+  Nexsight: {
+    label: "Nexsight",
+    summary: "required nexsight evidence nudge applied",
+    content: REQUIRED_NEXSIGHT_EVIDENCE_NUDGE,
+  },
+  write: {
+    label: "write",
+    summary: "required write evidence nudge applied",
+    content: REQUIRED_WRITE_EVIDENCE_NUDGE,
+  },
+  "active skill": {
+    label: "active skill",
+    summary: "required active skill evidence nudge applied",
+    content: REQUIRED_ACTIVE_SKILL_EVIDENCE_NUDGE,
+  },
+  todo: {
+    label: "todo",
+    summary: "required todo evidence nudge applied",
+    content: REQUIRED_TODO_EVIDENCE_NUDGE,
+  },
+  "ask user": {
+    label: "ask user",
+    summary: "required ask_user_question evidence nudge applied",
+    content: REQUIRED_ASK_USER_EVIDENCE_NUDGE,
+  },
+};
 
 export async function executeProviderRequest(
   request: ProviderRequest,
@@ -333,12 +371,8 @@ async function executeProviderRequestImpl(
       : assembled.prompt;
     let guidanceNudgeCount = 0;
     let writeEvidenceNudgeCount = 0;
-    let requiredWriteNudgeCount = 0;
-    let requiredNexsightNudgeCount = 0;
+    const requiredEvidenceNudgeCounts: RequiredEvidenceNudgeState = {};
     let requiredNexsightFallbackCount = 0;
-    let requiredActiveSkillNudgeCount = 0;
-    let requiredTodoNudgeCount = 0;
-    let requiredAskNudgeCount = 0;
 
     toolCycles:
     for (let cycle = 0; cycle < MAX_INTERNAL_TOOL_CYCLES; cycle += 1) {
@@ -427,100 +461,41 @@ async function executeProviderRequestImpl(
               ...classifyToolCallMarkup(output),
             },
           });
-          prompt = `${assembled.prompt}\n\n${toolTranscript.length > 0 ? `Internal tool transcript:\n${toolTranscript.join("\n\n")}\n\n` : ""}${MALFORMED_TOOL_CALL_NUDGE}`;
+          prompt = createGuidedPrompt(assembled.prompt, toolTranscript, MALFORMED_TOOL_CALL_NUDGE);
           continue;
         }
-        if (obligations.requiresNexsightEvidence && !hasNexsightEvidence(request.session, turnEventStart, toolTranscript)) {
-          requiredNexsightNudgeCount += 1;
-          if (step < MAX_INTERNAL_TOOL_STEPS - 1 && requiredNexsightNudgeCount < MAX_GUIDANCE_NUDGES_BEFORE_SYNTHESIS) {
-            recordRuntimeEvent(request.session, {
-              kind: "control",
-              status: "queued",
-              summary: "required nexsight evidence nudge applied",
-              detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
-            });
-            prompt = createGuidedPrompt(assembled.prompt, toolTranscript, REQUIRED_NEXSIGHT_EVIDENCE_NUDGE);
-            continue;
-          }
-          if (step < MAX_INTERNAL_TOOL_STEPS - 1 && requiredNexsightFallbackCount < 1) {
-            requiredNexsightFallbackCount += 1;
-            const fallback = await runRequiredNexsightFallback(request, request.prompt);
-            toolTranscript.push(formatInternalToolExchange(step + 1, fallback.call, fallback.result));
-            if (fallback.result.ok) {
-              return createRequiredNexsightFallbackSuccess(
-                request,
-                model,
-                transport.transport,
-                transport.id,
-                fallback.result,
-              );
+        const missingRequiredEvidence = turnRun.evaluateRequiredEvidence(turnEventStart, toolTranscript, output);
+        if (missingRequiredEvidence) {
+          if (missingRequiredEvidence === "ask user") {
+            const fallbackAsk = maybeCreateFallbackAskQuestion(request, model, transport.transport, transport.id, output);
+            if (fallbackAsk) {
+              return fallbackAsk;
             }
-            prompt = createRequiredNexsightFallbackPrompt(assembled.prompt, toolTranscript);
+          }
+          const recovery = await createRequiredEvidenceRecovery({
+            request,
+            model,
+            transport: transport.transport,
+            adapter: transport.id,
+            missing: missingRequiredEvidence,
+            output,
+            basePrompt: assembled.prompt,
+            toolTranscript,
+            step,
+            nudgeCounts: requiredEvidenceNudgeCounts,
+            runNexsightFallback: requiredNexsightFallbackCount < 1,
+          });
+          if (recovery.kind === "retry") {
+            if (recovery.usedFallback) {
+              requiredNexsightFallbackCount += 1;
+            }
+            prompt = recovery.prompt;
             continue;
           }
-          return createMissingRequiredToolEvidenceFailure(request, model, transport.transport, transport.id, "Nexsight", output);
-        }
-        if (obligations.requiresWriteEvidence && !hasWriteEvidence(request.session, turnEventStart)) {
-          requiredWriteNudgeCount += 1;
-          if (step < MAX_INTERNAL_TOOL_STEPS - 1 && requiredWriteNudgeCount < MAX_GUIDANCE_NUDGES_BEFORE_SYNTHESIS) {
-            recordRuntimeEvent(request.session, {
-              kind: "control",
-              status: "queued",
-              summary: "required write evidence nudge applied",
-              detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
-            });
-            prompt = createGuidedPrompt(assembled.prompt, toolTranscript, REQUIRED_WRITE_EVIDENCE_NUDGE);
-            continue;
+          if (recovery.kind === "fallback-success") {
+            return recovery.result;
           }
-          return createMissingRequiredToolEvidenceFailure(request, model, transport.transport, transport.id, "write", output);
-        }
-        if (obligations.requiresActiveSkillEvidence && !hasToolEvidence(request.session, turnEventStart, toolTranscript)) {
-          requiredActiveSkillNudgeCount += 1;
-          if (step < MAX_INTERNAL_TOOL_STEPS - 1 && requiredActiveSkillNudgeCount < MAX_GUIDANCE_NUDGES_BEFORE_SYNTHESIS) {
-            recordRuntimeEvent(request.session, {
-              kind: "control",
-              status: "queued",
-              summary: "required active skill evidence nudge applied",
-              detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
-            });
-            prompt = createGuidedPrompt(assembled.prompt, toolTranscript, REQUIRED_ACTIVE_SKILL_EVIDENCE_NUDGE);
-            continue;
-          }
-          return createMissingRequiredToolEvidenceFailure(request, model, transport.transport, transport.id, "active skill", output);
-        }
-        if (obligations.requiresTodoEvidence && !hasTodoEvidence(request.session, turnEventStart, toolTranscript)) {
-          requiredTodoNudgeCount += 1;
-          if (step < MAX_INTERNAL_TOOL_STEPS - 1 && requiredTodoNudgeCount < MAX_GUIDANCE_NUDGES_BEFORE_SYNTHESIS) {
-            recordRuntimeEvent(request.session, {
-              kind: "control",
-              status: "queued",
-              summary: "required todo evidence nudge applied",
-              detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
-            });
-            prompt = createGuidedPrompt(assembled.prompt, toolTranscript, REQUIRED_TODO_EVIDENCE_NUDGE);
-            continue;
-          }
-          return createMissingRequiredToolEvidenceFailure(request, model, transport.transport, transport.id, "todo", output);
-        }
-        if (obligations.requiresAskEvidence
-          && !hasAskEvidence(request.session, turnEventStart, toolTranscript)
-          && !hasDiscussionDecisionEvidence(request.session, turnEventStart, output)) {
-          const fallbackAsk = maybeCreateFallbackAskQuestion(request, model, transport.transport, transport.id, output);
-          if (fallbackAsk) {
-            return fallbackAsk;
-          }
-          requiredAskNudgeCount += 1;
-          if (step < MAX_INTERNAL_TOOL_STEPS - 1 && requiredAskNudgeCount < MAX_GUIDANCE_NUDGES_BEFORE_SYNTHESIS) {
-            recordRuntimeEvent(request.session, {
-              kind: "control",
-              status: "queued",
-              summary: "required ask_user_question evidence nudge applied",
-              detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
-            });
-            prompt = createGuidedPrompt(assembled.prompt, toolTranscript, REQUIRED_ASK_USER_EVIDENCE_NUDGE);
-            continue;
-          }
-          return createMissingRequiredToolEvidenceFailure(request, model, transport.transport, transport.id, "ask user", output);
+          return recovery.result;
         }
         if (claimsUnsupportedWriteCompletion(output, writeEvidenceNudgeCount) && !hasWriteEvidence(request.session, turnEventStart)) {
           writeEvidenceNudgeCount += 1;
@@ -742,7 +717,7 @@ async function executeProviderRequestImpl(
           summary: "nexsight tool nudge applied",
           detail: toolCall.name,
         });
-        prompt = `${assembled.prompt}\n\n${toolTranscript.length > 0 ? `Internal tool transcript:\n${toolTranscript.join("\n\n")}\n\n` : ""}${NEXSIGHT_TOOL_NUDGE}`;
+        prompt = createGuidedPrompt(assembled.prompt, toolTranscript, NEXSIGHT_TOOL_NUDGE);
         continue;
       }
 
@@ -758,7 +733,11 @@ async function executeProviderRequestImpl(
       toolTranscript.push(formatInternalToolExchange(step + 1, toolCall, toolResult));
       onToolResult?.(toolCall, toolResult);
       const finalStepNudge = step === MAX_INTERNAL_TOOL_STEPS - 2 ? `\n\n${FINAL_TOOL_STEP_NUDGE}` : "";
-      prompt = `${assembled.prompt}\n\nInternal tool transcript:\n${toolTranscript.join("\n\n")}\n\nContinue. Either answer user directly or request one more tool with one <nexagent_tool_call> block only.${finalStepNudge}`;
+      prompt = createGuidedPrompt(
+        assembled.prompt,
+        toolTranscript,
+        `Continue. Either answer user directly or request one more tool with one <nexagent_tool_call> block only.${finalStepNudge}`,
+      );
       }
     }
 
@@ -1009,12 +988,8 @@ async function executeOpenAiNativeToolLoop(
     nativeInput = [{ role: "user", content: createRequiredNexsightPreflightPrompt(assembledPrompt, toolTranscript) }];
   }
   let writeEvidenceNudgeCount = 0;
-  let requiredWriteNudgeCount = 0;
-  let requiredNexsightNudgeCount = 0;
+  const requiredEvidenceNudgeCounts: RequiredEvidenceNudgeState = {};
   let requiredNexsightFallbackCount = 0;
-  let requiredActiveSkillNudgeCount = 0;
-  let requiredTodoNudgeCount = 0;
-  let requiredAskNudgeCount = 0;
 
   const loopResult = await turnRun.runToolLoop<ProviderResult>(1, MAX_INTERNAL_TOOL_STEPS, async ({ step, finalStep }) => {
     if (request.session.operationControls.cancelRequested) {
@@ -1087,19 +1062,22 @@ async function executeOpenAiNativeToolLoop(
         nativeInput = [{ role: "user", content: MALFORMED_TOOL_CALL_NUDGE }];
         return null;
       }
-      if (obligations.requiresNexsightEvidence && !hasNexsightEvidence(request.session, turnEventStart)) {
-        requiredNexsightNudgeCount += 1;
-        if (step < MAX_INTERNAL_TOOL_STEPS - 1 && requiredNexsightNudgeCount < MAX_GUIDANCE_NUDGES_BEFORE_SYNTHESIS) {
-          recordRuntimeEvent(request.session, {
-            kind: "control",
-            status: "queued",
-            summary: "required nexsight evidence nudge applied",
-            detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
-          });
-          nativeInput = [{ role: "user", content: REQUIRED_NEXSIGHT_EVIDENCE_NUDGE }];
+      const missingRequiredEvidence = turnRun.evaluateRequiredEvidence(turnEventStart, [], output);
+      if (missingRequiredEvidence) {
+        if (missingRequiredEvidence === "ask user") {
+          const fallbackAsk = maybeCreateFallbackAskQuestion(request, model, transport.transport, transport.id, output);
+          if (fallbackAsk) {
+            return fallbackAsk;
+          }
+        }
+        const nudge = getRequiredEvidenceNudge(missingRequiredEvidence);
+        const nudgeCount = incrementRequiredEvidenceNudge(requiredEvidenceNudgeCounts, missingRequiredEvidence);
+        if (step < MAX_INTERNAL_TOOL_STEPS - 1 && nudgeCount < MAX_GUIDANCE_NUDGES_BEFORE_SYNTHESIS) {
+          recordRequiredEvidenceNudge(request.session, nudge.summary, output);
+          nativeInput = [{ role: "user", content: nudge.content }];
           return null;
         }
-        if (step < MAX_INTERNAL_TOOL_STEPS - 1 && requiredNexsightFallbackCount < 1) {
+        if (missingRequiredEvidence === "Nexsight" && step < MAX_INTERNAL_TOOL_STEPS - 1 && requiredNexsightFallbackCount < 1) {
           requiredNexsightFallbackCount += 1;
           const fallback = await runRequiredNexsightFallback(request, request.prompt);
           if (fallback.result.ok) {
@@ -1120,69 +1098,7 @@ async function executeOpenAiNativeToolLoop(
           }];
           return null;
         }
-        return createMissingRequiredToolEvidenceFailure(request, model, transport.transport, transport.id, "Nexsight", output);
-      }
-      if (obligations.requiresWriteEvidence && !hasWriteEvidence(request.session, turnEventStart)) {
-        requiredWriteNudgeCount += 1;
-        if (step < MAX_INTERNAL_TOOL_STEPS - 1 && requiredWriteNudgeCount < MAX_GUIDANCE_NUDGES_BEFORE_SYNTHESIS) {
-          recordRuntimeEvent(request.session, {
-            kind: "control",
-            status: "queued",
-            summary: "required write evidence nudge applied",
-            detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
-          });
-          nativeInput = [{ role: "user", content: REQUIRED_WRITE_EVIDENCE_NUDGE }];
-          return null;
-        }
-        return createMissingRequiredToolEvidenceFailure(request, model, transport.transport, transport.id, "write", output);
-      }
-      if (obligations.requiresActiveSkillEvidence && !hasToolEvidence(request.session, turnEventStart)) {
-        requiredActiveSkillNudgeCount += 1;
-        if (step < MAX_INTERNAL_TOOL_STEPS - 1 && requiredActiveSkillNudgeCount < MAX_GUIDANCE_NUDGES_BEFORE_SYNTHESIS) {
-          recordRuntimeEvent(request.session, {
-            kind: "control",
-            status: "queued",
-            summary: "required active skill evidence nudge applied",
-            detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
-          });
-          nativeInput = [{ role: "user", content: REQUIRED_ACTIVE_SKILL_EVIDENCE_NUDGE }];
-          return null;
-        }
-        return createMissingRequiredToolEvidenceFailure(request, model, transport.transport, transport.id, "active skill", output);
-      }
-      if (obligations.requiresTodoEvidence && !hasTodoEvidence(request.session, turnEventStart)) {
-        requiredTodoNudgeCount += 1;
-        if (step < MAX_INTERNAL_TOOL_STEPS - 1 && requiredTodoNudgeCount < MAX_GUIDANCE_NUDGES_BEFORE_SYNTHESIS) {
-          recordRuntimeEvent(request.session, {
-            kind: "control",
-            status: "queued",
-            summary: "required todo evidence nudge applied",
-            detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
-          });
-          nativeInput = [{ role: "user", content: REQUIRED_TODO_EVIDENCE_NUDGE }];
-          return null;
-        }
-        return createMissingRequiredToolEvidenceFailure(request, model, transport.transport, transport.id, "todo", output);
-      }
-      if (obligations.requiresAskEvidence
-        && !hasAskEvidence(request.session, turnEventStart)
-        && !hasDiscussionDecisionEvidence(request.session, turnEventStart, output)) {
-        const fallbackAsk = maybeCreateFallbackAskQuestion(request, model, transport.transport, transport.id, output);
-        if (fallbackAsk) {
-          return fallbackAsk;
-        }
-        requiredAskNudgeCount += 1;
-        if (step < MAX_INTERNAL_TOOL_STEPS - 1 && requiredAskNudgeCount < MAX_GUIDANCE_NUDGES_BEFORE_SYNTHESIS) {
-          recordRuntimeEvent(request.session, {
-            kind: "control",
-            status: "queued",
-            summary: "required ask_user_question evidence nudge applied",
-            detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
-          });
-          nativeInput = [{ role: "user", content: REQUIRED_ASK_USER_EVIDENCE_NUDGE }];
-          return null;
-        }
-        return createMissingRequiredToolEvidenceFailure(request, model, transport.transport, transport.id, "ask user", output);
+        return createMissingRequiredToolEvidenceFailure(request, model, transport.transport, transport.id, nudge.label, output);
       }
       if (claimsUnsupportedWriteCompletion(output, writeEvidenceNudgeCount) && !hasWriteEvidence(request.session, turnEventStart)) {
         writeEvidenceNudgeCount += 1;
@@ -1502,6 +1418,91 @@ function createMissingRequiredEvidenceFailureIfAny(
 ): ProviderFailure | null {
   const missing = turnRun.evaluateFinalEvidence(turnEventStart, toolTranscript, output);
   return missing ? createMissingRequiredToolEvidenceFailure(request, model, transport, adapter, missing, output) : null;
+}
+
+async function createRequiredEvidenceRecovery(options: {
+  request: ProviderRequest;
+  model: string | null;
+  transport: ProviderFailure["transport"];
+  adapter: ProviderFailure["adapter"];
+  missing: MissingTurnEvidence;
+  output: string;
+  basePrompt: string;
+  toolTranscript: string[];
+  step: number;
+  nudgeCounts: RequiredEvidenceNudgeState;
+  runNexsightFallback: boolean;
+}): Promise<RequiredEvidenceRecovery> {
+  const nudge = getRequiredEvidenceNudge(options.missing);
+  const nudgeCount = incrementRequiredEvidenceNudge(options.nudgeCounts, options.missing);
+  if (options.step < MAX_INTERNAL_TOOL_STEPS - 1 && nudgeCount < MAX_GUIDANCE_NUDGES_BEFORE_SYNTHESIS) {
+    recordRequiredEvidenceNudge(options.request.session, nudge.summary, options.output);
+    return {
+      kind: "retry",
+      prompt: createGuidedPrompt(options.basePrompt, options.toolTranscript, nudge.content),
+    };
+  }
+
+  if (options.missing === "Nexsight" && options.step < MAX_INTERNAL_TOOL_STEPS - 1 && options.runNexsightFallback) {
+    const fallback = await runRequiredNexsightFallback(options.request, options.request.prompt);
+    options.toolTranscript.push(formatInternalToolExchange(options.step + 1, fallback.call, fallback.result));
+    if (fallback.result.ok) {
+      return {
+        kind: "fallback-success",
+        result: createRequiredNexsightFallbackSuccess(
+          options.request,
+          options.model,
+          options.transport,
+          options.adapter,
+          fallback.result,
+        ),
+      };
+    }
+    return {
+      kind: "retry",
+      prompt: createRequiredNexsightFallbackPrompt(options.basePrompt, options.toolTranscript),
+      usedFallback: true,
+    };
+  }
+
+  return {
+    kind: "blocked",
+    result: createMissingRequiredToolEvidenceFailure(
+      options.request,
+      options.model,
+      options.transport,
+      options.adapter,
+      nudge.label,
+      options.output,
+    ),
+  };
+}
+
+function getRequiredEvidenceNudge(missing: MissingTurnEvidence): RequiredEvidenceNudge {
+  const nudge = REQUIRED_EVIDENCE_NUDGE[missing];
+  if (!nudge) {
+    return {
+      label: missing,
+      summary: "required evidence nudge applied",
+      content: REQUIRED_CLAIM_EVIDENCE_NUDGE,
+    };
+  }
+  return nudge;
+}
+
+function incrementRequiredEvidenceNudge(counts: RequiredEvidenceNudgeState, missing: MissingTurnEvidence): number {
+  const next = (counts[missing] ?? 0) + 1;
+  counts[missing] = next;
+  return next;
+}
+
+function recordRequiredEvidenceNudge(session: RuntimeSession, summary: string, output: string): void {
+  recordRuntimeEvent(session, {
+    kind: "control",
+    status: "queued",
+    summary,
+    detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
+  });
 }
 
 function validateAttachmentSupport(
@@ -2220,7 +2221,26 @@ function formatToolRecoveryHint(call: InternalToolCall, result: InternalToolResu
 }
 
 function createGuidedPrompt(basePrompt: string, toolTranscript: string[], nudge: string): string {
-  return `${basePrompt}\n\n${toolTranscript.length > 0 ? `Internal tool transcript:\n${toolTranscript.join("\n\n")}\n\n` : ""}${nudge}`;
+  return createPromptWithToolTranscript(basePrompt, toolTranscript, nudge);
+}
+
+function createPromptWithToolTranscript(basePrompt: string, toolTranscript: string[], suffix: string, limit?: number): string {
+  const transcript = formatToolTranscriptSection(toolTranscript, limit);
+  return transcript
+    ? `${basePrompt}\n\n${transcript}\n\n${suffix}`
+    : `${basePrompt}\n\n${suffix}`;
+}
+
+function formatToolTranscriptSection(toolTranscript: string[], limit?: number): string {
+  const entries = compactToolTranscriptEntries(toolTranscript, limit);
+  if (entries.length === 0) {
+    return "";
+  }
+  return `${INTERNAL_TOOL_TRANSCRIPT_LABEL}\n${entries.join("\n\n")}`;
+}
+
+function compactToolTranscriptEntries(toolTranscript: string[], limit?: number): string[] {
+  return typeof limit === "number" ? toolTranscript.slice(-limit) : toolTranscript;
 }
 
 async function runRequiredNexsightFallback(
@@ -2258,7 +2278,7 @@ function createRequiredNexsightPreflightPrompt(basePrompt: string, toolTranscrip
     basePrompt,
     "",
     "Required Nexsight preflight evidence:",
-    toolTranscript.slice(-3).join("\n\n"),
+    compactToolTranscriptEntries(toolTranscript, 3).join("\n\n"),
     "",
     "The harness already ran Nexsight because the user explicitly required it.",
     "Answer from this evidence. If the evidence is insufficient, request one focused Nexsight tool call next.",
@@ -2271,7 +2291,7 @@ function createRequiredNexsightFallbackPrompt(basePrompt: string, toolTranscript
     basePrompt,
     "",
     "Required Nexsight fallback evidence:",
-    toolTranscript.slice(-3).join("\n\n"),
+    compactToolTranscriptEntries(toolTranscript, 3).join("\n\n"),
     "",
     "The harness ran Nexsight because the user explicitly required it and prior output did not contain Nexsight tool evidence.",
     "Answer from this evidence. Do not claim any additional inspection unless you request another valid tool call.",
@@ -2556,12 +2576,10 @@ function extractLikelyNexsightTarget(prompt: string): string {
 }
 
 function createToolBudgetContinuationPrompt(basePrompt: string, toolTranscript: string[], pendingToolName: string, cycleNumber: number): string {
-  const compactTranscript = toolTranscript.slice(-4).join("\n\n");
   return [
     basePrompt,
     "",
-    "Internal tool transcript:",
-    compactTranscript,
+    formatToolTranscriptSection(toolTranscript, 4),
     "",
     `Tool budget continuation cycle ${String(cycleNumber)} started.`,
     `The previous provider step attempted another ${pendingToolName} tool call at the tool budget boundary.`,
@@ -2692,12 +2710,10 @@ async function maybeSynthesizeAfterRepeatedGuidance(
 }
 
 function createGuidanceLoopFinalPrompt(basePrompt: string, toolTranscript: string[], reason: string): string {
-  const compactTranscript = toolTranscript.slice(-6).join("\n\n");
   return [
     basePrompt,
     "",
-    "Internal tool transcript:",
-    compactTranscript,
+    formatToolTranscriptSection(toolTranscript, 6),
     "",
     `The harness already corrected provider behavior for ${reason}, but the provider attempted another misrouted/deferred step.`,
     "Do not call more tools.",
@@ -2708,12 +2724,10 @@ function createGuidanceLoopFinalPrompt(basePrompt: string, toolTranscript: strin
 }
 
 function createToolBudgetFinalPrompt(basePrompt: string, toolTranscript: string[], pendingToolName: string): string {
-  const compactTranscript = toolTranscript.slice(-6).join("\n\n");
   return [
     basePrompt,
     "",
-    "Internal tool transcript:",
-    compactTranscript,
+    formatToolTranscriptSection(toolTranscript, 6),
     "",
     `The previous provider step attempted another ${pendingToolName} tool call after the bounded continuation cycle.`,
     "Do not call more tools.",
@@ -2734,7 +2748,7 @@ function createToolBudgetPartialResult(
   reason: string,
 ): ProviderSuccess {
   const transcript = toolTranscript.length > 0
-    ? toolTranscript.slice(-3).join("\n\n")
+    ? compactToolTranscriptEntries(toolTranscript, 3).join("\n\n")
     : "No completed tool transcript was available for this fallback.";
   const output = [
     "Tool budget exhausted before final assistant answer.",
