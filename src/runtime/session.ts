@@ -276,6 +276,28 @@ export function setRuntimeAction(
   notifyRuntimeSessionChanged(session);
 }
 
+export function resolveRuntimeApproval(session: RuntimeSession, decision: "approved" | "rejected" | "canceled"): boolean {
+  if (!session.operationControls.pendingApproval) {
+    return false;
+  }
+  session.operationControls.pendingApproval = null;
+  session.operationControls.lastDecision = decision;
+  notifyRuntimeSessionChanged(session);
+  return true;
+}
+
+export function requestRuntimeCancel(session: RuntimeSession): void {
+  session.operationControls.cancelRequested = true;
+  if (session.operationControls.pendingQuestionnaire) {
+    session.operationControls.pendingQuestionnaire.response = {
+      answers: session.operationControls.pendingQuestionnaire.answers,
+      cancelled: true,
+    };
+  }
+  resolveRuntimeApproval(session, "canceled");
+  notifyRuntimeSessionChanged(session);
+}
+
 export function deriveTurnCompletionState(session: RuntimeSession): RuntimeTurnCompletionSummary {
   if (session.operationControls.pendingQuestionnaire) {
     return {

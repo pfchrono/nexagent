@@ -688,7 +688,7 @@ function createCockpitView(session: RuntimeSession, approval: string): OpenTuiCo
       mode: approval,
       pendingTool: session.operationControls.pendingApproval?.tool ?? null,
       lastDecision: session.operationControls.lastDecision ?? "none",
-      hints: ["/approval approve", "/approval reject"],
+      hints: ["A/Y approve", "R/N/Esc reject", "/approval status"],
     },
     warnings: createCockpitWarnings(session),
     ladder: createCockpitLadder(session, turn.objective),

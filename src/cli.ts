@@ -68,6 +68,8 @@ import {
   recordConversationTurn,
   recordTurnTelemetry,
   refreshInstructionState,
+  requestRuntimeCancel,
+  resolveRuntimeApproval,
   setRuntimeAction,
   syncRuntimeSession,
   type RuntimeSession,
@@ -2826,21 +2828,17 @@ function handleApprovalCommand(session: RuntimeSession, args: string[]): Runtime
   }
 
   if (arg === "approve") {
-    if (!session.operationControls.pendingApproval) {
+    if (!resolveRuntimeApproval(session, "approved")) {
       return { ok: false, message: "no pending approval", activity: "approval missing" };
     }
-    session.operationControls.pendingApproval = null;
-    session.operationControls.lastDecision = "approved";
     savePersistedRuntimeState(session);
     return { ok: true, output: formatOperationControlsStatus(session), activity: "approval granted" };
   }
 
   if (arg === "reject") {
-    if (!session.operationControls.pendingApproval) {
+    if (!resolveRuntimeApproval(session, "rejected")) {
       return { ok: false, message: "no pending approval", activity: "approval missing" };
     }
-    session.operationControls.pendingApproval = null;
-    session.operationControls.lastDecision = "rejected";
     savePersistedRuntimeState(session);
     return { ok: true, output: formatOperationControlsStatus(session), activity: "approval rejected" };
   }
@@ -2877,17 +2875,7 @@ function handleCancelCommand(session: RuntimeSession, args: string[]): RuntimeCo
     return { ok: false, message: "usage: /cancel", activity: "command failed · /cancel usage" };
   }
 
-  session.operationControls.cancelRequested = true;
-  if (session.operationControls.pendingQuestionnaire) {
-    session.operationControls.pendingQuestionnaire.response = {
-      answers: session.operationControls.pendingQuestionnaire.answers,
-      cancelled: true,
-    };
-  }
-  if (session.operationControls.pendingApproval) {
-    session.operationControls.pendingApproval = null;
-    session.operationControls.lastDecision = "canceled";
-  }
+  requestRuntimeCancel(session);
   return {
     ok: true,
     output: formatOperationControlsStatus(session),

@@ -9,7 +9,7 @@ import { executeProviderRequest, type ProviderRequest } from "../src/provider.js
 import { createDefaultProviderRegistry } from "../src/provider/registry.js";
 import { createRuntimeExtensionHost } from "../src/runtime/extensions.js";
 import { initializeRuntimeDebug } from "../src/runtime/debug.js";
-import type { RuntimeSession } from "../src/runtime/session.js";
+import { resolveRuntimeApproval, type RuntimeSession } from "../src/runtime/session.js";
 
 function createSession(provider = "codex", model: string | null = "gpt-5.4"): RuntimeSession {
   return {
@@ -2798,8 +2798,7 @@ test("executeProviderRequest waits for guarded approval before tool execution", 
     }
 
     assert.equal(session.operationControls.pendingApproval?.tool, "shell_command");
-    session.operationControls.pendingApproval = null;
-    session.operationControls.lastDecision = "approved";
+    assert.equal(resolveRuntimeApproval(session, "approved"), true);
 
     const result = await pending;
     assert.equal(turns, 2);
@@ -2812,6 +2811,64 @@ test("executeProviderRequest waits for guarded approval before tool execution", 
       fallbackApplied: false,
       output: cwd,
     });
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("approval wait resumes from runtime approval notification without polling delay", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-provider-approval-notify-"));
+
+  try {
+    const session = createSession();
+    session.cwd = cwd;
+    session.repo.root = cwd;
+    session.toolPolicy.allowedRoots = [cwd];
+    session.operationControls.requireApprovalForGuarded = true;
+    let turns = 0;
+
+    const pending = executeProviderRequest(
+      {
+        session,
+        prompt: "show cwd after notified approval",
+      },
+      {
+        exec: async () => {
+          turns += 1;
+          return turns === 1
+            ? {
+                exitCode: 0,
+                stdout: "",
+                stderr: "",
+                output: '<nexagent_tool_call>{"name":"shell_command","arguments":{"command":"pwd"}}</nexagent_tool_call>',
+              }
+            : {
+                exitCode: 0,
+                stdout: "",
+                stderr: "",
+                output: cwd,
+              };
+        },
+        http: async () => {
+          throw new Error("http should not be used");
+        },
+        codexHttp: async () => {
+          throw new Error("codex-http should not be used");
+        },
+      },
+    );
+
+    for (let index = 0; index < 20 && !session.operationControls.pendingApproval; index += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    const approvedAt = Date.now();
+    assert.equal(resolveRuntimeApproval(session, "approved"), true);
+    const result = await pending;
+
+    assert.equal(turns, 2);
+    assert.equal(result.ok, true);
+    assert.ok(Date.now() - approvedAt < 200);
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }

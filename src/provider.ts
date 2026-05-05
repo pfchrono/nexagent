@@ -63,7 +63,7 @@ import { toDiagnosticRuntimeEvent, type RuntimeDiagnosticInput } from "./runtime
 import { emitRuntimeExtensionEvent } from "./runtime/extensions.js";
 import { savePersistedRuntimeState } from "./runtime/persistence.js";
 import { createQuestionnaireRequest, type RuntimeQuestionnaireQuestion } from "./runtime/questionnaire.js";
-import { consumeOperatorSteer, estimateTokenCount, recordRuntimeEvent, setRuntimeAction } from "./runtime/session.js";
+import { consumeOperatorSteer, estimateTokenCount, recordRuntimeEvent, setRuntimeAction, subscribeRuntimeSession } from "./runtime/session.js";
 import type { RuntimeApprovalRequest, RuntimeSession } from "./runtime/session.js";
 import { styleAssistantOutput } from "./runtime/style.js";
 import { recordToolMemory } from "./runtime/tool-memory.js";
@@ -1546,9 +1546,7 @@ async function maybeAwaitApproval(session: RuntimeSession, call: InternalToolCal
   });
   setRuntimeAction(session, "running", `awaiting approval · ${call.name}`);
 
-  while (session.operationControls.pendingApproval) {
-    await sleep(50);
-  }
+  await waitForApprovalDecision(session);
 
   if (session.operationControls.cancelRequested) {
     session.operationControls.cancelRequested = false;
@@ -1571,6 +1569,39 @@ async function maybeAwaitApproval(session: RuntimeSession, call: InternalToolCal
   return session.operationControls.lastDecision === "approved";
 }
 
+function waitForApprovalDecision(session: RuntimeSession): Promise<void> {
+  if (!session.operationControls.pendingApproval) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve) => {
+    let settled = false;
+    let unsubscribe: (() => void) | null = null;
+    const fallbackTimer = setInterval(() => {
+      if (!session.operationControls.pendingApproval) {
+        finish();
+      }
+    }, 250);
+    fallbackTimer.unref?.();
+
+    const finish = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearInterval(fallbackTimer);
+      unsubscribe?.();
+      resolve();
+    };
+
+    unsubscribe = subscribeRuntimeSession(session, () => {
+      if (!session.operationControls.pendingApproval) {
+        finish();
+      }
+    });
+  });
+}
+
 function createOperationFailure(
   request: ProviderRequest,
   model: string | null,
@@ -1588,10 +1619,6 @@ function createOperationFailure(
     message: "operation halted",
     detail,
   };
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function parseInternalToolCall(output: string): InternalToolCall | null {

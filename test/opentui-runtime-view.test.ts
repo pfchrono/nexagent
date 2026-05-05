@@ -54,7 +54,7 @@ test("createOpenTuiRuntimeView maps runtime session without mutation", () => {
         mode: "open",
         pendingTool: null,
         lastDecision: "none",
-        hints: ["/approval approve", "/approval reject"],
+        hints: ["A/Y approve", "R/N/Esc reject", "/approval status"],
       },
       warnings: [],
       ladder: {
@@ -742,7 +742,7 @@ test("OpenTUI cockpit view maps approval warnings ladder and memory split", () =
 
   assert.equal(view.cockpit.approval.mode, "guarded");
   assert.equal(view.cockpit.approval.pendingTool, "write_file");
-  assert.deepEqual(view.cockpit.approval.hints, ["/approval approve", "/approval reject"]);
+  assert.deepEqual(view.cockpit.approval.hints, ["A/Y approve", "R/N/Esc reject", "/approval status"]);
   assert.equal(view.cockpit.warnings[0]?.type, "approval");
   assert.match(view.cockpit.warnings.map((warning) => warning.action).join("\n"), /approval approve/);
   assert.equal(view.cockpit.ladder.intent, "build cockpit");

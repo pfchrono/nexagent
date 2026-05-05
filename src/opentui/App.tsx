@@ -346,6 +346,11 @@ export function OpenTuiApp({ view: initialView, session, keyboardSource, promptH
         return;
       }
     }
+    if (session?.operationControls.pendingApproval && composer.overlayMode === "none") {
+      if (handleApprovalKeyboardKey(key)) {
+        return;
+      }
+    }
     if (key.ctrl && key.name === "t") {
       setTraceExpanded((current) => {
         const next = !current;
@@ -1273,6 +1278,22 @@ export function OpenTuiApp({ view: initialView, session, keyboardSource, promptH
     const digit = key.sequence.match(/^[1-4]$/)?.[0] ?? key.name.match(/^[1-4]$/)?.[0];
     if (digit) {
       submitAskOption(Number.parseInt(digit, 10) - 1);
+      return true;
+    }
+    return false;
+  }
+
+  function handleApprovalKeyboardKey(key: OpenTuiKeyEvent): boolean {
+    if (!session?.operationControls.pendingApproval) {
+      return false;
+    }
+    const keyValue = key.sequence.toLowerCase() || key.name.toLowerCase();
+    if (key.name === "escape" || keyValue === "r" || key.name === "n") {
+      submitPrompt("/approval reject");
+      return true;
+    }
+    if (keyValue === "a" || key.name === "y" || key.name === "enter" || key.name === "return") {
+      submitPrompt("/approval approve");
       return true;
     }
     return false;
