@@ -375,6 +375,65 @@ test("createOpenTuiRuntimeView orders chat by prompt, tools, and assistant event
   assert.equal(view.statusline.lastOutputTokens, 9);
 });
 
+test("createOpenTuiRuntimeView groups repeated collapsed tool trace blocks", () => {
+  const session = createSession();
+  session.conversation = [
+    { role: "user", content: "inspect with nexsight", tokens: 2 },
+    { role: "assistant", content: "done", tokens: 1 },
+  ];
+  session.events = [
+    { at: "2025-01-01T00:00:01.000Z", kind: "prompt", status: "queued", summary: "user prompt accepted", detail: "inspect with nexsight" },
+    { at: "2025-01-01T00:00:02.000Z", kind: "tool", status: "started", summary: "tool nexsight_execute started", detail: "low; args={\"reason\":\"one\"}" },
+    { at: "2025-01-01T00:00:03.000Z", kind: "tool", status: "completed", summary: "tool nexsight_execute completed", detail: "low; duration=0.04s; in~10; out~20; output=one" },
+    { at: "2025-01-01T00:00:04.000Z", kind: "tool", status: "started", summary: "tool nexsight_execute started", detail: "low; args={\"reason\":\"two\"}" },
+    { at: "2025-01-01T00:00:05.000Z", kind: "tool", status: "completed", summary: "tool nexsight_execute completed", detail: "low; duration=0.03s; in~11; out~21; output=two" },
+    { at: "2025-01-01T00:00:06.000Z", kind: "assistant", status: "completed", summary: "assistant response completed", detail: "done" },
+  ];
+
+  const view = createOpenTuiRuntimeView(session);
+
+  assert.deepEqual(view.transcriptBlocks.map((block) => block.kind), ["user", "tool", "assistant"]);
+  assert.equal(view.transcriptBlocks[1]?.label, "◇ Nexsight × 4");
+  assert.equal(view.transcriptBlocks[1]?.collapsedByDefault, true);
+  assert.match(view.transcriptBlocks[1]?.detailLines.join("\n") ?? "", /Grouped 4 Nexsight tool events/);
+  assert.match(view.transcriptBlocks[1]?.detailLines.join("\n") ?? "", /Done Nexsight · 0\.04s ↓ 10 ↑ 20/);
+  assert.match(view.traceBlocks[0]?.detailLines.join("\n") ?? "", /◇ Done Nexsight × 4/);
+  assert.match(view.traceBlocks[0]?.detailLines.join("\n") ?? "", /Grouped 4 Nexsight tool events/);
+});
+
+test("createOpenTuiRuntimeView leaves short repeated tool trace runs ungrouped", () => {
+  const session = createSession();
+  session.events = [
+    { at: "2025-01-01T00:00:01.000Z", kind: "prompt", status: "queued", summary: "user prompt accepted", detail: "inspect" },
+    { at: "2025-01-01T00:00:02.000Z", kind: "tool", status: "started", summary: "tool nexsight_execute started", detail: "low; args={\"reason\":\"one\"}" },
+    { at: "2025-01-01T00:00:03.000Z", kind: "tool", status: "completed", summary: "tool nexsight_execute completed", detail: "low; duration=0.04s; in~10; out~20; output=one" },
+  ];
+
+  const view = createOpenTuiRuntimeView(session);
+  const traceText = view.traceBlocks[0]?.detailLines.join("\n") ?? "";
+
+  assert.doesNotMatch(traceText, /Nexsight × 2/);
+  assert.match(traceText, /◇ Running Nexsight/);
+  assert.match(traceText, /◇ Done Nexsight/);
+});
+
+test("createOpenTuiRuntimeView preserves failure state in grouped tool trace runs", () => {
+  const session = createSession();
+  session.events = [
+    { at: "2025-01-01T00:00:01.000Z", kind: "prompt", status: "queued", summary: "user prompt accepted", detail: "inspect" },
+    { at: "2025-01-01T00:00:02.000Z", kind: "tool", status: "started", summary: "tool read_file started", detail: "low; args={\"path\":\"a\"}" },
+    { at: "2025-01-01T00:00:03.000Z", kind: "tool", status: "failed", summary: "tool read_file failed", detail: "low; output=unexpected arguments" },
+    { at: "2025-01-01T00:00:04.000Z", kind: "tool", status: "completed", summary: "tool read_file completed", detail: "low; duration=0.01s; output=ok" },
+  ];
+
+  const view = createOpenTuiRuntimeView(session);
+  const traceText = view.traceBlocks[0]?.detailLines.join("\n") ?? "";
+
+  assert.match(traceText, /📖 Failed Read file × 3/);
+  assert.match(traceText, /Grouped 3 Read file tool events/);
+  assert.match(traceText, /unexpected arguments/);
+});
+
 test("createOpenTuiRuntimeView retains deeper transcript scrollback", () => {
   const session = createSession();
   session.conversation = [];

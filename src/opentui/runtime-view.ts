@@ -413,7 +413,7 @@ function createTranscriptBlocks(session: RuntimeSession): OpenTuiTranscriptBlock
     : [];
 
   if (blocks.length > 0) {
-    return blocks.slice(-TRANSCRIPT_BLOCK_LIMIT);
+    return compactRepeatedToolBlocks(blocks).slice(-TRANSCRIPT_BLOCK_LIMIT);
   }
 
   return session.conversation.slice(-TRANSCRIPT_BLOCK_LIMIT).map((turn, index) => createBlock({
@@ -423,6 +423,119 @@ function createTranscriptBlocks(session: RuntimeSession): OpenTuiTranscriptBlock
     lines: splitTranscriptLines(turn.content),
     collapsedByDefault: false,
   }));
+}
+
+function compactRepeatedToolBlocks(blocks: OpenTuiTranscriptBlock[]): OpenTuiTranscriptBlock[] {
+  const compacted: OpenTuiTranscriptBlock[] = [];
+  let index = 0;
+  while (index < blocks.length) {
+    const block = blocks[index];
+    const group = block ? getToolBlockGroup(block) : null;
+    if (!block || !group || !block.collapsedByDefault) {
+      if (block) {
+        compacted.push(block);
+      }
+      index += 1;
+      continue;
+    }
+
+    const run = [block];
+    let nextIndex = index + 1;
+    while (nextIndex < blocks.length) {
+      const nextBlock = blocks[nextIndex];
+      const nextGroup = nextBlock ? getToolBlockGroup(nextBlock) : null;
+      if (!nextBlock || !nextGroup || nextGroup.key !== group.key || !nextBlock.collapsedByDefault) {
+        break;
+      }
+      run.push(nextBlock);
+      nextIndex += 1;
+    }
+
+    if (run.length >= 3) {
+      compacted.push(createBlock({
+        id: `${block.id}-group-${String(run.length)}`,
+        kind: "tool",
+        label: `${group.icon} ${group.name} × ${String(run.length)}`,
+        lines: [
+          `Grouped ${String(run.length)} ${group.name} tool events`,
+          ...run.map((toolBlock) => {
+            const firstDetail = toolBlock.detailLines[0] ?? toolBlock.label;
+            return firstDetail === toolBlock.label ? toolBlock.label : `${toolBlock.label} — ${firstDetail}`;
+          }),
+        ],
+        collapsedByDefault: true,
+        forceCollapsed: true,
+      }));
+    } else {
+      compacted.push(...run);
+    }
+    index = nextIndex;
+  }
+  return compacted;
+}
+
+function getToolBlockGroup(block: OpenTuiTranscriptBlock): { key: string; name: string; icon: string } | null {
+  if (block.kind !== "tool") {
+    return null;
+  }
+  const match = /^(\S+)\s+(?:Running|Done|Failed|Blocked|Canceled|started|queued|completed|failed|blocked|canceled)\s+(.+?)(?:\s+·\s+.*)?$/i.exec(block.label);
+  if (!match) {
+    return null;
+  }
+  const icon = match[1] ?? "•";
+  const name = firstLine(match[2] ?? "");
+  if (!name) {
+    return null;
+  }
+  return {
+    key: name.toLowerCase(),
+    name,
+    icon,
+  };
+}
+
+function getToolTraceGroup(event: RuntimeSession["events"][number]): { key: string; name: string; icon: string } | null {
+  if (event.kind !== "tool") {
+    return null;
+  }
+  const toolName = firstLine(event.summary)
+    .replace(/^tool\s+/i, "")
+    .replace(/\s+(started|completed|failed|not executed)$/i, "");
+  const name = formatToolDisplayName(toolName || "tool");
+  return {
+    key: name.toLowerCase(),
+    name,
+    icon: formatToolIcon(toolName || name),
+  };
+}
+
+function formatGroupedToolTraceLines(
+  group: { name: string; icon: string },
+  run: RuntimeSession["events"],
+): string[] {
+  const status = run.some((event) => event.status === "failed" || event.status === "blocked")
+    ? "failed"
+    : run.some((event) => event.status === "completed")
+      ? "completed"
+      : run.some((event) => event.status === "started")
+        ? "started"
+        : run.at(-1)?.status ?? "queued";
+  const title = `${group.icon} ${status === "completed" ? "Done" : status === "failed" ? "Failed" : status === "started" ? "Running" : formatStatusVerb(status)} ${group.name} × ${String(run.length)}`;
+  const first = run[0];
+  const last = run.at(-1);
+  const detailLines = run.flatMap((event, index) => {
+    const details = formatTraceEventLines(event);
+    return [
+      `  event ${String(index + 1)}: ${details[0] ?? event.summary}`,
+      ...details.slice(2).map((line) => `  ${line.trim()}`),
+    ];
+  });
+  return [
+    title,
+    `  at ${first?.at ?? ""}..${last?.at ?? first?.at ?? ""} · kind tool · status ${status}`,
+    `  Grouped ${String(run.length)} ${group.name} tool events`,
+    ...detailLines,
+  ];
 }
 
 function createTraceSummaryLines(session: RuntimeSession): string[] {
@@ -459,10 +572,46 @@ function createTraceBlocks(session: RuntimeSession): OpenTuiTranscriptBlock[] {
     id: `trace-turn-${firstEvent?.at ?? "session"}`,
     kind: "trace",
     label: "turn trace",
-    lines: turnEvents.flatMap((event) => formatTraceEventLines(event)),
+    lines: formatCompactTraceEventLines(turnEvents),
     collapsedByDefault: true,
     preserveLines: true,
   })];
+}
+
+function formatCompactTraceEventLines(events: RuntimeSession["events"]): string[] {
+  const lines: string[] = [];
+  let index = 0;
+  while (index < events.length) {
+    const event = events[index];
+    const group = event ? getToolTraceGroup(event) : null;
+    if (!event || !group) {
+      if (event) {
+        lines.push(...formatTraceEventLines(event));
+      }
+      index += 1;
+      continue;
+    }
+
+    const run = [event];
+    let nextIndex = index + 1;
+    while (nextIndex < events.length) {
+      const nextEvent = events[nextIndex];
+      const nextGroup = nextEvent ? getToolTraceGroup(nextEvent) : null;
+      if (!nextEvent || !nextGroup || nextGroup.key !== group.key) {
+        break;
+      }
+      run.push(nextEvent);
+      nextIndex += 1;
+    }
+
+    if (run.length >= 3) {
+      lines.push(...formatGroupedToolTraceLines(group, run));
+    } else {
+      lines.push(...run.flatMap((toolEvent) => formatTraceEventLines(toolEvent)));
+    }
+    index = nextIndex;
+  }
+  return lines;
 }
 
 function createStatuslineView(session: RuntimeSession, model: string): OpenTuiStatuslineView {
