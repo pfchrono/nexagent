@@ -1,6 +1,14 @@
 import { CODEX_CHATGPT_HTTP_ADAPTER, invokeCodexChatGptHttpTransport } from "./provider/codex-chatgpt-http.js";
 import { CODEX_HTTP_ADAPTER, invokeCodexHttpTransport } from "./provider/codex-http.js";
 import { CODEX_EXEC_ADAPTER, invokeCodexExecTransport } from "./provider/codex-exec.js";
+import {
+  compactToolTranscriptEntries,
+  createPromptWithToolTranscript,
+  formatInternalToolExchange,
+  formatToolTranscriptOutput,
+  formatToolTranscriptSection,
+  truncateToolOutput,
+} from "./provider/transcript.js";
 import { getCodexModelDefinition, normalizeCodexModel } from "./models.js";
 import { getProviderModelOptions } from "./provider/registry.js";
 import {
@@ -194,7 +202,6 @@ const FINAL_TOOL_STEP_NUDGE = [
   "If another tool is still required, the harness may start one bounded continuation cycle with the tool count reset.",
   "After that continuation cycle, it will return a partial result instead of failing the turn.",
 ].join(" ");
-const INTERNAL_TOOL_TRANSCRIPT_LABEL = "Internal tool transcript:";
 type RequiredEvidenceNudgeState = Partial<Record<MissingTurnEvidence, number>>;
 interface RequiredEvidenceNudge {
   label: MissingTurnEvidence;
@@ -1841,29 +1848,6 @@ function formatToolArgumentsPreview(value: unknown): string {
   }
 }
 
-function truncateToolOutput(value: string): string {
-  const trimmed = value.replace(/\s+/g, " ").trim();
-  if (!trimmed) {
-    return "none";
-  }
-  return trimmed.length > 260 ? `${trimmed.slice(0, 257)}...` : trimmed;
-}
-
-function formatToolTranscriptOutput(toolName: InternalToolName, result: InternalToolResult): string {
-  if (!result.ok || !isDiffPreviewTool(toolName)) {
-    return "";
-  }
-  const output = result.output.trim();
-  if (!output || !/\bEdited .+ \(\+\d+ -\d+\)/.test(output)) {
-    return "";
-  }
-  return `\n${output}`;
-}
-
-function isDiffPreviewTool(toolName: InternalToolName): boolean {
-  return toolName === "write_file" || toolName === "apply_patch" || toolName === "batch_edit" || toolName === "preview_patch";
-}
-
 async function maybeAwaitApproval(session: RuntimeSession, call: InternalToolCall, risk: ReturnType<typeof classifyInternalToolRisk>): Promise<boolean> {
   if (risk !== "guarded" || !session.operationControls.requireApprovalForGuarded) {
     return true;
@@ -2168,79 +2152,8 @@ function extractJsonAfterToken(value: string, token: string): string | null {
   return null;
 }
 
-function formatInternalToolExchange(step: number, call: InternalToolCall, result: InternalToolResult): string {
-  return [
-    `Step ${String(step)}`,
-    `Tool call: ${JSON.stringify(call)}`,
-    `Tool result (${result.ok ? "ok" : "error"}):`,
-    result.output,
-    formatToolRecoveryHint(call, result),
-  ].filter((line) => line.length > 0).join("\n");
-}
-
-function formatToolRecoveryHint(call: InternalToolCall, result: InternalToolResult): string {
-  if (result.ok) {
-    return "";
-  }
-  if (call.name === "shell_command" && result.output.startsWith("shell policy blocked command")) {
-    return [
-      "Recovery hint:",
-      "- Do not retry same shell command.",
-      "- Use read_file/list_dir/search_content for inspection.",
-      "- Use write_file/apply_patch/batch_edit for workspace file changes.",
-      "- Run /why-blocked if user asks why command was blocked.",
-    ].join("\n");
-  }
-  if (/tool policy blocked .*protected path/i.test(result.output)) {
-    return "Recovery hint:\n- Do not access protected roots. Use repo-local paths or ask user for safe input path.";
-  }
-  if (/not found|no such file|enoent|cannot find module|module not found/i.test(result.output)) {
-    return [
-      "Recovery hint:",
-      "- Do not retry same missing path/module blindly.",
-      "- Use search_files/list_dir/nexsight_gather to locate current path or package.",
-      "- If dependency is missing, inspect package scripts/deps before installing project-local fallback.",
-    ].join("\n");
-  }
-  if (/timed out|timeout/i.test(result.output)) {
-    return [
-      "Recovery hint:",
-      "- Retry with narrower scope, shorter timeout-safe command, or Nexsight compressed inspection.",
-      "- Prefer focused tests/build targets over full-suite repeats.",
-      "- If long-running work is necessary, report exact command and why it must run longer.",
-    ].join("\n");
-  }
-  if (/malformed|schema|arguments|required/i.test(result.output)) {
-    return [
-      "Recovery hint:",
-      "- Correct tool argument shape from the tool schema.",
-      "- Keep one valid tool call only; do not explain schema fixes in prose before retrying.",
-    ].join("\n");
-  }
-  return "";
-}
-
 function createGuidedPrompt(basePrompt: string, toolTranscript: string[], nudge: string): string {
   return createPromptWithToolTranscript(basePrompt, toolTranscript, nudge);
-}
-
-function createPromptWithToolTranscript(basePrompt: string, toolTranscript: string[], suffix: string, limit?: number): string {
-  const transcript = formatToolTranscriptSection(toolTranscript, limit);
-  return transcript
-    ? `${basePrompt}\n\n${transcript}\n\n${suffix}`
-    : `${basePrompt}\n\n${suffix}`;
-}
-
-function formatToolTranscriptSection(toolTranscript: string[], limit?: number): string {
-  const entries = compactToolTranscriptEntries(toolTranscript, limit);
-  if (entries.length === 0) {
-    return "";
-  }
-  return `${INTERNAL_TOOL_TRANSCRIPT_LABEL}\n${entries.join("\n\n")}`;
-}
-
-function compactToolTranscriptEntries(toolTranscript: string[], limit?: number): string[] {
-  return typeof limit === "number" ? toolTranscript.slice(-limit) : toolTranscript;
 }
 
 async function runRequiredNexsightFallback(
