@@ -383,6 +383,22 @@ test("todo tool creates, advances, completes, and lists visual tasks", async () 
   }
 });
 
+test("todo tool treats empty items alias as clear", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-todo-clear-alias-"));
+  try {
+    const session = createSession(cwd);
+    executeInternalTool(session, { name: "todo", arguments: { action: "create", subject: "Inspect repo" } });
+
+    const cleared = executeInternalTool(session, { name: "todo", arguments: { items: [] } });
+
+    assert.equal(cleared.ok, true);
+    assert.equal(cleared.output, "todos cleared");
+    assert.deepEqual(session.todos.tasks, []);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test("todo tool rejects completed regression and dependency cycles", async () => {
   const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-todo-guard-"));
   try {

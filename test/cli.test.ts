@@ -526,7 +526,7 @@ test("runRuntimeCommand exposes command catalog through help", async () => {
     "/agents - show Claude-style subagent types, running agents, and recent results",
     "/mouse [status|mode <auto|scroll|select>] - show or set transcript mouse interaction mode",
     "/usage - show current session usage statistics with provider/model token totals",
-    "/todos [pending|in_progress|completed|all] - show visual task checklist used by model planning",
+    "/todos [pending|in_progress|completed|all|clear] - show or clear visual task checklist used by model planning",
     "/config [status] | /config [set] <logo|lsp|lsp-index> <value> - inspect or mutate persisted runtime configuration",
     "/lsp [status|setup|health|warm|mode <on|off>|symbols <path>|diagnostics <path>|check [path]|nav <operation> [path] [line] [character]] - inspect enabled local LSP code intelligence with bounded fallback",
     "/memory [status|--verbose|--maintenance|save <text>|checkpoint [reason]|session [focus]] - inspect, maintain, or persist archivist memory/checkpoints",
@@ -617,6 +617,25 @@ test("runRuntimeCommand reports visual todos", async () => {
   assert.equal(result?.activity, "todos");
   assert.match(result?.output ?? "", /^todos$/m);
   assert.match(result?.output ?? "", /\[>\] todo-1 Inspecting donor/);
+});
+
+test("runRuntimeCommand clears visual todos", async () => {
+  const { runRuntimeCommand } = await import("../src/cli.js");
+  const session = createSession();
+  session.todos.tasks.push({
+    id: "todo-1",
+    subject: "Inspect donor",
+    status: "in_progress",
+    blockedBy: [],
+    createdAt: "2026-05-04T00:00:00.000Z",
+    updatedAt: "2026-05-04T00:00:00.000Z",
+  });
+
+  const result = runRuntimeCommand(session, "/todos clear");
+
+  assert.equal(result?.ok, true);
+  assert.equal(result?.output, "todos cleared");
+  assert.deepEqual(session.todos.tasks, []);
 });
 
 test("runRuntimeCommand manages persistent goal lifecycle", async () => {

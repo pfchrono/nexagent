@@ -26,7 +26,7 @@ import { applyQuestionnaireCommand, formatQuestionnaireStatus } from "./runtime/
 import { toDiagnosticRuntimeEvent } from "./runtime/diagnostics.js";
 import { savePersistedRuntimeState } from "./runtime/persistence.js";
 import { executeInternalTool, getInternalToolDefinitions } from "./runtime/tools.js";
-import { formatTodosCommandOutput } from "./runtime/todos.js";
+import { clearRuntimeTodos, formatTodosCommandOutput } from "./runtime/todos.js";
 import {
   beginGoalTurn,
   buildGoalContinuationPrompt,
@@ -2224,16 +2224,25 @@ function handleTodosCommand(session: RuntimeSession, args: string[]): RuntimeCom
   if (args.length > 1) {
     return {
       ok: false,
-      message: "usage: /todos [pending|in_progress|completed|all]",
+      message: "usage: /todos [pending|in_progress|completed|all|clear]",
       activity: "command failed · /todos usage",
     };
   }
   const mode = args[0] ?? "active";
-  if (!["active", "pending", "in_progress", "completed", "all"].includes(mode)) {
+  if (!["active", "pending", "in_progress", "completed", "all", "clear"].includes(mode)) {
     return {
       ok: false,
-      message: "usage: /todos [pending|in_progress|completed|all]",
+      message: "usage: /todos [pending|in_progress|completed|all|clear]",
       activity: "command failed · /todos usage",
+    };
+  }
+  if (mode === "clear") {
+    clearRuntimeTodos(session.todos);
+    savePersistedRuntimeState(session);
+    return {
+      ok: true,
+      output: "todos cleared",
+      activity: "todos",
     };
   }
   return {

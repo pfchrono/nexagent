@@ -3,7 +3,7 @@ import { emitRuntimeExtensionEvent } from "../runtime/extensions.js";
 import { emitTerminalNotification, notifyThresholdMs } from "../runtime/pi-compat.js";
 import { savePersistedRuntimeState } from "../runtime/persistence.js";
 import { beginSkillRun, completeSkillRun, recordSkillToolResult } from "../runtime/skill-runner.js";
-import { pruneFinishedTurnTodos } from "../runtime/todos.js";
+import { clearRuntimeTodos, pruneFinishedTurnTodos } from "../runtime/todos.js";
 import { TurnRun } from "../runtime/turn-run.js";
 import type { InternalToolCall, InternalToolResult } from "../runtime/tools.js";
 
@@ -40,7 +40,10 @@ export async function runProviderTurn(
       await emitRuntimeExtensionEvent(request.session, "agent_error", { error });
       throw error;
     } finally {
-      if (pruneFinishedTurnTodos(request.session.todos)) {
+      const todosChanged = result?.ok
+        ? clearRuntimeTodos(request.session.todos)
+        : pruneFinishedTurnTodos(request.session.todos);
+      if (todosChanged) {
         savePersistedRuntimeState(request.session);
       }
       await emitRuntimeExtensionEvent(request.session, "agent_end", { result });

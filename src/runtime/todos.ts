@@ -124,6 +124,15 @@ export function pruneFinishedTurnTodos(state: RuntimeTodoState): boolean {
   return true;
 }
 
+export function clearRuntimeTodos(state: RuntimeTodoState): boolean {
+  if (state.tasks.length === 0) {
+    return false;
+  }
+  state.tasks = [];
+  state.updatedAt = new Date().toISOString();
+  return true;
+}
+
 function mutateTodos(
   state: RuntimeTodoState,
   args: RuntimeTodoToolArgs,

@@ -262,7 +262,7 @@ Inside TUI:
 - `/memory` — Archivist memory status, safe signal counters, and commands
 - `/memory --maintenance` — merge duplicate Archivist entries into recurrence records and refresh memory diagnostics
 - `/usage` — current session provider/model usage table with token totals and cost availability note
-- `/todos [pending|in_progress|completed|all]` — show model-managed visual task checklist; active rows also render above the prompt
+- `/todos [pending|in_progress|completed|all|clear]` — show or clear model-managed visual task checklist; active rows also render above the prompt
 - `/goal [--tokens 50k] <objective>` — start a persistent autonomous goal with optional token budget; active goal renders above the prompt and can continue across turns
 - `/goal status`, `/goal pause`, `/goal resume`, `/goal clear`, and `/goal statusbar on|off` — inspect or manage persistent goal state
 - `/btw [--save] <question>` — run hidden side conversation through the current provider without adding it to main conversation context

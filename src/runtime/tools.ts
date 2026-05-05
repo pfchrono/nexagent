@@ -1644,7 +1644,7 @@ function normalizeTodoToolArguments(args: Record<string, unknown>): Record<strin
 
   const first = items.find((item): item is Record<string, unknown> => isRecord(item));
   if (!first) {
-    return args;
+    return { ...args, action: "clear" };
   }
 
   return {

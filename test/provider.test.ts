@@ -750,8 +750,9 @@ test("executeProviderRequest nudges todo for multi-stage GSD work", async () => 
 
   assert.equal(result.ok, true);
   assert.match(prompts[1] ?? "", /needs visible task tracking/);
-  assert.equal(session.todos.tasks[0]?.status, "in_progress");
+  assert.deepEqual(session.todos.tasks, []);
   assert.equal(session.events.some((event) => event.summary === "required todo evidence nudge applied"), true);
+  assert.equal(session.events.some((event) => event.summary === "tool todo completed"), true);
 });
 
 test("executeProviderRequest gives recovery hint after missing path tool failure", async () => {
@@ -2412,7 +2413,7 @@ test("executeProviderRequest allows repo-state recommendations that mention unco
   );
 });
 
-test("executeProviderRequest prunes finished todos at turn end", async () => {
+test("executeProviderRequest clears todos after successful turn", async () => {
   const session = createSession();
   session.todos.tasks.push(
     {
@@ -2456,7 +2457,7 @@ test("executeProviderRequest prunes finished todos at turn end", async () => {
   );
 
   assert.equal(result.ok, true);
-  assert.deepEqual(session.todos.tasks.map((task) => task.id), ["todo-2"]);
+  assert.deepEqual(session.todos.tasks, []);
   assert.notEqual(session.todos.updatedAt, null);
 });
 
