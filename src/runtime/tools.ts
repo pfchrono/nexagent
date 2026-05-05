@@ -111,9 +111,13 @@ export function getInternalToolDefinitions(): readonly InternalToolDefinition[] 
           path: { type: "string", description: "File path relative to current working directory." },
           startLine: { type: "number", description: "Optional 1-based first line to render." },
           start_line: { type: "number", description: "Legacy alias for startLine." },
+          start: { type: "number", description: "Legacy alias for startLine." },
+          offset: { type: "number", description: "Legacy alias for startLine." },
           endLine: { type: "number", description: "Optional 1-based last line to render." },
           end_line: { type: "number", description: "Legacy alias for endLine." },
+          end: { type: "number", description: "Legacy alias for endLine." },
           maxLines: { type: "number", description: "Optional maximum lines to render in compact mode." },
+          max_lines: { type: "number", description: "Legacy alias for maxLines." },
           limit: { type: "number", description: "Legacy alias for maxLines." },
           compact: { type: "boolean", description: "Render a bounded numbered preview instead of raw full content." },
         },
@@ -197,6 +201,8 @@ export function getInternalToolDefinitions(): readonly InternalToolDefinition[] 
         type: "object",
         properties: {
           path: { type: "string", description: "Optional directory path relative to current working directory." },
+          dir: { type: "string", description: "Legacy alias for path." },
+          directory: { type: "string", description: "Legacy alias for path." },
         },
         additionalProperties: false,
       },
@@ -210,6 +216,7 @@ export function getInternalToolDefinitions(): readonly InternalToolDefinition[] 
           pattern: { type: "string", description: "Text or regex pattern to search for." },
           query: { type: "string", description: "Legacy alias for pattern." },
           path: { type: "string", description: "Optional root path relative to current working directory." },
+          root: { type: "string", description: "Legacy alias for path." },
         },
         required: [],
         additionalProperties: false,
@@ -223,7 +230,9 @@ export function getInternalToolDefinitions(): readonly InternalToolDefinition[] 
         properties: {
           pattern: { type: "string", description: "Glob-style file pattern like *.ts or src/*.md." },
           query: { type: "string", description: "Legacy alias for pattern." },
+          glob: { type: "string", description: "Legacy alias for pattern." },
           path: { type: "string", description: "Optional root path relative to current working directory." },
+          root: { type: "string", description: "Legacy alias for path." },
         },
         required: [],
         additionalProperties: false,
@@ -249,6 +258,8 @@ export function getInternalToolDefinitions(): readonly InternalToolDefinition[] 
         properties: {
           query: { type: "string", description: "Search query." },
           limit: { type: "number", description: "Maximum result count, capped at 8." },
+          max_results: { type: "number", description: "Legacy alias for limit." },
+          count: { type: "number", description: "Legacy alias for limit." },
         },
         required: ["query"],
         additionalProperties: false,
@@ -290,6 +301,8 @@ export function getInternalToolDefinitions(): readonly InternalToolDefinition[] 
           timeout_ms: { type: "number", description: "Legacy alias for timeoutMs." },
           maxOutputChars: { type: "number", description: "Accepted compatibility output cap hint; runtime still applies built-in caps." },
           max_output_chars: { type: "number", description: "Accepted compatibility output cap hint; runtime still applies built-in caps." },
+          max_output: { type: "number", description: "Accepted compatibility output cap hint; runtime still applies built-in caps." },
+          maxOutput: { type: "number", description: "Accepted compatibility output cap hint; runtime still applies built-in caps." },
         },
         required: ["command"],
         additionalProperties: false,
@@ -310,6 +323,10 @@ export function getInternalToolDefinitions(): readonly InternalToolDefinition[] 
           task: { type: "string", description: "Natural-language task context. Not executable by itself; provide code or command too." },
           reason: { type: "string", description: "Short reason for using Nexsight." },
           timeoutMs: { type: "number", description: "Optional timeout, capped at 30000ms." },
+          timeout: { type: "number", description: "Legacy alias for timeoutMs." },
+          timeout_ms: { type: "number", description: "Legacy alias for timeoutMs." },
+          max_output: { type: "number", description: "Accepted compatibility output cap hint; runtime still applies built-in caps." },
+          max_output_chars: { type: "number", description: "Accepted compatibility output cap hint; runtime still applies built-in caps." },
         },
         required: [],
         additionalProperties: false,
@@ -322,8 +339,16 @@ export function getInternalToolDefinitions(): readonly InternalToolDefinition[] 
         type: "object",
         properties: {
           path: { type: "string", description: "Readable repo-local file path." },
+          file: { type: "string", description: "Legacy alias for path." },
+          filePath: { type: "string", description: "Legacy alias for path." },
+          file_path: { type: "string", description: "Legacy alias for path." },
           mode: { type: "string", description: "Read mode: auto, full, map, signatures, outline, or lines:N-M." },
           maxChars: { type: "number", description: "Maximum source chars to inspect, capped at 120000." },
+          max_chars: { type: "number", description: "Legacy alias for maxChars." },
+          start: { type: "number", description: "Legacy alias; converted to lines:start-end when mode is omitted." },
+          end: { type: "number", description: "Legacy alias; converted to lines:start-end when mode is omitted." },
+          start_line: { type: "number", description: "Legacy alias; converted to lines:start-end when mode is omitted." },
+          end_line: { type: "number", description: "Legacy alias; converted to lines:start-end when mode is omitted." },
         },
         required: ["path"],
         additionalProperties: false,
@@ -336,13 +361,17 @@ export function getInternalToolDefinitions(): readonly InternalToolDefinition[] 
         type: "object",
         properties: {
           root: { type: "string", description: "Repo-local root or file path. Defaults to cwd." },
+          path: { type: "string", description: "Legacy alias for root." },
           paths: { type: "array", items: { type: "string" }, description: "Legacy alias. First path is used as root." },
           pattern: { type: "string", description: "Optional glob suffix, such as *.ts or *.md." },
           query: { type: "string", description: "Optional terms; only files containing matching terms are included." },
           reason: { type: "string", description: "Short reason for using Nexsight." },
           mode: { type: "string", description: "Read mode per file: map, signatures, outline, lines:N-M, full, or auto." },
           limit: { type: "number", description: "Maximum matching files, capped at 80." },
+          max_files: { type: "number", description: "Legacy alias for limit." },
           maxCharsPerFile: { type: "number", description: "Maximum source chars per file, capped at 120000." },
+          max_chars_per_file: { type: "number", description: "Legacy alias for maxCharsPerFile." },
+          max_chars: { type: "number", description: "Legacy alias for maxCharsPerFile." },
         },
         additionalProperties: false,
       },
@@ -368,8 +397,10 @@ export function getInternalToolDefinitions(): readonly InternalToolDefinition[] 
         type: "object",
         properties: {
           root: { type: "string", description: "Optional root path relative to current working directory." },
+          path: { type: "string", description: "Legacy alias for root." },
           pattern: { type: "string", description: "Optional glob suffix, such as *.ts or *.md." },
           limit: { type: "number", description: "Maximum files to index, capped at 400." },
+          max_files: { type: "number", description: "Legacy alias for limit." },
         },
         additionalProperties: false,
       },
@@ -431,6 +462,7 @@ export function getInternalToolDefinitions(): readonly InternalToolDefinition[] 
           server: { type: "string", description: "MCP server name." },
           tool: { type: "string", description: "MCP tool name on that server." },
           arguments: { type: "object", description: "Tool arguments matching the MCP tool schema." },
+          args: { type: "object", description: "Legacy alias for arguments." },
         },
         required: ["server", "tool"],
         additionalProperties: false,
@@ -599,6 +631,7 @@ export function getInternalToolDefinitions(): readonly InternalToolDefinition[] 
         type: "object",
         properties: {
           agent_id: { type: "string", description: "Subagent id." },
+          id: { type: "string", description: "Legacy alias for agent_id." },
           wait: { type: "boolean", description: "Wait for completion if still running." },
           verbose: { type: "boolean", description: "Return full result instead of preview." },
         },
@@ -613,6 +646,7 @@ export function getInternalToolDefinitions(): readonly InternalToolDefinition[] 
         type: "object",
         properties: {
           agent_id: { type: "string", description: "Subagent id." },
+          id: { type: "string", description: "Legacy alias for agent_id." },
           message: { type: "string", description: "Steering message." },
         },
         required: ["agent_id", "message"],
@@ -635,6 +669,8 @@ export function getInternalToolDefinitions(): readonly InternalToolDefinition[] 
         type: "object",
         properties: {
           path: { type: "string", description: "Project file path to summarize." },
+          filePath: { type: "string", description: "Legacy alias for path." },
+          file_path: { type: "string", description: "Legacy alias for path." },
         },
         required: ["path"],
         additionalProperties: false,
@@ -647,6 +683,8 @@ export function getInternalToolDefinitions(): readonly InternalToolDefinition[] 
         type: "object",
         properties: {
           path: { type: "string", description: "Project file path to inspect." },
+          filePath: { type: "string", description: "Legacy alias for path." },
+          file_path: { type: "string", description: "Legacy alias for path." },
         },
         required: ["path"],
         additionalProperties: false,
@@ -702,13 +740,22 @@ export function getInternalToolFunctionDefinitions(): ReadonlyArray<Record<strin
 const TOOL_ARGUMENT_COMPAT_ALIASES: Partial<Record<InternalToolName, ReadonlyArray<string>>> = {
   batch_edit: ["operations", "changes"],
   git_status: ["path"],
-  read_file: ["start_line", "end_line", "limit"],
-  search_content: ["query"],
-  search_files: ["query"],
-  shell_command: ["cwd", "workdir", "timeout", "timeout_ms", "timeoutMs", "maxOutputChars", "max_output_chars"],
+  list_dir: ["dir", "directory"],
+  read_file: ["start_line", "start", "offset", "end_line", "end", "max_lines", "limit"],
+  search_content: ["query", "root"],
+  search_files: ["query", "glob", "root"],
+  web_search: ["max_results", "count"],
+  shell_command: ["cwd", "workdir", "timeout", "timeout_ms", "timeoutMs", "maxOutputChars", "maxOutput", "max_output_chars", "max_output"],
   todo: ["items", "todos"],
-  nexsight_execute: ["lang"],
-  nexsight_gather: ["paths", "reason"],
+  nexsight_execute: ["lang", "timeout", "timeout_ms", "max_output", "max_output_chars"],
+  nexsight_read: ["file", "filePath", "file_path", "max_chars", "start", "end", "start_line", "end_line"],
+  nexsight_gather: ["path", "paths", "reason", "max_files", "max_chars_per_file", "max_chars"],
+  nexsight_batch: ["path", "max_files"],
+  mcp_call: ["args"],
+  get_subagent_result: ["id"],
+  steer_subagent: ["id"],
+  lsp_symbols: ["filePath", "file_path"],
+  lsp_diagnostics: ["filePath", "file_path"],
   lsp_navigation: ["path", "char"],
 };
 
@@ -796,11 +843,11 @@ export function executeInternalTool(session: RuntimeSession, call: InternalToolC
         asBoolean(call.arguments?.replaceAll),
       );
     case "list_dir":
-      return executeListDirTool(session, asOptionalString(call.arguments?.path));
+      return executeListDirTool(session, asOptionalString(call.arguments?.path ?? call.arguments?.dir ?? call.arguments?.directory));
     case "search_content":
-      return executeSearchContentTool(session, asString(call.arguments?.pattern ?? call.arguments?.query, ""), asOptionalString(call.arguments?.path));
+      return executeSearchContentTool(session, asString(call.arguments?.pattern ?? call.arguments?.query, ""), asOptionalString(call.arguments?.path ?? call.arguments?.root));
     case "search_files":
-      return executeSearchFilesTool(session, asString(call.arguments?.pattern ?? call.arguments?.query, ""), asOptionalString(call.arguments?.path));
+      return executeSearchFilesTool(session, asString(call.arguments?.pattern ?? call.arguments?.query ?? call.arguments?.glob, ""), asOptionalString(call.arguments?.path ?? call.arguments?.root));
     case "web_fetch":
     case "web_search":
       return pending(call.name, "async");
@@ -874,7 +921,7 @@ export async function executeInternalToolAsync(session: RuntimeSession, call: In
     case "web_fetch":
       return await executeWebFetchTool(asString(call.arguments?.url, ""));
     case "web_search":
-      return await executeWebSearchTool(asString(call.arguments?.query, ""), asNumber(call.arguments?.limit, 5));
+      return await executeWebSearchTool(asString(call.arguments?.query, ""), asNumber(call.arguments?.limit ?? call.arguments?.max_results ?? call.arguments?.count, 5));
     case "archivist_save":
       return await executeArchivistSaveTool(
         session,
@@ -888,13 +935,13 @@ export async function executeInternalToolAsync(session: RuntimeSession, call: In
     case "mcp_list_tools":
       return ok("mcp_list_tools", listMcpTools(session.mcpRegistry));
     case "mcp_call":
-      return await executeMcpCallTool(session, call.arguments ?? {});
+      return await executeMcpCallTool(session, call.arguments ? { ...call.arguments, arguments: call.arguments.arguments ?? call.arguments.args } : {});
     case "ask_user_question":
       return await executeAskUserQuestionTool(session, call.arguments ?? {});
     case "lsp_symbols":
-      return await executeLspSymbolsTool(session, asString(call.arguments?.path, ""));
+      return await executeLspSymbolsTool(session, asString(call.arguments?.path ?? call.arguments?.filePath ?? call.arguments?.file_path, ""));
     case "lsp_diagnostics":
-      return await executeLspDiagnosticsTool(session, asString(call.arguments?.path, ""));
+      return await executeLspDiagnosticsTool(session, asString(call.arguments?.path ?? call.arguments?.filePath ?? call.arguments?.file_path, ""));
     case "lsp_navigation":
       return executeLspNavigationTool(session, call.arguments ?? {});
     case "Agent":
@@ -1045,7 +1092,7 @@ async function executeReadFileTool(session: RuntimeSession, args: Record<string,
 
 function formatReadFileOutput(session: RuntimeSession, targetPath: string, content: string, args: Record<string, unknown>): string {
   const lineRange = resolveReadFileLineRange(args);
-  const maxLines = clampPositiveInteger(asNumber(args.maxLines ?? args.limit, READ_FILE_COMPACT_LINE_LIMIT), 1, READ_FILE_COMPACT_LINE_LIMIT);
+  const maxLines = clampPositiveInteger(asNumber(args.maxLines ?? args.max_lines ?? args.limit, READ_FILE_COMPACT_LINE_LIMIT), 1, READ_FILE_COMPACT_LINE_LIMIT);
   const lines = content.split(/\r?\n/);
   if (lineRange) {
     return renderReadFileLines(session, targetPath, lines, lineRange.startLine, lineRange.endLine, "range");
@@ -1057,8 +1104,8 @@ function formatReadFileOutput(session: RuntimeSession, targetPath: string, conte
 }
 
 function resolveReadFileLineRange(args: Record<string, unknown>): { startLine: number; endLine: number } | null {
-  const rawStart = asNumber(args.startLine ?? args.start_line, NaN);
-  const rawEnd = asNumber(args.endLine ?? args.end_line, NaN);
+  const rawStart = asNumber(args.startLine ?? args.start_line ?? args.start ?? args.offset, NaN);
+  const rawEnd = asNumber(args.endLine ?? args.end_line ?? args.end, NaN);
   if (!Number.isFinite(rawStart) && !Number.isFinite(rawEnd)) {
     return null;
   }
@@ -1953,7 +2000,7 @@ function executeNexsightExecuteTool(session: RuntimeSession, args: Record<string
   return toToolResult("nexsight_execute", executeNexsight(session, {
     language,
     code,
-    timeoutMs: asNumber(args.timeoutMs, 30_000),
+    timeoutMs: asNumber(args.timeoutMs ?? args.timeout_ms ?? args.timeout, 30_000),
   }));
 }
 
@@ -1965,12 +2012,12 @@ async function executeNexsightExecuteToolAsync(session: RuntimeSession, args: Re
   return toToolResult("nexsight_execute", await executeNexsightAsync(session, {
     language,
     code,
-    timeoutMs: asNumber(args.timeoutMs, 30_000),
+    timeoutMs: asNumber(args.timeoutMs ?? args.timeout_ms ?? args.timeout, 30_000),
   }));
 }
 
 function executeNexsightReadTool(session: RuntimeSession, args: Record<string, unknown>): InternalToolResult {
-  const inputPath = asString(args.path, "");
+  const inputPath = asString(args.path ?? args.file ?? args.filePath ?? args.file_path, "");
   if (!inputPath.trim()) {
     return fail("nexsight_read", "path required");
   }
@@ -1979,15 +2026,16 @@ function executeNexsightReadTool(session: RuntimeSession, args: Record<string, u
   if (policyFailure) {
     return fail("nexsight_read", policyFailure);
   }
+  const lineMode = resolveNexsightLineMode(args);
   return toToolResult("nexsight_read", readNexsight(session, {
     path: targetPath,
-    mode: asOptionalString(args.mode),
-    maxChars: asNumber(args.maxChars, 120_000),
+    mode: asOptionalString(args.mode) ?? lineMode,
+    maxChars: asNumber(args.maxChars ?? args.max_chars, 120_000),
   }));
 }
 
 function executeNexsightGatherTool(session: RuntimeSession, args: Record<string, unknown>): InternalToolResult {
-  const inputPath = asOptionalString(args.root) ?? firstString(args.paths);
+  const inputPath = asOptionalString(args.root ?? args.path) ?? firstString(args.paths);
   if (inputPath) {
     const targetPath = resolveRepoPath(session, inputPath);
     const policyFailure = validateReadToolPath(session, targetPath);
@@ -2000,8 +2048,8 @@ function executeNexsightGatherTool(session: RuntimeSession, args: Record<string,
     pattern: asOptionalString(args.pattern),
     query: asOptionalString(args.query),
     mode: asOptionalString(args.mode),
-    limit: asNumber(args.limit, 24),
-    maxCharsPerFile: asNumber(args.maxCharsPerFile, 40_000),
+    limit: asNumber(args.limit ?? args.max_files, 24),
+    maxCharsPerFile: asNumber(args.maxCharsPerFile ?? args.max_chars_per_file ?? args.max_chars, 40_000),
   }));
 }
 
@@ -2042,7 +2090,7 @@ function inferNexsightLanguage(code: string, hasCommand: boolean): string {
 }
 
 function executeNexsightBatchTool(session: RuntimeSession, args: Record<string, unknown>): InternalToolResult {
-  const inputPath = asOptionalString(args.root);
+  const inputPath = asOptionalString(args.root ?? args.path);
   if (inputPath) {
     const targetPath = resolveRepoPath(session, inputPath);
     const policyFailure = validateReadToolPath(session, targetPath);
@@ -2053,8 +2101,19 @@ function executeNexsightBatchTool(session: RuntimeSession, args: Record<string, 
   return toToolResult("nexsight_batch", batchIndexNexsight(session, {
     root: inputPath,
     pattern: asOptionalString(args.pattern),
-    limit: asNumber(args.limit, 100),
+    limit: asNumber(args.limit ?? args.max_files, 100),
   }));
+}
+
+function resolveNexsightLineMode(args: Record<string, unknown>): string | undefined {
+  const rawStart = asNumber(args.start ?? args.start_line, NaN);
+  const rawEnd = asNumber(args.end ?? args.end_line, NaN);
+  if (!Number.isFinite(rawStart) && !Number.isFinite(rawEnd)) {
+    return undefined;
+  }
+  const start = Number.isFinite(rawStart) ? Math.max(1, Math.floor(rawStart)) : 1;
+  const end = Number.isFinite(rawEnd) ? Math.max(start, Math.floor(rawEnd)) : start + READ_FILE_COMPACT_LINE_LIMIT - 1;
+  return `lines:${String(start)}-${String(end)}`;
 }
 
 async function executeArchivistCheckpointTool(session: RuntimeSession, reason?: string): Promise<InternalToolResult> {

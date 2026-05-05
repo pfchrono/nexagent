@@ -9,7 +9,7 @@ import { applyArchivistRetrieval, rememberArchivistFailure } from "../src/runtim
 import { resolveNexsightRuntime } from "../src/runtime/nexsight.js";
 import { analyzeBlockedShellCommand, analyzeSafeGitCommand } from "../src/runtime/policy.js";
 import { formatTodoOverlayRows, formatTodoPromptSummary } from "../src/runtime/todos.js";
-import { classifyInternalToolRisk, executeInternalTool, executeInternalToolAsync, getInternalToolFunctionDefinitions } from "../src/runtime/tools.js";
+import { classifyInternalToolRisk, executeInternalTool, executeInternalToolAsync, getInternalToolFunctionDefinitions, validateInternalToolArguments } from "../src/runtime/tools.js";
 import type { RuntimeSession } from "../src/runtime/session.js";
 
 function createSession(cwd: string): RuntimeSession {
@@ -274,7 +274,7 @@ test("internal tool argument guard accepts known legacy aliases", async () => {
       arguments: {
         command: "sleep 1",
         timeout_ms: 500,
-        max_output_chars: 2000,
+        max_output: 2000,
       },
     });
     assert.equal(shell.ok, false);
@@ -308,13 +308,33 @@ test("internal strict tool schemas expose compatibility aliases", () => {
   };
 
   assert.ok("start_line" in propertiesFor("read_file"));
+  assert.ok("start" in propertiesFor("read_file"));
+  assert.ok("offset" in propertiesFor("read_file"));
   assert.ok("end_line" in propertiesFor("read_file"));
+  assert.ok("end" in propertiesFor("read_file"));
+  assert.ok("max_lines" in propertiesFor("read_file"));
   assert.ok("limit" in propertiesFor("read_file"));
+  assert.ok("dir" in propertiesFor("list_dir"));
+  assert.ok("root" in propertiesFor("search_content"));
+  assert.ok("glob" in propertiesFor("search_files"));
+  assert.ok("max_results" in propertiesFor("web_search"));
   assert.ok("cwd" in propertiesFor("shell_command"));
   assert.ok("workdir" in propertiesFor("shell_command"));
   assert.ok("timeout" in propertiesFor("shell_command"));
   assert.ok("timeout_ms" in propertiesFor("shell_command"));
   assert.ok("max_output_chars" in propertiesFor("shell_command"));
+  assert.ok("max_output" in propertiesFor("shell_command"));
+  assert.ok("timeout_ms" in propertiesFor("nexsight_execute"));
+  assert.ok("filePath" in propertiesFor("nexsight_read"));
+  assert.ok("start" in propertiesFor("nexsight_read"));
+  assert.ok("path" in propertiesFor("nexsight_gather"));
+  assert.ok("max_chars_per_file" in propertiesFor("nexsight_gather"));
+  assert.ok("path" in propertiesFor("nexsight_batch"));
+  assert.ok("args" in propertiesFor("mcp_call"));
+  assert.ok("id" in propertiesFor("get_subagent_result"));
+  assert.ok("id" in propertiesFor("steer_subagent"));
+  assert.ok("filePath" in propertiesFor("lsp_symbols"));
+  assert.ok("file_path" in propertiesFor("lsp_diagnostics"));
   assert.ok("items" in propertiesFor("todo"));
   assert.ok("operations" in propertiesFor("batch_edit"));
   assert.ok("query" in propertiesFor("search_content"));
@@ -944,6 +964,64 @@ test("executeInternalTool read_file accepts snake_case line range aliases", asyn
     assert.match(result.output, /^3 \| three$/m);
     assert.match(result.output, /^5 \| five$/m);
     assert.doesNotMatch(result.output, /one/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("executeInternalTool read_file accepts short line range aliases", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-read-short-lines-"));
+
+  try {
+    await writeFile(path.join(cwd, "sample.txt"), "one\ntwo\nthree\nfour\nfive\nsix\n");
+    const session = createSession(cwd);
+
+    const result = executeInternalTool(session, {
+      name: "read_file",
+      arguments: {
+        path: "sample.txt",
+        start: 2,
+        end: 3,
+      },
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.tool, "read_file");
+    assert.match(result.output, /^\[read_file range: sample\.txt lines 2-3 of 7\]/);
+    assert.match(result.output, /2 \| two/);
+    assert.match(result.output, /3 \| three/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("compatibility aliases prevent common strict-schema tool stalls", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-tool-compat-wide-"));
+
+  try {
+    await mkdir(path.join(cwd, "src"), { recursive: true });
+    await writeFile(path.join(cwd, "src", "sample.ts"), "export const value = 1;\nexport const other = 2;\n");
+    const session = createSession(cwd);
+
+    assert.equal(executeInternalTool(session, { name: "list_dir", arguments: { dir: "src" } }).ok, true);
+    assert.equal(executeInternalTool(session, { name: "search_content", arguments: { query: "value", root: "src" } }).ok, true);
+    assert.equal(executeInternalTool(session, { name: "search_files", arguments: { glob: "*.ts", root: "src" } }).ok, true);
+
+    const nexsightRead = executeInternalTool(session, {
+      name: "nexsight_read",
+      arguments: { filePath: "src/sample.ts", start: 1, end: 1, max_chars: 500 },
+    });
+    assert.equal(nexsightRead.ok, true);
+    assert.match(nexsightRead.output, /lines:1-1|export const value/);
+
+    assert.equal(validateInternalToolArguments({ name: "nexsight_execute", arguments: { command: "pwd", timeout_ms: 500, max_output: 2000 } }), null);
+    assert.equal(validateInternalToolArguments({ name: "nexsight_gather", arguments: { path: "src", max_files: 2, max_chars_per_file: 500 } }), null);
+    assert.equal(validateInternalToolArguments({ name: "nexsight_batch", arguments: { path: "src", max_files: 2 } }), null);
+    assert.equal(validateInternalToolArguments({ name: "mcp_call", arguments: { server: "s", tool: "t", args: { value: true } } }), null);
+    assert.equal(validateInternalToolArguments({ name: "get_subagent_result", arguments: { id: "agent-1" } }), null);
+    assert.equal(validateInternalToolArguments({ name: "steer_subagent", arguments: { id: "agent-1", message: "focus" } }), null);
+    assert.equal(validateInternalToolArguments({ name: "lsp_symbols", arguments: { filePath: "src/sample.ts" } }), null);
+    assert.equal(validateInternalToolArguments({ name: "lsp_diagnostics", arguments: { file_path: "src/sample.ts" } }), null);
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }
