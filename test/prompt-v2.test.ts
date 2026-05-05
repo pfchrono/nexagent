@@ -196,17 +196,25 @@ test("buildPromptV2 keeps style modes dynamic and subordinate", () => {
   const execution = prompt.sections.find((section) => section.id === "execution_contract");
   const caveman = prompt.sections.find((section) => section.id === "style_caveman");
   const deadpool = prompt.sections.find((section) => section.id === "style_deadpool");
+  const reminder = prompt.sections.find((section) => section.id === "style_active_reminder");
 
   assert.equal(execution?.cache, "stable");
   assert.equal(caveman?.cache, "dynamic");
   assert.equal(deadpool?.cache, "dynamic");
+  assert.equal(reminder?.cache, "dynamic");
   assert.ok((execution?.priority ?? 999) < (caveman?.priority ?? 0));
+  assert.ok((reminder?.priority ?? 0) > (deadpool?.priority ?? 999));
   assert.match(caveman?.content.join("\n") ?? "", /Pattern: \[thing\] \[action\] \[reason\]\. \[next step\]\./);
+  assert.match(caveman?.content.join("\n") ?? "", /Every normal sentence to the user should be ultra-compressed caveman style/);
   assert.match(caveman?.content.join("\n") ?? "", /Structured and machine-readable content stays exact/);
-  assert.match(deadpool?.content.join("\n") ?? "", /recognizably Deadpool-flavored/);
+  assert.match(deadpool?.content.join("\n") ?? "", /Deadpool mode is a hard user-visible prose style/);
+  assert.match(deadpool?.content.join("\n") ?? "", /must sound recognizably Deadpool-flavored/);
+  assert.match(deadpool?.content.join("\n") ?? "", /Default normal explanatory prose, progress updates, and final summaries to this voice/);
   assert.match(deadpool?.content.join("\n") ?? "", /Do not apply Deadpool voice to tool calls/);
   assert.match(deadpool?.content.join("\n") ?? "", /LSP diagnostics/);
   assert.match(deadpool?.content.join("\n") ?? "", /Do not copy copyrighted quotes or signature catchphrases/);
+  assert.match(reminder?.content.join("\n") ?? "", /Active style stack: deadpool \+ caveman/);
+  assert.match(reminder?.content.join("\n") ?? "", /Never alter tool calls, JSON\/XML, code blocks/);
 });
 
 test("buildPromptV2 snapshots archivist and active skill conversation context", () => {

@@ -393,9 +393,11 @@ test("assemblePrompt injects Free-Code-style caveman and deadpool sections", asy
     assert.equal(assembled.layers.responseStyle.length, 2);
     assert.match(assembled.layers.responseStyle.join("\n"), /# Communication Style: Caveman Mode/);
     assert.match(assembled.layers.responseStyle.join("\n"), /Cut ~75% of tokens while keeping full technical accuracy/);
+    assert.match(assembled.layers.responseStyle.join("\n"), /Every normal sentence to the user should be ultra-compressed caveman style/);
     assert.match(assembled.layers.responseStyle.join("\n"), /Pattern: \[thing\] \[action\] \[reason\]\. \[next step\]\./);
     assert.match(assembled.layers.responseStyle.join("\n"), /# Communication Style: Deadpool Mode/);
-    assert.match(assembled.layers.responseStyle.join("\n"), /recognizably Deadpool-flavored/);
+    assert.match(assembled.layers.responseStyle.join("\n"), /MUST sound recognizably Deadpool-flavored/);
+    assert.match(assembled.layers.responseStyle.join("\n"), /Default normal explanatory prose, progress updates, and final summaries to this voice/);
     assert.match(assembled.layers.responseStyle.join("\n"), /Do NOT apply Deadpool voice to tool calls/);
     assert.match(assembled.layers.responseStyle.join("\n"), /LSP diagnostics/);
     assert.match(assembled.prompt, /Response style:/);

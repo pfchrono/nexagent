@@ -3,6 +3,7 @@ import { emitRuntimeExtensionEvent } from "../runtime/extensions.js";
 import { emitTerminalNotification, notifyThresholdMs } from "../runtime/pi-compat.js";
 import { savePersistedRuntimeState } from "../runtime/persistence.js";
 import { beginSkillRun, completeSkillRun, recordSkillToolResult } from "../runtime/skill-runner.js";
+import { styleAssistantOutput } from "../runtime/style.js";
 import { clearRuntimeTodos, pruneFinishedTurnTodos } from "../runtime/todos.js";
 import { TurnRun } from "../runtime/turn-run.js";
 import type { InternalToolCall, InternalToolResult } from "../runtime/tools.js";
@@ -71,7 +72,20 @@ async function applyMessageEndReplacement(request: ProviderRequest, result: Prov
       output = next;
     }
   }
-  return output === result.output ? result : { ...result, output };
+  const styledOutput = styleAssistantOutput(request.session, output);
+  if (styledOutput !== result.output) {
+    updateLatestAssistantCompletedEvent(request, styledOutput);
+  }
+  return styledOutput === result.output ? result : { ...result, output: styledOutput };
+}
+
+function updateLatestAssistantCompletedEvent(request: ProviderRequest, output: string): void {
+  const latest = [...request.session.events]
+    .reverse()
+    .find((event) => event.kind === "assistant" && event.status === "completed" && event.summary === "assistant response completed");
+  if (latest) {
+    latest.detail = output;
+  }
 }
 
 function extractMessageEndOutput(value: unknown): string | null {

@@ -281,6 +281,39 @@ test("executeProviderRequest records model-authored intent and strips tag from f
   );
 });
 
+test("executeProviderRequest compacts final output when caveman mode is active", async () => {
+  const session = createSession();
+  session.commandModes.cavemanMode = true;
+
+  const result = await executeProviderRequest(
+    {
+      session,
+      prompt: "summarize",
+    },
+    {
+      exec: async () => ({
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+        output: "You should just use the smaller helper in order to reduce the token count.\n",
+      }),
+      http: async () => {
+        throw new Error("http should not be used");
+      },
+      codexHttp: async () => {
+        throw new Error("codex-http should not be used");
+      },
+    },
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.output, "use smaller helper to reduce token count.");
+  assert.equal(
+    session.events.find((event) => event.summary === "assistant response completed")?.detail,
+    "use smaller helper to reduce token count.",
+  );
+});
+
 test("executeProviderRequest records model intent before executing first tool", async () => {
   const session = createSession();
 

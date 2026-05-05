@@ -65,6 +65,7 @@ import { savePersistedRuntimeState } from "./runtime/persistence.js";
 import { createQuestionnaireRequest, type RuntimeQuestionnaireQuestion } from "./runtime/questionnaire.js";
 import { consumeOperatorSteer, estimateTokenCount, recordRuntimeEvent, setRuntimeAction } from "./runtime/session.js";
 import type { RuntimeApprovalRequest, RuntimeSession } from "./runtime/session.js";
+import { styleAssistantOutput } from "./runtime/style.js";
 import { recordToolMemory } from "./runtime/tool-memory.js";
 import { TurnRun, type MissingTurnEvidence } from "./runtime/turn-run.js";
 import { classifyInternalToolRisk, executeInternalToolAsync, validateInternalToolArguments, type InternalToolCall, type InternalToolResult } from "./runtime/tools.js";
@@ -550,27 +551,28 @@ async function executeProviderRequestImpl(
           if (claimsFileMutation(finalOutput) && !hasWriteEvidence(request.session, turnEventStart)) {
             return createMissingWriteEvidenceFailure(request, model, transport.transport, transport.id, finalOutput);
           }
+          const styledOutput = styleAssistantOutput(request.session, finalOutput);
           recordRuntimeEvent(request.session, {
             kind: "assistant",
             status: "completed",
             summary: "assistant response completed",
-            detail: finalOutput,
+            detail: styledOutput,
           });
           recordRuntimeEvent(request.session, {
             kind: "provider",
             status: "completed",
             summary: `${provider} turn completed`,
-            detail: `transport=${request.session.providerTransport.mode}; output_chars=${String(finalOutput.length)}`,
+            detail: `transport=${request.session.providerTransport.mode}; output_chars=${String(styledOutput.length)}`,
           });
           setSentrySpanAttributes(agentSpan, {
-            "gen_ai.response.output_chars": finalOutput.length,
+            "gen_ai.response.output_chars": styledOutput.length,
             "nexagent.turn.status": "completed",
           });
           logSentryInfo("provider turn completed", {
             provider,
             model: model ?? "default",
             transport: request.session.providerTransport.mode,
-            output_chars: finalOutput.length,
+            output_chars: styledOutput.length,
           });
           return {
             ok: true,
@@ -579,7 +581,7 @@ async function executeProviderRequestImpl(
             transport: transport.transport,
             adapter: transport.id,
             fallbackApplied: false,
-            output: finalOutput,
+            output: styledOutput,
           };
         }
         recordRuntimeEvent(request.session, {
@@ -1970,17 +1972,18 @@ async function maybeSynthesizeAfterRepeatedGuidance(
     return missingObligation;
   }
 
+  const styledOutput = styleAssistantOutput(request.session, finalOutput);
   recordRuntimeEvent(request.session, {
     kind: "assistant",
     status: "completed",
     summary: "assistant response completed",
-    detail: finalOutput,
+    detail: styledOutput,
   });
   recordRuntimeEvent(request.session, {
     kind: "provider",
     status: "completed",
     summary: `${request.session.provider} turn completed`,
-    detail: `transport=${request.session.providerTransport.mode}; output_chars=${String(finalOutput.length)}`,
+    detail: `transport=${request.session.providerTransport.mode}; output_chars=${String(styledOutput.length)}`,
   });
   return {
     ok: true,
@@ -1989,7 +1992,7 @@ async function maybeSynthesizeAfterRepeatedGuidance(
     transport: request.session.provider === "openai" ? "openai" : "codex",
     adapter,
     fallbackApplied: false,
-    output: finalOutput,
+    output: styledOutput,
   };
 }
 

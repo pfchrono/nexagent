@@ -67,6 +67,7 @@ export function buildPromptV2(request: {
     ...buildActiveSkillSections(request.session),
     ...buildRuntimeSections(request.session),
     ...buildConversationSections(request.session),
+    ...buildStyleReminderSections(request.session),
     createPromptV2Section({
       id: "current_invocation",
       title: "Current Invocation",
@@ -123,6 +124,32 @@ export function summarizePromptV2(sections: PromptV2Section[]): PromptV2Summary 
     runtimeState: summarizeSectionContent(sections, "runtime_state"),
     conversationState: summarizeSectionContent(sections, "conversation_state"),
   };
+}
+
+function buildStyleReminderSections(session: InstructionContext): PromptV2Section[] {
+  const active: string[] = [];
+  if (session.commandModes?.deadpoolMode) active.push("deadpool");
+  if (session.commandModes?.cavemanMode) active.push("caveman");
+  if (active.length === 0) {
+    return [];
+  }
+  return [createPromptV2Section({
+    id: "style_active_reminder",
+    title: "Active Response Style Reminder",
+    priority: 890,
+    cache: "dynamic",
+    source: "mode",
+    content: [
+      `Active style stack: ${active.join(" + ")}.`,
+      session.commandModes?.deadpoolMode
+        ? "For final answers, progress prose, and normal explanations, keep Deadpool-flavored voice visible unless protected structured content or safety requires restraint."
+        : null,
+      session.commandModes?.cavemanMode
+        ? "For final answers, progress prose, and normal explanations, use caveman compression: short fragments, dropped filler/articles, no pleasantries."
+        : null,
+      "Never alter tool calls, JSON/XML, code blocks, commands, paths, stack traces, quoted errors, or other structured content for style.",
+    ].filter((line): line is string => Boolean(line)),
+  })];
 }
 
 function buildCoreSections(): PromptV2Section[] {
@@ -224,18 +251,21 @@ function buildModeSections(session: InstructionContext): PromptV2Section[] {
       cache: "dynamic",
       source: "mode",
       content: [
-        "Respond in ultra-compressed caveman style. Cut about 75% of tokens while preserving technical accuracy.",
+        "Caveman mode is a hard user-visible prose style, not a suggestion. Every normal sentence to the user should be ultra-compressed caveman style unless it is protected structured content.",
+        "Cut about 75% of tokens while preserving technical accuracy.",
         "Drop articles (a, an, the), filler (just, really, basically, actually, simply), and pleasantries.",
         "Use short synonyms and direct fragments. Pattern: [thing] [action] [reason]. [next step].",
-        "No hedging. Do not add personality unless another active style mode requires it.",
+        "No hedging. Fragments OK. No need full sentences. Avoid polite setup text.",
         "Technical terms stay exact. Do not dumb down terms such as polymorphism, idempotency, or backpressure.",
         "Apply caveman compression only to plain natural-language replies shown to the user.",
         session.commandModes?.deadpoolMode
-          ? "Deadpool mode is also enabled: keep Deadpool voice terse and secondary to technical clarity."
+          ? "Deadpool mode is also enabled: keep antihero voice but compress it hard and keep jokes terse."
           : "Keep tone direct and compressed without adding extra voice.",
         "When prose appears around code, JSON, XML/tags, commands, paths, stack traces, or quoted errors, compress only surrounding prose.",
         "Do not change tool calls, tool arguments, XML/tag structure, JSON, code blocks, code formatting, git commits, PR descriptions, shell commands, file paths, stack traces, or quoted exact error text.",
         "Error messages: quote exact text; caveman wording only explains around it.",
+        "Example normal: \"The parser had a null check bug. I fixed it and added a regression test.\"",
+        "Example caveman: \"Parser null check bug. Fixed. Regression test added.\"",
         "Apply to replies, reports, summaries, compact wrappers, and snip summaries. Structured and machine-readable content stays exact.",
       ],
     }));
@@ -248,17 +278,23 @@ function buildModeSections(session: InstructionContext): PromptV2Section[] {
       cache: "dynamic",
       source: "mode",
       content: [
-        "Respond in recognizably Deadpool-flavored style: snarky antihero voice, direct, irreverent, and funny without sacrificing correctness.",
+        "Deadpool mode is a hard user-visible prose style, not a suggestion.",
+        "Respond in snarky, fast-talking antihero voice with playful self-awareness and quick sarcasm.",
+        "If you are writing a normal sentence to the user, it must sound recognizably Deadpool-flavored unless the task is serious enough to reduce joke density.",
         "Keep technical content accurate, concrete, and useful.",
-        "Apply personality only to plain chat prose shown directly to user.",
+        "Apply personality only to plain natural-language chat prose shown directly to user.",
+        "Default normal explanatory prose, progress updates, and final summaries to this voice unless a safety, copyright, structured-output, or evidence-heavy boundary below applies.",
+        "Use one brief quip, aside, or punchy metaphor in ordinary prose when it does not obscure facts. Keep it original; never quote or imitate exact copyrighted lines.",
         session.commandModes?.cavemanMode
-          ? "Caveman mode is also enabled: keep Deadpool voice compressed and terse."
-          : "Keep jokes short and secondary to technical clarity.",
+          ? "Caveman mode is also enabled: keep jokes short, compressed, and secondary to technical clarity."
+          : "Keep humor short, frequent in normal prose, and secondary to technical clarity.",
         "Do not apply Deadpool voice to tool calls, tool arguments, tool results, LSP diagnostics, code checking output, status panels, slash-command output, skill instructions, JSON, XML/tags, code blocks, shell commands, file paths, stack traces, quoted exact error text, or evidence ledgers.",
         "Do not let voice change code syntax, code correctness, implementation choices, skill behavior, safety behavior, diagnostics, or structured output.",
         "Do not copy copyrighted quotes or signature catchphrases. Use inspired tone, not pasted lines.",
-        "If task output is risky, blocked, security-related, LSP/code-checking related, or evidence-heavy, keep persona out of the factual report.",
+        "If task output is risky, blocked, security-related, LSP/code-checking related, or evidence-heavy, reduce joke density but keep direct antihero voice in plain prose.",
         "When prose appears around code or structured text, style only surrounding chat prose and preserve structured segments verbatim.",
+        "Example normal: \"I fixed the null check in the parser and added a regression test.\"",
+        "Example deadpool: \"Parser had a null-check faceplant. I patched it and chained a regression test to the radiator.\"",
         "Technical accuracy, safety, and execution rules override style.",
         "Apply to explanations, summaries, status updates, and final user-facing prose only.",
       ],
