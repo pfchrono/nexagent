@@ -1189,6 +1189,56 @@ test("executeInternalTool preserves accumulated shell stdout and stderr on failu
   }
 });
 
+test("executeInternalToolAsync keeps event loop responsive during shell command", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-async-shell-"));
+  try {
+    const session = createSession(cwd);
+    const pending = executeInternalToolAsync(session, {
+      name: "shell_command",
+      arguments: { command: "sleep 0.1 && echo done", timeout_ms: 1000 },
+    });
+    let timerFired = false;
+    await new Promise((resolve) => setTimeout(() => {
+      timerFired = true;
+      resolve(null);
+    }, 10));
+
+    assert.equal(timerFired, true);
+    const result = await pending;
+    assert.equal(result.ok, true);
+    assert.match(result.output, /done/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("executeInternalToolAsync keeps event loop responsive during Nexsight execute", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-async-nexsight-"));
+  try {
+    const session = createSession(cwd);
+    const pending = executeInternalToolAsync(session, {
+      name: "nexsight_execute",
+      arguments: {
+        language: "javascript",
+        code: "setTimeout(() => console.log('done'), 100);",
+        timeoutMs: 1000,
+      },
+    });
+    let timerFired = false;
+    await new Promise((resolve) => setTimeout(() => {
+      timerFired = true;
+      resolve(null);
+    }, 10));
+
+    assert.equal(timerFired, true);
+    const result = await pending;
+    assert.equal(result.ok, true);
+    assert.match(result.output, /done/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test("safe-git blocks high-risk git shell commands", async () => {
   const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-tools-safe-git-"));
 

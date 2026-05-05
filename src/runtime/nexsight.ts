@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -57,6 +57,14 @@ interface NexsightChunk {
 }
 
 type NexsightRuntime = { ok: true; command: string; args: string[]; scriptName: string } | { ok: false; error: string };
+
+interface NexsightProcessResult {
+  status: number | null;
+  timedOut: boolean;
+  stdout: string;
+  stderr: string;
+  error: Error | null;
+}
 
 type SqliteStatement = {
   run: (...values: unknown[]) => unknown;
@@ -152,6 +160,57 @@ export function executeNexsight(session: RuntimeSession, input: NexsightExecuteI
       `language: ${language}`,
       `exit: ${String(result.status ?? (result.error ? 1 : 0))}`,
       `timedOut: ${String(Boolean(result.signal === "SIGTERM" || result.error?.message.includes("ETIMEDOUT")))}`,
+    ].join("\n");
+
+    if (result.error) {
+      return fail(`${header}\n${capped}`);
+    }
+    if ((result.status ?? 0) !== 0) {
+      return fail(`${header}\n${capped}`);
+    }
+    return ok(capped);
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
+export async function executeNexsightAsync(session: RuntimeSession, input: NexsightExecuteInput): Promise<NexsightResult> {
+  const language = input.language.trim().toLowerCase();
+  if (!NEXSIGHT_LANGUAGES.has(language)) {
+    return fail(`unsupported language ${language || "(empty)"}; use shell, javascript, or python`);
+  }
+  if (!input.code.trim()) {
+    return fail("code or command required; nexsight_execute needs executable code, not a natural-language task");
+  }
+  if (language === "shell") {
+    const blockedPattern = NEXSIGHT_BLOCKED_SHELL.find((pattern) => pattern.test(input.code));
+    if (blockedPattern) {
+      return fail(`nexsight blocked shell; destructive pattern matched: ${blockedPattern.source}`);
+    }
+  }
+
+  const timeout = Math.max(500, Math.min(input.timeoutMs ?? NEXSIGHT_TIMEOUT_MS, NEXSIGHT_TIMEOUT_MS));
+  const tempDir = mkdtempSync(path.join(tmpdir(), "nexsight-"));
+  const runtime = resolveNexsightRuntime(language);
+  if (!runtime.ok) {
+    rmSync(tempDir, { recursive: true, force: true });
+    return fail(runtime.error);
+  }
+  const scriptPath = path.join(tempDir, runtime.scriptName);
+  try {
+    writeFileSync(scriptPath, input.code, { encoding: "utf8", mode: 0o700 });
+    const result = await runNexsightProcess(runtime, scriptPath, session.cwd, tempDir, timeout);
+    const rawTranscript = [result.stdout.trimEnd(), result.stderr.trimEnd()]
+      .filter((value) => value.length > 0)
+      .join("\n");
+    const transcript = language === "shell"
+      ? compressShellTranscript(input.code, result.stdout, result.stderr)
+      : rawTranscript;
+    const capped = capOutput(transcript || "(no output)");
+    const header = [
+      `language: ${language}`,
+      `exit: ${String(result.status ?? (result.error ? 1 : 0))}`,
+      `timedOut: ${String(result.timedOut)}`,
     ].join("\n");
 
     if (result.error) {
@@ -276,6 +335,57 @@ function resolvePythonCommand(): string | null {
     }
   }
   return null;
+}
+
+function runNexsightProcess(
+  runtime: Extract<NexsightRuntime, { ok: true }>,
+  scriptPath: string,
+  cwd: string,
+  tempDir: string,
+  timeout: number,
+): Promise<NexsightProcessResult> {
+  return new Promise((resolve) => {
+    const child = spawn(runtime.command, [...runtime.args, scriptPath], {
+      cwd,
+      env: {
+        ...process.env,
+        HOME: process.env.HOME ?? cwd,
+        NEXAGENT_CWD: cwd,
+        TMPDIR: tempDir,
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGTERM");
+    }, timeout);
+    const append = (current: string, chunk: unknown) => {
+      const next = `${current}${String(chunk)}`;
+      return next.length > NEXSIGHT_PROCESS_MAX_BUFFER_CHARS
+        ? next.slice(-NEXSIGHT_PROCESS_MAX_BUFFER_CHARS)
+        : next;
+    };
+
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk) => {
+      stdout = append(stdout, chunk);
+    });
+    child.stderr?.on("data", (chunk) => {
+      stderr = append(stderr, chunk);
+    });
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      resolve({ status: null, timedOut, stdout, stderr, error });
+    });
+    child.on("close", (status, signal) => {
+      clearTimeout(timer);
+      resolve({ status, timedOut: timedOut || signal === "SIGTERM", stdout, stderr, error: null });
+    });
+  });
 }
 
 export function indexNexsight(session: RuntimeSession, input: NexsightIndexInput): NexsightResult {

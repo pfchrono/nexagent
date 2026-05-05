@@ -1,4 +1,4 @@
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { lookup } from "node:dns/promises";
 import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { isIP } from "node:net";
@@ -8,7 +8,7 @@ import { checkpointArchivistSession, saveArchivistMemory } from "./archivist.js"
 import { buildPatchPreview, searchFilesWithIgnore } from "./core-helpers.js";
 import { formatLspStatus, summarizeLspDiagnostics, summarizeLspNavigation, summarizeLspSymbols, touchLspFileSync } from "./lsp.js";
 import { callMcpTool, listMcpTools } from "./mcp.js";
-import { batchIndexNexsight, executeNexsight, gatherNexsight, indexNexsight, indexNexsightFile, readNexsight, searchNexsight } from "./nexsight.js";
+import { batchIndexNexsight, executeNexsight, executeNexsightAsync, gatherNexsight, indexNexsight, indexNexsightFile, readNexsight, searchNexsight } from "./nexsight.js";
 import {
   analyzeBlockedShellCommand,
   analyzeSafeGitCommand,
@@ -863,6 +863,10 @@ export async function executeInternalToolAsync(session: RuntimeSession, call: In
   switch (call.name) {
     case "read_file":
       return await executeReadFileTool(session, call.arguments ?? {});
+    case "shell_command":
+      return executeShellCommandToolResult(session, asString(call.arguments?.command, ""), normalizeShellCommandArguments(call.arguments ?? {}), runShellCommandWithOutputAccumulatorAsync);
+    case "nexsight_execute":
+      return executeNexsightExecuteToolAsync(session, call.arguments ?? {});
     case "web_fetch":
       return await executeWebFetchTool(asString(call.arguments?.url, ""));
     case "web_search":
@@ -1576,6 +1580,15 @@ function executeGitDiffTool(session: RuntimeSession, inputPath?: string): Intern
 }
 
 function executeShellCommandTool(session: RuntimeSession, command: string, args: Record<string, unknown> = {}): InternalToolResult {
+  return executeShellCommandToolResult(session, command, args, runShellCommandWithOutputAccumulator) as InternalToolResult;
+}
+
+function executeShellCommandToolResult(
+  session: RuntimeSession,
+  command: string,
+  args: Record<string, unknown> = {},
+  runner: (command: string, cwd: string, timeoutMs: number) => ShellCommandRunResult | Promise<ShellCommandRunResult>,
+): InternalToolResult | Promise<InternalToolResult> {
   const normalized = command.trim();
   if (!normalized) {
     return fail("shell_command", "command required");
@@ -1616,24 +1629,32 @@ function executeShellCommandTool(session: RuntimeSession, command: string, args:
   }
 
   try {
-    const result = runShellCommandWithOutputAccumulator(normalized, cwd.path, timeoutMs);
-
-    if (result.timedOut) {
-      return fail("shell_command", `shell timed out after ${String(timeoutMs)}ms\n${result.output}`);
+    const result = runner(normalized, cwd.path, timeoutMs);
+    if (result instanceof Promise) {
+      return result.then((asyncResult) => formatShellCommandRunResult(asyncResult, timeoutMs))
+        .catch((error) => fail("shell_command", `shell failed: ${error instanceof Error ? error.message : String(error)}`));
     }
 
-    if (result.error && result.status === null) {
-      return fail("shell_command", `shell failed: ${result.error.message}`);
-    }
-
-    if ((result.status ?? 0) !== 0) {
-      return fail("shell_command", `shell exit ${String(result.status ?? 1)}\n${result.output}`);
-    }
-
-    return ok("shell_command", withNexsightRouteHint(result.output));
+    return formatShellCommandRunResult(result, timeoutMs);
   } catch (error) {
     return fail("shell_command", `shell failed: ${error instanceof Error ? error.message : String(error)}`);
   }
+}
+
+function formatShellCommandRunResult(result: ShellCommandRunResult, timeoutMs: number): InternalToolResult {
+  if (result.timedOut) {
+    return fail("shell_command", `shell timed out after ${String(timeoutMs)}ms\n${result.output}`);
+  }
+
+  if (result.error && result.status === null) {
+    return fail("shell_command", `shell failed: ${result.error.message}`);
+  }
+
+  if ((result.status ?? 0) !== 0) {
+    return fail("shell_command", `shell exit ${String(result.status ?? 1)}\n${result.output}`);
+  }
+
+  return ok("shell_command", withNexsightRouteHint(result.output));
 }
 
 function normalizeShellCommandArguments(args: Record<string, unknown>): Record<string, unknown> {
@@ -1744,6 +1765,47 @@ function runShellCommandWithOutputAccumulator(command: string, cwd: string, time
       error: error instanceof Error ? error : new Error(String(error)),
     };
   }
+}
+
+function runShellCommandWithOutputAccumulatorAsync(command: string, cwd: string, timeoutMs: number): Promise<ShellCommandRunResult> {
+  const outputAccumulator = new ShellOutputAccumulator();
+  return new Promise((resolve) => {
+    const child = spawn("bash", ["-lc", command], {
+      cwd,
+      env: {
+        ...process.env,
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGTERM");
+    }, timeoutMs);
+
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk) => outputAccumulator.append(chunk));
+    child.stderr?.on("data", (chunk) => outputAccumulator.append(chunk));
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      resolve({
+        status: null,
+        timedOut,
+        output: outputAccumulator.toCappedOutput(),
+        error,
+      });
+    });
+    child.on("close", (status, signal) => {
+      clearTimeout(timer);
+      resolve({
+        status,
+        timedOut: timedOut || signal === "SIGTERM",
+        output: outputAccumulator.toCappedOutput(),
+        error: null,
+      });
+    });
+  });
 }
 
 function formatShellPolicyBlockReport(report: RuntimeSession["operationControls"]["lastShellBlocker"]): string {
@@ -1885,6 +1947,18 @@ function executeNexsightExecuteTool(session: RuntimeSession, args: Record<string
   const requestedLanguage = normalizeNexsightLanguage(asOptionalString(args.language ?? args.lang));
   const language = requestedLanguage ?? inferNexsightLanguage(code, Boolean(command));
   return toToolResult("nexsight_execute", executeNexsight(session, {
+    language,
+    code,
+    timeoutMs: asNumber(args.timeoutMs, 30_000),
+  }));
+}
+
+async function executeNexsightExecuteToolAsync(session: RuntimeSession, args: Record<string, unknown>): Promise<InternalToolResult> {
+  const command = asOptionalString(args.command ?? args.cmd);
+  const code = asString(args.code ?? command ?? args.script, "");
+  const requestedLanguage = normalizeNexsightLanguage(asOptionalString(args.language ?? args.lang));
+  const language = requestedLanguage ?? inferNexsightLanguage(code, Boolean(command));
+  return toToolResult("nexsight_execute", await executeNexsightAsync(session, {
     language,
     code,
     timeoutMs: asNumber(args.timeoutMs, 30_000),
