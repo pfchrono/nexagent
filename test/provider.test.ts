@@ -293,6 +293,78 @@ test("executeProviderRequest fires extension lifecycle and injects guidance", as
   assert.match(capturedPrompt, /use extension tool first/);
 });
 
+test("executeProviderRequest lets message_end extension replace assistant output", async () => {
+  const session = createSession();
+  const host = createRuntimeExtensionHost();
+  const seen: string[] = [];
+  host.handlers.set("message_end", [(event) => {
+    const payload = event as { output?: string; result?: { output?: string } };
+    seen.push(payload.output ?? "missing");
+    assert.equal(payload.result?.output, "hello world");
+    return { message: { content: "extension override" } };
+  }]);
+  session.extensions = host;
+
+  const result = await executeProviderRequest(
+    {
+      session,
+      prompt: "say hi",
+    },
+    {
+      exec: async () => ({
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+        output: "hello world\n",
+      }),
+      http: async () => {
+        throw new Error("http should not be used");
+      },
+      codexHttp: async () => {
+        throw new Error("codex-http should not be used");
+      },
+    },
+  );
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(seen, ["hello world"]);
+  assert.equal(result.ok ? result.output : "", "extension override");
+});
+
+test("executeProviderRequest keeps last message_end replacement", async () => {
+  const session = createSession();
+  const host = createRuntimeExtensionHost();
+  host.handlers.set("message_end", [
+    () => "first override",
+    () => ({ output: "final override" }),
+  ]);
+  session.extensions = host;
+
+  const result = await executeProviderRequest(
+    {
+      session,
+      prompt: "say hi",
+    },
+    {
+      exec: async () => ({
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+        output: "hello world\n",
+      }),
+      http: async () => {
+        throw new Error("http should not be used");
+      },
+      codexHttp: async () => {
+        throw new Error("codex-http should not be used");
+      },
+    },
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.ok ? result.output : "", "final override");
+});
+
 test("executeProviderRequest fires extension tool_result", async () => {
   const session = createSession();
   const host = createRuntimeExtensionHost();

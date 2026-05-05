@@ -29,6 +29,7 @@ export async function runProviderTurn(
       result = await executor(turnRun, (call, toolResult) => {
         skillRun = recordSkillToolResult(skillRun, call, toolResult);
       });
+      result = await applyMessageEndReplacement(request, result);
       if (result.ok) {
         completeSkillRun(skillRun, result.output);
       }
@@ -44,4 +45,53 @@ export async function runProviderTurn(
       }
     }
   });
+}
+
+async function applyMessageEndReplacement(request: ProviderRequest, result: ProviderResult): Promise<ProviderResult> {
+  if (!result.ok) {
+    return result;
+  }
+  const replacements = await emitRuntimeExtensionEvent(request.session, "message_end", {
+    prompt: request.prompt,
+    output: result.output,
+    result,
+  });
+  let output = result.output;
+  for (const replacement of replacements) {
+    const next = extractMessageEndOutput(replacement);
+    if (next !== null) {
+      output = next;
+    }
+  }
+  return output === result.output ? result : { ...result, output };
+}
+
+function extractMessageEndOutput(value: unknown): string | null {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const record = value as {
+    content?: unknown;
+    message?: { content?: unknown };
+    output?: unknown;
+    replacement?: unknown;
+    result?: unknown;
+  };
+  for (const candidate of [record.output, record.content, record.replacement, record.message?.content]) {
+    if (typeof candidate === "string") {
+      return candidate;
+    }
+  }
+  if (record.result && typeof record.result === "object") {
+    const nested = record.result as { output?: unknown; content?: unknown };
+    for (const candidate of [nested.output, nested.content]) {
+      if (typeof candidate === "string") {
+        return candidate;
+      }
+    }
+  }
+  return null;
 }

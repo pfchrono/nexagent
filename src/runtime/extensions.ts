@@ -13,6 +13,7 @@ export type RuntimeExtensionEventName =
   | "before_tool_execution"
   | "agent_start"
   | "tool_result"
+  | "message_end"
   | "agent_end"
   | "agent_error"
   | "session_shutdown"
