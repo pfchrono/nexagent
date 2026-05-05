@@ -314,6 +314,61 @@ test("executeProviderRequest compacts final output when caveman mode is active",
   );
 });
 
+test("executeProviderRequest compacts raw evidence dumps in final output", async () => {
+  const session = createSession();
+  const rawOutput = [
+    ".planning/phases/72/72-01-PLAN.md 1000",
+    ".planning/phases/72/72-02-PLAN.md 1000",
+    ".planning/phases/72/72-03-PLAN.md 1000",
+    ".planning/phases/72/72-04-SUMMARY.md 1000",
+    ".planning/phases/72/72-05-PLAN.md 1000",
+    ".planning/phases/72/72-06-PLAN.md 1000",
+    ".planning/phases/72/72-07-SUMMARY.md 1000",
+    ".planning/phases/73/73-01-PLAN.md 1000",
+    ".planning/phases/73/73-01-SUMMARY.md 1000",
+    ".planning/phases/74/74-01-PLAN.md 1000",
+    ".planning/research/gsd-explore-v1.md 1000",
+    ".planning/todos/pending/context-compaction.md 1000",
+    "--- PHASE ROOT TREE ---",
+    "Step 5",
+    'Tool call: {"name":"todo"}',
+    "Tool result (ok):",
+    "todos",
+    "[>] todo-1 Detect current GSD state",
+    "[ ] todo-2 Execute routed workflow",
+    "[ ] todo-3 Verify result and report compact evidence",
+  ].join("\n");
+
+  const result = await executeProviderRequest(
+    {
+      session,
+      prompt: "summarize output",
+    },
+    {
+      exec: async () => ({
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+        output: `${rawOutput}\n`,
+      }),
+      http: async () => {
+        throw new Error("http should not be used");
+      },
+      codexHttp: async () => {
+        throw new Error("codex-http should not be used");
+      },
+    },
+  );
+
+  assert.equal(result.ok, true);
+  assert.match(result.output, /assistant output compacted/);
+  assert.doesNotMatch(result.output, /72-01-PLAN/);
+  assert.match(result.output, /\[>\] todo-1 Detect current GSD state/);
+  const assistantDetail = session.events.find((event) => event.summary === "assistant response completed")?.detail ?? "";
+  assert.match(assistantDetail, /assistant output compacted/);
+  assert.doesNotMatch(assistantDetail, /72-01-PLAN/);
+});
+
 test("executeProviderRequest records model intent before executing first tool", async () => {
   const session = createSession();
 
@@ -961,7 +1016,8 @@ test("executeProviderRequest returns partial result when tool budget is exhauste
   assert.match(prompts[100] ?? "", /Do not call more tools/);
   assert.match(result.output, /Tool budget exhausted before final assistant answer/);
   assert.match(result.output, /Partial evidence from completed tools/);
-  assert.match(result.output, /Tool call: \{"name":"git_status","arguments":\{\}\}/);
+  assert.match(result.output, /assistant output compacted/);
+  assert.doesNotMatch(result.output, /Tool call: \{"name":"git_status","arguments":\{\}\}/);
   assert.equal(
     session.events.some((event) => event.kind === "control" && event.summary === "tool budget fallback returned partial result"),
     true,

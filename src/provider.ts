@@ -456,28 +456,29 @@ async function executeProviderRequestImpl(
           prompt = createPromptWithToolTranscript(assembled.prompt, toolTranscript, PROVIDER_NUDGES.continuation);
           continue;
         }
+        const styledOutput = styleAssistantOutput(request.session, output);
         recordRuntimeEvent(request.session, {
           kind: "assistant",
           status: "completed",
           summary: "assistant response completed",
-          detail: output,
+          detail: styledOutput,
         });
-          recordRuntimeEvent(request.session, {
-            kind: "provider",
-            status: "completed",
-            summary: `${provider} turn completed`,
-            detail: `transport=${request.session.providerTransport.mode}; output_chars=${String(output.length)}`,
-          });
-          setSentrySpanAttributes(agentSpan, {
-            "gen_ai.response.output_chars": output.length,
-            "nexagent.turn.status": "completed",
-          });
-          logSentryInfo("provider turn completed", {
-            provider,
-            model: model ?? "default",
-            transport: request.session.providerTransport.mode,
-            output_chars: output.length,
-          });
+        recordRuntimeEvent(request.session, {
+          kind: "provider",
+          status: "completed",
+          summary: `${provider} turn completed`,
+          detail: `transport=${request.session.providerTransport.mode}; output_chars=${String(styledOutput.length)}`,
+        });
+        setSentrySpanAttributes(agentSpan, {
+          "gen_ai.response.output_chars": styledOutput.length,
+          "nexagent.turn.status": "completed",
+        });
+        logSentryInfo("provider turn completed", {
+          provider,
+          model: model ?? "default",
+          transport: request.session.providerTransport.mode,
+          output_chars: styledOutput.length,
+        });
         return {
           ok: true,
           provider,
@@ -485,7 +486,7 @@ async function executeProviderRequestImpl(
           transport: transport.transport,
           adapter: transport.id,
           fallbackApplied: false,
-          output,
+          output: styledOutput,
         };
       }
 
@@ -986,13 +987,14 @@ async function executeOpenAiNativeToolLoop(
           detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
         });
         nativeInput = [{ role: "user", content: PROVIDER_NUDGES.continuation }];
-          return null;
+        return null;
       }
+      const styledOutput = styleAssistantOutput(request.session, output);
       recordRuntimeEvent(request.session, {
         kind: "assistant",
         status: "completed",
         summary: "assistant response completed",
-        detail: output,
+        detail: styledOutput,
       });
       return {
         ok: true,
@@ -1001,7 +1003,7 @@ async function executeOpenAiNativeToolLoop(
         transport: transport.transport,
         adapter: transport.id,
         fallbackApplied: false,
-        output,
+        output: styledOutput,
       };
     }
 

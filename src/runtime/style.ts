@@ -46,7 +46,28 @@ const WORD_REPLACEMENTS: Array<[RegExp, string]> = [
 ];
 
 export function styleAssistantOutput(session: RuntimeSession, output: string): string {
-  return session.commandModes.cavemanMode ? compactCavemanText(output) : output;
+  const styled = session.commandModes.cavemanMode ? compactCavemanText(output) : output;
+  return compactVerboseAssistantOutput(styled);
+}
+
+export function compactVerboseAssistantOutput(output: string): string {
+  const lines = output.split(/\r?\n/);
+  if (!looksLikeRawEvidenceDump(output, lines)) {
+    return output;
+  }
+
+  const kept = lines
+    .filter((line) => shouldKeepVerboseOutputLine(line))
+    .slice(0, 18);
+  const fallback = lines
+    .filter((line) => line.trim().length > 0)
+    .slice(0, 8);
+  const visible = kept.length > 0 ? kept : fallback;
+  const omittedLines = Math.max(0, lines.length - visible.length);
+  return [
+    ...visible,
+    `[assistant output compacted: omitted ${String(omittedLines)} raw evidence line${omittedLines === 1 ? "" : "s"}; expand trace for tool details]`,
+  ].join("\n").trim();
 }
 
 export function shouldCompactCavemanText(text: string): boolean {
@@ -86,6 +107,33 @@ function shouldCompactPlainText(text: string): boolean {
   if (XMLISH_PATTERN.test(trimmed)) return false;
   if (QUOTED_ERROR_PATTERN.test(trimmed)) return false;
   return true;
+}
+
+function looksLikeRawEvidenceDump(output: string, lines: string[]): boolean {
+  if (output.length > 4_000 && lines.length > 28) {
+    return true;
+  }
+  const pathLikeLines = lines.filter((line) => /^\s*(?:\.planning\/|src\/|test\/|\.codex\/|package\.json\b|README\.md\b)/.test(line)).length;
+  if (pathLikeLines >= 12) {
+    return true;
+  }
+  const transcriptLines = lines.filter((line) => /^\s*(?:Tool call:|Tool result|Step \d+|--- [A-Z0-9 _-]+ ---)/.test(line)).length;
+  return transcriptLines >= 3 && lines.length > 18;
+}
+
+function shouldKeepVerboseOutputLine(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed) {
+    return false;
+  }
+  if (/^(?:observed|verified|blocked|blocker|next|result|summary|changed|tool budget|verified:|observed\/verified)\b/i.test(trimmed)) {
+    return true;
+  }
+  if (/^(?:\[.\]|\[x\]|\[>\]|\[ \])\s*todo-/i.test(trimmed)) {
+    return true;
+  }
+  return /(?:complete|failed|blocked|clean|dirty|exhausted|unavailable|mismatch|next step|todo-\d+)/i.test(trimmed)
+    && !/^\s*(?:\.planning\/|src\/|test\/)/.test(line);
 }
 
 function compactPlainSegment(text: string): string {
