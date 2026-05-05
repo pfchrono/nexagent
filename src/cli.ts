@@ -1090,6 +1090,8 @@ function dispatchRuntimeCommand(session: RuntimeSession, input: string): Runtime
   switch (command) {
     case "/help":
       return handleHelpCommand(args);
+    case "/keys":
+      return handleKeysCommand(args);
     case "/continue":
       return handleContinueCommand(session, args);
     case "/finish":
@@ -1741,6 +1743,22 @@ function handleHelpCommand(args: string[]): RuntimeCommandResult {
     ok: true,
     output: formatCommandCatalog(),
     activity: "help",
+  };
+}
+
+function handleKeysCommand(args: string[]): RuntimeCommandResult {
+  if (args.length !== 0) {
+    return {
+      ok: false,
+      message: "usage: /keys",
+      activity: "command failed · /keys usage",
+    };
+  }
+
+  return {
+    ok: true,
+    output: formatOpenTuiKeymap(),
+    activity: "keys",
   };
 }
 
@@ -3753,6 +3771,30 @@ function formatCommandCatalog(): string {
   return [
     ...COMMAND_CATALOG.map((command) => `${command.usage} - ${command.description}`),
     "!<command> - run guarded shell command and add output to transcript",
+  ].join("\n");
+}
+
+function formatOpenTuiKeymap(): string {
+  return [
+    "Composer",
+    "  Enter - send prompt",
+    "  Shift+Enter or Alt+Enter - insert newline",
+    "  Tab - accept selected completion",
+    "  Esc - clear input or close overlay",
+    "  Ctrl+V - paste clipboard text",
+    "  Alt+V - attach clipboard image",
+    "",
+    "Transcript",
+    "  PageUp/PageDown - scroll transcript",
+    "  Ctrl+Up/Ctrl+Down - scroll one line",
+    "  Ctrl+End or Ctrl+Y - jump/copy latest selected block",
+    "  Ctrl+C - copy selected terminal text or selected block",
+    "",
+    "Panels",
+    "  Ctrl+P - toggle cockpit",
+    "  Ctrl+G - toggle config",
+    "  Ctrl+T - toggle trace",
+    "  Ctrl+Q or /quit - exit OpenTUI",
   ].join("\n");
 }
 

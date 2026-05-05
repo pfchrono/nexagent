@@ -35,7 +35,7 @@ Canonical guidance for coding agents working in `nexagent`.
   - `lsp_status`
   - `lsp_symbols`
   - `lsp_diagnostics`
-- slash commands including `/status`, `/status --sentry`, `/usage`, `/todos`, `/goal`, `/btw`, `/agents`, `/notify`, `/emoji`, `/color`, `/safegit`, `/scip`, `/extensions`, `/nexsight`, `/provider`, `/model`, `/effort`, `/tools`, `/memory`, `/memory --maintenance`, `/config`, `/lsp`, `/skill`, `/boomerang`, `/attach`, `/detach`, `/mouse`, `/approval`, `/compact`, `/diff`, `/rg`
+- slash commands including `/status`, `/status --sentry`, `/usage`, `/keys`, `/todos`, `/goal`, `/btw`, `/agents`, `/notify`, `/emoji`, `/color`, `/safegit`, `/scip`, `/extensions`, `/nexsight`, `/provider`, `/model`, `/effort`, `/tools`, `/memory`, `/memory --maintenance`, `/config`, `/lsp`, `/skill`, `/boomerang`, `/attach`, `/detach`, `/mouse`, `/approval`, `/compact`, `/diff`, `/rg`
 - `$skill` shorthand routed into `/skill`
 - guarded `!<command>` shell transcript command
 - Pi-like runtime extension lifecycle shim with startup discovery from `.nexagent/extensions`, `.pi/extensions`, global `~/.nexagent/extensions`, and `~/.pi/agent/extensions`; supports `on(...)`, sync slash command registration, tool registration metadata, and lifecycle events

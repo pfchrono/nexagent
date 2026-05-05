@@ -16,7 +16,7 @@ Terminal-first AI coding harness for local operator-driven development.
 - Exposes guarded internal tools for repo reads, writes, diffs, searches, shell commands, and Archivist memory.
 - Exposes Nexsight tools for bounded code/data execution, local indexing, and context search with SQLite FTS when available.
 - Provides guarded web fetch/search and batch edit helpers for research and multi-file patch workflows.
-- Provides slash commands for status, usage, persistent goals, Lean-style Nexsight compressed reads/search, Pi-compatible notify/emoji/color/safe-git/SCIP helpers, provider/model/effort control, tools, memory, config, LSP, skill routing, boomerang autonomous task handoffs, mouse behavior, approvals, compaction, file reads/searches, diffs, and image attachments.
+- Provides slash commands for status, usage, keymap help, persistent goals, Lean-style Nexsight compressed reads/search, Pi-compatible notify/emoji/color/safe-git/SCIP helpers, provider/model/effort control, tools, memory, config, LSP, skill routing, boomerang autonomous task handoffs, mouse behavior, approvals, compaction, file reads/searches, diffs, and image attachments.
 - Loads Pi-like extension modules from `.nexagent/extensions`, `.pi/extensions`, `~/.nexagent/extensions`, and `~/.pi/agent/extensions` with lifecycle events, sync slash-command registration, and tool metadata registration.
 - Hydrates stdio MCP servers at startup from `.nexagent/mcp.json` or legacy `.mcp.json`, with per-server startup timeouts and deduped server selection.
 - Supports `$skill` shorthand for skill routing.
@@ -248,6 +248,7 @@ Compaction can be configured in `.nexagent/settings.json` or `~/.nexagent/settin
 Inside TUI:
 
 - `/help` — command list
+- `/keys` — OpenTUI keyboard shortcuts and interaction modes
 - `/status` — compact runtime status
 - `/status --sentry` — safe Sentry diagnostics and self-test status
 - `/provider` — provider status or provider switch

@@ -11,6 +11,21 @@ test("OpenTUI command surface lists slash command palette rows", () => {
 
   assert.equal(surface.title, "/ Commands");
   assert.ok(surface.rows.some((row) => row.label === "/status"));
+  assert.ok(surface.rows.some((row) => row.hint.startsWith("session · ")));
+});
+
+test("OpenTUI command surface fuzzy-ranks commands, models, effort, and skills", () => {
+  const cwd = makeSkillWorkspace(["apricot-plan", "beta-review"]);
+  const commandSurface = createCommandSurface(process.cwd(), "/sf");
+  const modelSurface = createCommandSurface(process.cwd(), "/model 55");
+  const effortSurface = createCommandSurface(process.cwd(), "/effort xh");
+  const skillSurface = createCommandSurface(cwd, "$apr");
+
+  assert.equal(commandSurface.rows[0]?.label, "/safegit");
+  assert.match(commandSurface.rows[0]?.hint ?? "", /^safety · /);
+  assert.equal(modelSurface.rows[0]?.value, "/model gpt-5.5 ");
+  assert.equal(effortSurface.rows[0]?.value, "/effort xhigh");
+  assert.equal(skillSurface.rows[0]?.value, "/skill apricot-plan");
 });
 
 test("OpenTUI command surface exposes first-match completion for Tab", () => {

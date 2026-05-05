@@ -1,5 +1,6 @@
 export const COMMAND_CATALOG = [
   { name: "/help", usage: "/help", description: "show available runtime commands" },
+  { name: "/keys", usage: "/keys", description: "show OpenTUI keyboard shortcuts and interaction modes" },
   { name: "/reload", usage: "/reload", description: "reload runtime state from repo config" },
   { name: "/quit", usage: "/quit", description: "exit interactive TTY session" },
   { name: "/continue", usage: "/continue", description: "continue active turn if clear" },

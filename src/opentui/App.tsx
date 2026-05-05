@@ -2610,7 +2610,7 @@ function createPaletteDisplayRows(
   const rows = paletteRows.length > 0
     ? visibleRows.map((row, index) => ({
       key: `palette-${String(index)}-${row.selected ? "selected" : "row"}-${row.value}`,
-      text: fitLine(`${row.selected ? "> " : "  "}${row.label} ${row.hint}`, width),
+      text: fitLine(formatPaletteRowText(row, width), width),
       fg: row.selected ? "#8bd5ff" : "#cdd6f4",
       value: row.value,
       rowIndex: paletteRows.findIndex((candidate) => candidate.value === row.value),
@@ -2626,6 +2626,15 @@ function createPaletteDisplayRows(
     text: "",
     fg: "#a6adc8",
   });
+}
+
+function formatPaletteRowText(row: CommandPaletteRow, width: number): string {
+  const prefix = row.selected ? "> " : "  ";
+  const labelBudget = Math.max(10, Math.min(28, Math.floor(width * 0.34)));
+  const label = fitLine(row.label, labelBudget).padEnd(labelBudget, " ");
+  return row.hint.trim().length > 0
+    ? `${prefix}${label} · ${row.hint}`
+    : `${prefix}${row.label}`;
 }
 
 function renderPalettePanelRows(options: {

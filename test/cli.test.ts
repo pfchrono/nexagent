@@ -177,6 +177,7 @@ test("formatLaunchHelp documents launch switches", async () => {
   assert.doesNotMatch(output, /--opentui/);
   assert.doesNotMatch(output, /--classic-tui|--legacy-tui/);
   assert.match(output, /\/help - show available runtime commands/);
+  assert.match(output, /\/keys - show OpenTUI keyboard shortcuts and interaction modes/);
 });
 
 test("default interactive launch uses OpenTUI without legacy fallback switch", async () => {
@@ -517,6 +518,7 @@ test("runRuntimeCommand exposes command catalog through help", async () => {
   const outputLines = result?.output?.split("\n") ?? [];
   const required = [
     "/help - show available runtime commands",
+    "/keys - show OpenTUI keyboard shortcuts and interaction modes",
     "/reload - reload runtime state from repo config",
     "/quit - exit interactive TTY session",
     "/provider [status|name|transport ...] [--verbose] - show or switch provider and transport mode",
@@ -538,6 +540,16 @@ test("runRuntimeCommand exposes command catalog through help", async () => {
     assert.ok(outputLines.includes(line), `${line} missing`);
   }
   assert.equal(result?.activity, "help");
+});
+
+test("runRuntimeCommand exposes OpenTUI keymap help", async () => {
+  const { runRuntimeCommand } = await import("../src/cli.js");
+  const result = runRuntimeCommand(createSession(), "/keys");
+
+  assert.equal(result?.ok, true);
+  assert.match(result?.ok ? result.output : "", /Composer/);
+  assert.match(result?.ok ? result.output : "", /Ctrl\+T - toggle trace/);
+  assert.equal(result?.activity, "keys");
 });
 
 test("runRuntimeCommand queues BTW side thread and injects it", async () => {

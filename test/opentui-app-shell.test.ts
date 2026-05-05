@@ -103,6 +103,7 @@ test("OpenTUI app shell renders live view fields and Phase 66 command surfaces",
   assert.match(source, /Ctrl\+Y latest/);
   assert.match(source, /visiblePaletteWindow/);
   assert.match(source, /createPaletteDisplayRows/);
+  assert.match(source, /formatPaletteRowText/);
   assert.match(source, /PALETTE_VISIBLE_ROWS = 5/);
   assert.match(source, /PALETTE_CHROME_ROWS = 5/);
   assert.match(source, /position="absolute"/);

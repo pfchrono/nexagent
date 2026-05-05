@@ -58,9 +58,7 @@ export function resolveSkillPreview(cwd: string, input: string, selectedIndex = 
 
   const skills = discoverSkills(cwd);
   const needle = normalizeSkillToken(parsed.skillName);
-  const matches = skills
-    .filter((skill) => normalizeSkillToken(skill.name).startsWith(needle))
-    .sort((left, right) => left.name.localeCompare(right.name));
+  const matches = rankSkillMatches(skills, needle);
 
   if (matches.length === 0) {
     return { status: "missing", label: "No matches", command: null, rows: [] };
@@ -136,12 +134,12 @@ function rowsForInput(
   }
 
   if (trimmed.startsWith("/") && !trimmed.includes(" ")) {
-    const partial = trimmed.toLowerCase();
-    const matches = COMMAND_CATALOG.filter((entry) => entry.name.startsWith(partial));
+    const query = trimmed.replace(/^\//, "");
+    const matches = rankByQuery(COMMAND_CATALOG, query, (entry) => entry.name.replace(/^\//, ""));
     const selected = clampIndex(selectedIndex, matches.length);
     return matches.map((entry, index) => ({
       label: entry.name,
-      hint: entry.description,
+      hint: `${commandCategory(entry.name)} · ${entry.description}`,
       value: `${entry.name} `,
       selected: index === selected,
     }));
@@ -149,7 +147,7 @@ function rowsForInput(
 
   if (/^\/model\s+\S*$/.test(trimmed)) {
     const query = trimmed.replace(/^\/model\s+/, "").toLowerCase();
-    const matches = CODEX_MODEL_CATALOG.filter((entry) => entry.id.includes(query) || entry.label.toLowerCase().includes(query));
+    const matches = rankByQuery(CODEX_MODEL_CATALOG, query, (entry) => `${entry.id} ${entry.label}`);
     const selected = clampIndex(selectedIndex, matches.length);
     return matches.map((entry, index) => ({
       label: entry.id,
@@ -164,7 +162,7 @@ function rowsForInput(
     const commandPrefix = modelMatch ? `/model ${modelMatch[1]} ` : "/effort ";
     const query = (modelMatch?.[2] ?? trimmed.replace(/^\/effort\s+/, "")).toLowerCase();
     const efforts = ["low", "medium", "high", "xhigh"];
-    const matches = efforts.filter((effort) => effort.includes(query));
+    const matches = rankByQuery(efforts, query, (effort) => effort);
     const selected = clampIndex(selectedIndex, matches.length);
     return matches.map((effort, index) => ({
       label: effort,
@@ -189,6 +187,83 @@ function suggestionToRow(suggestion: PromptCompletionSuggestion, index: number, 
     value: suggestion.value,
     selected: index === selectedIndex,
   };
+}
+
+function rankByQuery<T>(items: readonly T[], rawQuery: string, getText: (item: T) => string): T[] {
+  const query = rawQuery.trim().toLowerCase();
+  return items
+    .map((item, index) => ({ item, index, score: fuzzyMatchScore(getText(item).toLowerCase(), query) }))
+    .filter((entry) => entry.score !== null)
+    .sort((left, right) => left.score! - right.score! || left.index - right.index)
+    .map((entry) => entry.item);
+}
+
+function rankSkillMatches(skills: RuntimeSkillDefinition[], needle: string): RuntimeSkillDefinition[] {
+  const prefixMatches = skills
+    .filter((skill) => normalizeSkillToken(skill.name).startsWith(needle))
+    .sort((left, right) => left.name.localeCompare(right.name));
+  if (needle.length === 0 || prefixMatches.length > 0) {
+    return prefixMatches;
+  }
+  return rankByQuery(skills, needle, (skill) => normalizeSkillToken(skill.name));
+}
+
+function fuzzyMatchScore(text: string, query: string): number | null {
+  if (query.length === 0 || query === "/") {
+    return 0;
+  }
+  if (text === query) {
+    return 0;
+  }
+  if (text.startsWith(query)) {
+    return 10 + text.length - query.length;
+  }
+  const wordStart = text
+    .split(/[\s/_:-]+/)
+    .some((part) => part.startsWith(query));
+  if (wordStart) {
+    return 40 + text.indexOf(query);
+  }
+  if (text.includes(query)) {
+    return 80 + text.indexOf(query);
+  }
+
+  let searchFrom = 0;
+  let gapCost = 0;
+  for (const char of query) {
+    const index = text.indexOf(char, searchFrom);
+    if (index === -1) {
+      return null;
+    }
+    gapCost += index - searchFrom;
+    searchFrom = index + 1;
+  }
+  return 140 + gapCost + text.length - query.length;
+}
+
+function commandCategory(command: string): string {
+  if (["/help", "/reload", "/quit", "/continue", "/finish", "/status", "/usage", "/doctor", "/keys"].includes(command)) {
+    return "session";
+  }
+  if (["/provider", "/model", "/effort", "/codex", "/login", "/approval"].includes(command)) {
+    return "control";
+  }
+  if (["/skill", "/boomerang", "/goal", "/btw", "/agents", "/todos", "/ask", "/steer", "/cancel"].includes(command)) {
+    return "workflow";
+  }
+  if (["/pwd", "/ls", "/read", "/find", "/glob", "/rg", "/diff", "/lsp", "/scip", "/nexsight", "/tools"].includes(command)) {
+    return "context";
+  }
+  if (["/notify", "/emoji", "/color", "/mouse", "/statusline", "/config", "/attach", "/detach"].includes(command)) {
+    return "ui";
+  }
+  if (["/memory", "/compact"].includes(command)) {
+    return "memory";
+  }
+  if (["/safegit", "/why-blocked", "/hooks", "/extensions"].includes(command)) {
+    return "safety";
+  }
+  return "command";
 }
 
 function skillPaletteHint(skill: RuntimeSkillDefinition): string {
