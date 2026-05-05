@@ -625,7 +625,7 @@ export function getInternalToolFunctionDefinitions(): ReadonlyArray<Record<strin
 export function executeInternalTool(session: RuntimeSession, call: InternalToolCall): InternalToolResult {
   switch (call.name) {
     case "read_file":
-      return executeReadFileTool(session, call.arguments ?? {});
+      return executeReadFileToolSync(session, call.arguments ?? {});
     case "write_file":
       return executeWriteFileTool(session, asString(call.arguments?.path, "."), asString(call.arguments?.content, ""));
     case "apply_patch":
@@ -711,6 +711,8 @@ export function executeInternalTool(session: RuntimeSession, call: InternalToolC
 
 export async function executeInternalToolAsync(session: RuntimeSession, call: InternalToolCall): Promise<InternalToolResult> {
   switch (call.name) {
+    case "read_file":
+      return await executeReadFileTool(session, call.arguments ?? {});
     case "web_fetch":
       return await executeWebFetchTool(asString(call.arguments?.url, ""));
     case "web_search":
@@ -855,7 +857,7 @@ export function validateWriteToolPath(session: RuntimeSession, targetPath: strin
   return validateWritePathPolicy(session, targetPath);
 }
 
-function executeReadFileTool(session: RuntimeSession, args: Record<string, unknown>): InternalToolResult {
+function executeReadFileToolSync(session: RuntimeSession, args: Record<string, unknown>): InternalToolResult {
   const inputPath = asString(args.path, ".");
   const targetPath = resolveRepoPath(session, inputPath);
   const policyFailure = validateReadToolPath(session, targetPath);
@@ -876,6 +878,11 @@ function executeReadFileTool(session: RuntimeSession, args: Record<string, unkno
   } catch (error) {
     return fail("read_file", formatToolError(targetPath, error));
   }
+}
+
+async function executeReadFileTool(session: RuntimeSession, args: Record<string, unknown>): Promise<InternalToolResult> {
+  const lineRangeAwareResult = executeReadFileToolSync(session, args);
+  return lineRangeAwareResult;
 }
 
 function formatReadFileOutput(session: RuntimeSession, targetPath: string, content: string, args: Record<string, unknown>): string {
