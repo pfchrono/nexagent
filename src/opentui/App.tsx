@@ -68,6 +68,7 @@ const PALETTE_CHROME_ROWS = 5;
 const TRACE_DETAIL_PALETTE_MIN_ROWS = 8;
 const COMPOSER_VISIBLE_PROMPT_ROWS = 4;
 const STATUSLINE_RESERVED_ROWS = 3;
+const TODO_STATUS_VISIBLE_ROWS = 4;
 const WARNING_VISIBLE_ROWS = 3;
 const WIDE_COCKPIT_MIN_COLUMNS = 120;
 const IDLE_REFRESH_INTERVAL_MS = 1000;
@@ -542,7 +543,7 @@ export function OpenTuiApp({ view: initialView, session, keyboardSource, promptH
   const goalRows = session ? formatGoalOverlayRows(session.goal, Math.max(12, contentWidth - 6)) : [];
   const subagentRows = session ? formatSubagentOverlayRows(session.subagents, Math.max(12, contentWidth - 6)) : [];
   const todoRows = session ? formatTodoOverlayRows(session.todos, Math.max(12, contentWidth - 6)) : [];
-  const todoStatusRows = renderTodoStatusRows(todoRows, contentWidth);
+  const todoStatusRows = renderTodoStatusRows(todoRows, contentWidth, TODO_STATUS_VISIBLE_ROWS);
   const todoReservedRows = todoStatusRows.length;
   const extensionWidgetRows = [
     ...goalRows,
@@ -620,10 +621,18 @@ export function OpenTuiApp({ view: initialView, session, keyboardSource, promptH
     width: contentWidth,
     progress: statuslineProgress,
     statusline: view.statusline,
+    phaseLabel: formatTurnPhaseLabel(view),
     traceLabel,
     shellNotice,
     transcriptPosition: transcriptPositionLabel,
     attachmentLabel: composer.attachment?.supported ? composer.attachment.label : null,
+  });
+  const modeStripLine = renderModeStripLine({
+    view,
+    terminalWidth,
+    terminalHeight,
+    traceLabel,
+    shellNotice,
   });
   const composerPanelRows = renderComposerPanelRows({
     width: contentWidth,
@@ -632,7 +641,7 @@ export function OpenTuiApp({ view: initialView, session, keyboardSource, promptH
     extensionRows: extensionWidgetRows,
     promptLines: composerPromptRows,
     previewLine,
-    statusLine: `${String(terminalWidth)}x${String(terminalHeight)} · ${traceLabel} · ${shellNotice}`,
+    statusLine: modeStripLine,
   });
   const keyLine = "Keys: ↵ send · Esc clear · Tab complete | 📋 Ctrl+V text · Alt+V image | ↕ history · PgUp/PgDn scroll | ⌘ Ctrl+P cockpit · Ctrl+G config · Ctrl+T trace · Ctrl+C copy · Ctrl+Y latest · /quit";
 
@@ -2045,17 +2054,28 @@ function composerPanelHeight(promptRowCount: number, hasAttachment: boolean): nu
 function renderTodoStatusRows(
   todoRows: Array<{ key: string; text: string; fg: string }>,
   width: number,
+  maxVisibleRows = TODO_STATUS_VISIBLE_ROWS,
 ): Array<{ key: string; text: string; fg: string }> {
   if (todoRows.length === 0) {
     return [];
   }
+  const visibleCount = Math.max(1, maxVisibleRows);
+  const visibleRows = todoRows.slice(0, visibleCount);
+  const hiddenCount = Math.max(0, todoRows.length - visibleRows.length);
   return [
     { key: "todo-status-divider", text: fitLine("─".repeat(Math.max(0, width)), width), fg: "#6c7086" },
-    ...todoRows.map((row) => ({
+    ...visibleRows.map((row) => ({
       key: `todo-status-${row.key}`,
       text: fitLine(row.text, width),
       fg: row.fg,
     })),
+    ...(hiddenCount > 0
+      ? [{
+        key: "todo-status-overflow",
+        text: fitLine(`... ${String(hiddenCount)} more todos`, width),
+        fg: "#6c7086",
+      }]
+      : []),
   ];
 }
 
@@ -2443,6 +2463,7 @@ function renderStatuslineRows(options: {
   width: number;
   progress: string;
   statusline: OpenTuiRuntimeView["statusline"];
+  phaseLabel: string;
   traceLabel: string;
   shellNotice: string;
   transcriptPosition: string;
@@ -2455,14 +2476,61 @@ function renderStatuslineRows(options: {
   const contextLabel = `${formatContextTokenNumber(options.statusline.contextUsed)}/${formatContextTokenNumber(options.statusline.contextWindow)}`;
   const clockLabel = formatStatuslineClock(new Date());
   const progressPrefix = options.progress ? `${options.progress} ` : "";
-  const row1 = `${progressPrefix}${formatModelLabel(options.statusline.model)} · mem ${memLabel} · git ${gitLabel} · session ${options.statusline.sessionAge} · ${clockLabel}`;
   const attachmentPart = options.attachmentLabel ? ` · ${options.attachmentLabel}` : "";
-  const row2 = `ctx ${contextBar} ${contextLabel} ${String(options.statusline.contextPercent)}% · tok ${formatCompactNumber(tokensTotal)} (${formatCompactNumber(options.statusline.lastInputTokens)}↓/${formatCompactNumber(options.statusline.lastOutputTokens)}↑) · ${options.transcriptPosition} · ${options.shellNotice}${attachmentPart}`;
+  const narrow = options.width < 96;
+  const row1 = narrow
+    ? `${progressPrefix}${formatModelLabel(options.statusline.model)} · git ${gitLabel} · ${clockLabel}`
+    : `${progressPrefix}${formatModelLabel(options.statusline.model)} · mem ${memLabel} · git ${gitLabel} · session ${options.statusline.sessionAge} · ${clockLabel}`;
+  const row2 = narrow
+    ? `phase ${options.phaseLabel} · ${options.shellNotice}${attachmentPart} · ${options.transcriptPosition} · ctx ${String(options.statusline.contextPercent)}% · tok ${formatCompactNumber(tokensTotal)}`
+    : `phase ${options.phaseLabel} · ctx ${contextBar} ${contextLabel} ${String(options.statusline.contextPercent)}% · tok ${formatCompactNumber(tokensTotal)} (${formatCompactNumber(options.statusline.lastInputTokens)}↓/${formatCompactNumber(options.statusline.lastOutputTokens)}↑) · ${options.transcriptPosition} · ${options.shellNotice}${attachmentPart}`;
   return [
     { key: "status-divider", text: chatDividerLine(options.width, "bottom"), fg: "#cba6f7" },
     { key: "status-row-1", text: fitLine(row1, options.width), fg: "#f9e2af" },
     { key: "status-row-2", text: fitLine(row2, options.width), fg: "#cdd6f4" },
   ];
+}
+
+function formatTurnPhaseLabel(view: OpenTuiRuntimeView): string {
+  const detail = view.detail.trim();
+  if (view.status === "running" && detail.length > 0) {
+    return compactStatusToken(detail);
+  }
+  if (view.status === "error" && detail.length > 0) {
+    return `error ${compactStatusToken(detail)}`;
+  }
+  return view.status;
+}
+
+function renderModeStripLine(options: {
+  view: OpenTuiRuntimeView;
+  terminalWidth: number;
+  terminalHeight: number;
+  traceLabel: string;
+  shellNotice: string;
+}): string {
+  const mode = options.view.status === "running" ? "Agent" : "Ready";
+  return [
+    `mode ${mode}`,
+    `approval ${options.view.approval}`,
+    `tools ${options.view.toolPolicy}`,
+    `provider ${options.view.providerTransportMode}`,
+    `model ${formatModelLabel(options.view.model)}`,
+    `phase ${formatTurnPhaseLabel(options.view)}`,
+    options.traceLabel,
+    options.shellNotice,
+    `${String(options.terminalWidth)}x${String(options.terminalHeight)}`,
+  ].filter(Boolean).join(" · ");
+}
+
+function compactStatusToken(value: string): string {
+  const firstLine = value.split(/\r?\n/, 1)[0]?.trim() ?? "";
+  return firstLine
+    .replace(/^attempting:\s*/i, "")
+    .replace(/^running\s+/i, "")
+    .replace(/\s+/g, " ")
+    .slice(0, 48)
+    .trim() || "working";
 }
 
 function formatContextUsageBar(percent: number, width: number): string {
