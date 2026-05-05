@@ -243,6 +243,40 @@ test("internal tools centrally reject unexpected arguments before execution", as
   }
 });
 
+test("internal tool argument guard accepts known legacy aliases", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-tools-aliases-"));
+
+  try {
+    const session = createSession(cwd);
+
+    const todo = executeInternalTool(session, {
+      name: "todo",
+      arguments: {
+        items: [
+          {
+            content: "Inspect alias support",
+            status: "in_progress",
+          },
+        ],
+      },
+    });
+    assert.equal(todo.ok, true);
+    assert.match(todo.output, /\[>\] todo-1 Inspect alias support/);
+
+    const shell = executeInternalTool(session, {
+      name: "shell_command",
+      arguments: {
+        command: "sleep 1",
+        timeout: 500,
+      },
+    });
+    assert.equal(shell.ok, false);
+    assert.match(shell.output, /shell timed out after 500ms/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test("executeInternalTool writes and patches file inside guarded repo roots", async () => {
   const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-tools-write-"));
 

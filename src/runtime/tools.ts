@@ -627,7 +627,8 @@ const TOOL_ARGUMENT_COMPAT_ALIASES: Partial<Record<InternalToolName, ReadonlyArr
   git_status: ["path"],
   search_content: ["query"],
   search_files: ["query"],
-  shell_command: ["timeoutMs"],
+  shell_command: ["timeout", "timeoutMs"],
+  todo: ["items", "todos"],
   nexsight_execute: ["lang"],
   lsp_navigation: ["path", "char"],
 };
@@ -729,7 +730,7 @@ export function executeInternalTool(session: RuntimeSession, call: InternalToolC
     case "git_diff":
       return executeGitDiffTool(session, asOptionalString(call.arguments?.path));
     case "shell_command":
-      return executeShellCommandTool(session, asString(call.arguments?.command, ""), call.arguments ?? {});
+      return executeShellCommandTool(session, asString(call.arguments?.command, ""), normalizeShellCommandArguments(call.arguments ?? {}));
     case "nexsight_execute":
       return executeNexsightExecuteTool(session, call.arguments ?? {});
     case "nexsight_read":
@@ -754,7 +755,7 @@ export function executeInternalTool(session: RuntimeSession, call: InternalToolC
     case "ask_user_question":
       return pending(call.name, "async");
     case "todo": {
-      const result = executeTodoTool(session, call.arguments ?? {});
+      const result = executeTodoTool(session, normalizeTodoToolArguments(call.arguments ?? {}));
       if (result.ok) {
         savePersistedRuntimeState(session);
       }
@@ -1554,6 +1555,36 @@ function executeShellCommandTool(session: RuntimeSession, command: string, args:
   } catch (error) {
     return fail("shell_command", `shell failed: ${error instanceof Error ? error.message : String(error)}`);
   }
+}
+
+function normalizeShellCommandArguments(args: Record<string, unknown>): Record<string, unknown> {
+  if (args.timeoutMs !== undefined || args.timeout === undefined) {
+    return args;
+  }
+  return { ...args, timeoutMs: args.timeout };
+}
+
+function normalizeTodoToolArguments(args: Record<string, unknown>): Record<string, unknown> {
+  const items = Array.isArray(args.items) ? args.items : Array.isArray(args.todos) ? args.todos : null;
+  if (!items || args.action !== undefined) {
+    return args;
+  }
+
+  const first = items.find((item): item is Record<string, unknown> => isRecord(item));
+  if (!first) {
+    return args;
+  }
+
+  return {
+    action: "create",
+    subject: asString(first.subject ?? first.content ?? first.task ?? first.title, ""),
+    description: asOptionalString(first.description ?? first.detail),
+    activeForm: asOptionalString(first.activeForm ?? first.active ?? first.doing),
+    status: first.status,
+    blockedBy: first.blockedBy,
+    owner: first.owner,
+    metadata: first.metadata,
+  };
 }
 
 interface ShellCommandRunResult {
