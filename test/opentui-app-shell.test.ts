@@ -112,6 +112,9 @@ test("OpenTUI app shell renders live view fields and Phase 66 command surfaces",
   assert.match(source, /shouldFill/);
   assert.match(source, /renderPalettePanelRows/);
   assert.match(source, /palettePanelRows\.map/);
+  assert.match(source, /handlePaletteRowClick/);
+  assert.match(source, /kind: "accept-value"/);
+  assert.match(source, /onMouseUp=\{row\.value \? \(event\) => handlePaletteRowClick/);
   assert.match(source, /paletteTitleForOverlay/);
   assert.match(source, /\$ Skills/);
   assert.match(source, /History/);

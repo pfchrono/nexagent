@@ -189,6 +189,24 @@ test("OpenTUI composer keeps model and effort pickers open while typing args", (
   assert.equal(effortPartial.state.overlayMode, "command");
 });
 
+test("OpenTUI composer keeps model effort picker open after accepting model value", () => {
+  const state = { ...createOpenTuiComposerState(), text: "/model", cursorIndex: "/model".length, overlayMode: "command" as const };
+  const accepted = handleOpenTuiComposerEvent(state, { kind: "accept-value", value: "/model gpt-5.5 " });
+
+  assert.equal(accepted.state.text, "/model gpt-5.5 ");
+  assert.equal(accepted.state.overlayMode, "command");
+  assert.deepEqual(accepted.intent, { kind: "accept-selection", value: "/model gpt-5.5 " });
+});
+
+test("OpenTUI composer closes history overlay after accepting clicked value", () => {
+  const state = { ...createOpenTuiComposerState(), text: "old", cursorIndex: "old".length, overlayMode: "history-search" as const };
+  const accepted = handleOpenTuiComposerEvent(state, { kind: "accept-value", value: "previous prompt" });
+
+  assert.equal(accepted.state.text, "previous prompt");
+  assert.equal(accepted.state.overlayMode, "none");
+  assert.equal(accepted.intent, null);
+});
+
 test("OpenTUI composer opens skill overlay for trailing skill tokens in command args", () => {
   const bareSkillToken = handleOpenTuiComposerEvent(createOpenTuiComposerState(), { kind: "character", value: "/boomerang $" });
   const partialSkillToken = handleOpenTuiComposerEvent(createOpenTuiComposerState(), { kind: "character", value: "/boomerang $dom" });

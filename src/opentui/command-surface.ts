@@ -114,6 +114,27 @@ function rowsForInput(
   completion: PromptCompletionResult,
   selectedIndex: number,
 ): CommandPaletteRow[] {
+  if (/^\/model(?:\s+list)?\s*$/i.test(trimmed)) {
+    const selected = clampIndex(selectedIndex, CODEX_MODEL_CATALOG.length);
+    return CODEX_MODEL_CATALOG.map((entry, index) => ({
+      label: entry.id,
+      hint: `${entry.description} · effort: ${entry.supportedReasoningEfforts.join("/")}`,
+      value: `/model ${entry.id} `,
+      selected: index === selected,
+    }));
+  }
+
+  if (/^\/effort\s*$/i.test(trimmed)) {
+    const efforts = ["low", "medium", "high", "xhigh"];
+    const selected = clampIndex(selectedIndex, efforts.length);
+    return efforts.map((effort, index) => ({
+      label: effort,
+      hint: effortHint(effort),
+      value: `/effort ${effort}`,
+      selected: index === selected,
+    }));
+  }
+
   if (trimmed.startsWith("/") && !trimmed.includes(" ")) {
     const partial = trimmed.toLowerCase();
     const matches = COMMAND_CATALOG.filter((entry) => entry.name.startsWith(partial));
@@ -191,6 +212,12 @@ function effortHint(effort: string): string {
 function surfaceTitle(trimmed: string, completion: PromptCompletionResult): string {
   if (trimmed.startsWith("$") || trimmed.startsWith("/skill")) {
     return "$ Skills";
+  }
+  if (/^\/model(?:\s+list)?\s*$/i.test(trimmed) || /^\/model\s+\S+$/i.test(trimmed)) {
+    return "Models";
+  }
+  if (/^\/effort(?:\s+\S*)?$/i.test(trimmed) || /^\/model\s+\S+\s+\S*$/i.test(trimmed)) {
+    return "Effort";
   }
   if (trimmed.startsWith("/") && !trimmed.includes(" ")) {
     return "/ Commands";

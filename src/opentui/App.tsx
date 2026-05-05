@@ -820,7 +820,12 @@ export function OpenTuiApp({ view: initialView, session, keyboardSource, promptH
           backgroundColor="#000000"
         >
           {palettePanelRows.map((row) => (
-            <text key={row.key} width={paletteWidth} fg={row.fg}>
+            <text
+              key={row.key}
+              width={paletteWidth}
+              fg={row.fg}
+              onMouseUp={row.value ? (event) => handlePaletteRowClick(row.value!, row.rowIndex, event) : undefined}
+            >
               {row.text}
             </text>
           ))}
@@ -887,6 +892,15 @@ export function OpenTuiApp({ view: initialView, session, keyboardSource, promptH
       return;
     }
     submitPrompt(result.intent.prompt);
+  }
+
+  function handlePaletteRowClick(value: string, rowIndex: number | undefined, event: OpenTuiMouseLikeEvent): void {
+    event.preventDefault();
+    event.stopPropagation();
+    if (typeof rowIndex === "number" && rowIndex >= 0) {
+      setComposer((current) => ({ ...current, selectedIndex: rowIndex }));
+    }
+    applyComposerEvent({ kind: "accept-value", value });
   }
 
   function submitPrompt(prompt: string): void {
@@ -2496,12 +2510,14 @@ function createPaletteDisplayRows(
   paletteRows: CommandPaletteRow[],
   visibleRows: CommandPaletteRow[],
   width: number,
-): Array<{ key: string; text: string; fg: string }> {
+): Array<{ key: string; text: string; fg: string; value?: string; rowIndex?: number }> {
   const rows = paletteRows.length > 0
     ? visibleRows.map((row, index) => ({
       key: `palette-${String(index)}-${row.selected ? "selected" : "row"}-${row.value}`,
       text: fitLine(`${row.selected ? "> " : "  "}${row.label} ${row.hint}`, width),
       fg: row.selected ? "#8bd5ff" : "#cdd6f4",
+      value: row.value,
+      rowIndex: paletteRows.findIndex((candidate) => candidate.value === row.value),
     }))
     : [{
       key: "palette-empty",
@@ -2520,9 +2536,9 @@ function renderPalettePanelRows(options: {
   width: number;
   title: string;
   query: string;
-  displayRows: Array<{ key: string; text: string; fg: string }>;
+  displayRows: Array<{ key: string; text: string; fg: string; value?: string; rowIndex?: number }>;
   footerLine: string;
-}): Array<{ key: string; text: string; fg: string }> {
+}): Array<{ key: string; text: string; fg: string; value?: string; rowIndex?: number }> {
   const innerWidth = Math.max(12, options.width - 4);
   return [
     { key: "palette-top", text: frameTop(` ${options.title} `, innerWidth), fg: "#f9e2af" },
@@ -2531,6 +2547,8 @@ function renderPalettePanelRows(options: {
       key: row.key,
       text: frameBody(row.text, innerWidth),
       fg: row.fg,
+      value: row.value,
+      rowIndex: row.rowIndex,
     })),
     { key: "palette-footer", text: frameBody(options.footerLine, innerWidth), fg: "#a6adc8" },
     { key: "palette-bottom", text: frameBottom(innerWidth), fg: "#f9e2af" },

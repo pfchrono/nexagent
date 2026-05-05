@@ -1,6 +1,15 @@
-import { CODEX_CHATGPT_HTTP_ADAPTER, invokeCodexChatGptHttpTransport } from "./provider/codex-chatgpt-http.js";
-import { CODEX_HTTP_ADAPTER, invokeCodexHttpTransport } from "./provider/codex-http.js";
-import { CODEX_EXEC_ADAPTER, invokeCodexExecTransport } from "./provider/codex-exec.js";
+import { invokeCodexChatGptHttpTransport } from "./provider/codex-chatgpt-http.js";
+import { invokeCodexHttpTransport } from "./provider/codex-http.js";
+import { invokeCodexExecTransport } from "./provider/codex-exec.js";
+import {
+  createEmptyOutputFailure,
+  createUnavailableModelFailure,
+  extractGenAiUsage,
+  resolveModel,
+  resolveTransport,
+  validateAttachmentSupport,
+  type ProviderTransportAdapter,
+} from "./provider/control-normalization.js";
 import {
   compactToolTranscriptEntries,
   createPromptWithToolTranscript,
@@ -9,8 +18,29 @@ import {
   formatToolTranscriptSection,
   truncateToolOutput,
 } from "./provider/transcript.js";
-import { getCodexModelDefinition, normalizeCodexModel } from "./models.js";
-import { getProviderModelOptions } from "./provider/registry.js";
+import { runProviderTurn } from "./provider/turn-lifecycle.js";
+import {
+  createRequiredNexsightFallbackPrompt,
+  createRequiredNexsightFallbackSuccess,
+  createRequiredNexsightPreflightPrompt,
+  runRequiredNexsightFallback,
+  runRequiredNexsightPreflight,
+} from "./provider/nexsight-required.js";
+import {
+  MAX_GUIDANCE_NUDGES_BEFORE_SYNTHESIS,
+  PROVIDER_NUDGES,
+  getRequiredEvidenceNudge,
+  incrementRequiredEvidenceNudge,
+  recordRequiredEvidenceNudge,
+  type RequiredEvidenceNudge,
+  type RequiredEvidenceNudgeState,
+} from "./provider/nudges.js";
+import {
+  classifyToolFailure,
+  createToolFailureDiagnosticInput,
+  formatToolArgumentsPreview,
+  formatToolDuration,
+} from "./provider/tool-results.js";
 import {
   captureSentryDiagnostic,
   logSentryError,
@@ -29,18 +59,15 @@ import {
   isNexsightToolCall,
   shouldRouteToNexsightOnly,
 } from "./runtime/nexsight-router.js";
-import { getMcpServerStatus } from "./runtime/mcp.js";
 import { toDiagnosticRuntimeEvent, type RuntimeDiagnosticInput } from "./runtime/diagnostics.js";
 import { emitRuntimeExtensionEvent } from "./runtime/extensions.js";
 import { savePersistedRuntimeState } from "./runtime/persistence.js";
-import { emitTerminalNotification, notifyThresholdMs } from "./runtime/pi-compat.js";
 import { createQuestionnaireRequest, type RuntimeQuestionnaireQuestion } from "./runtime/questionnaire.js";
 import { consumeOperatorSteer, estimateTokenCount, recordRuntimeEvent, setRuntimeAction } from "./runtime/session.js";
 import type { RuntimeApprovalRequest, RuntimeSession } from "./runtime/session.js";
-import { beginSkillRun, completeSkillRun, recordSkillToolResult } from "./runtime/skill-runner.js";
 import { recordToolMemory } from "./runtime/tool-memory.js";
 import { TurnRun, type MissingTurnEvidence } from "./runtime/turn-run.js";
-import { classifyInternalToolRisk, executeInternalToolAsync, type InternalToolCall, type InternalToolName, type InternalToolResult } from "./runtime/tools.js";
+import { classifyInternalToolRisk, executeInternalToolAsync, type InternalToolCall, type InternalToolResult } from "./runtime/tools.js";
 
 export interface ProviderRequest {
   session: RuntimeSession;
@@ -136,142 +163,22 @@ const INTERNAL_TOOL_TAG_PATTERN = INTERNAL_TOOL_TAG_NAMES.join("|");
 const TOOL_CALL_MARKUP_PATTERN = new RegExp(`<\\s*\\/?\\s*(?:(?:nexagent_)?tool_call|${INTERNAL_TOOL_TAG_PATTERN})\\b`, "i");
 const MAX_INTERNAL_TOOL_STEPS = 100;
 const MAX_INTERNAL_TOOL_CYCLES = 1;
-const MAX_GUIDANCE_NUDGES_BEFORE_SYNTHESIS = 2;
-const CONTINUATION_NUDGE = [
-  "The previous response deferred action or asked for confirmation instead of executing.",
-  "The user has already authorized this task.",
-  "Continue now with concrete tool use or complete the task.",
-  "Do not provide shell snippets or manual commands for the user to run when an internal tool can do it.",
-  "Do not ask for another confirmation unless a real approval gate or blocker prevents progress.",
-  "Do not apologize, explain what you should have done, or ask the user to restate a task already present in this turn.",
-  "If the exact target is ambiguous, infer a safe representative target from repo evidence and run a bounded inspection.",
-  "If no file/tool action is needed, provide the final verified result.",
-].join(" ");
-const WRITE_EVIDENCE_NUDGE = [
-  "The previous response claimed files were written or updated, but this turn has no write tool evidence.",
-  "Use write_file, apply_patch, or a shell command that performs the edit, then verify it.",
-  "If no file change was actually needed, correct the final answer and do not claim changes.",
-].join(" ");
 const FINAL_EDIT_SUMMARY_GUIDANCE = "If completed edit tool output already rendered an Edited-file block or bounded diff preview, do not repeat the full diff in the final answer; summarize changed paths, line counts, verification, and any remaining blocker only.";
-const MALFORMED_TOOL_CALL_NUDGE = [
-  "The previous response emitted malformed nexagent tool-call markup as visible text.",
-  "Do not show raw <nexagent_tool_call> text to the user.",
-  "Retry with exactly one valid tool block: <nexagent_tool_call>{\"name\":\"tool_name\",\"arguments\":{}}</nexagent_tool_call>.",
-].join(" ");
-const NEXSIGHT_TOOL_NUDGE = [
-  "This task should use Nexsight because it asks for broad repo/context analysis or explicitly names Nexsight.",
-  "Do not use read_file, list_dir, search_content, search_files, or shell_command for this broad inspection step.",
-  "Direct tools are fine only for a known small file/path, exact file content, or a narrower follow-up after Nexsight has routed the work.",
-  "Retry with exactly one Nexsight tool call: nexsight_gather for broad multi-file evidence, nexsight_execute for custom parsing/counting, nexsight_read for one file, or nexsight_index/batch/search for stored context.",
-].join(" ");
-const REQUIRED_WRITE_EVIDENCE_NUDGE = [
-  "The user requested a file write/update in this turn, but no write tool evidence exists yet.",
-  "Use write_file, apply_patch, batch_edit, or a shell command that performs the edit, then verify it.",
-  "Do not answer as complete until current-turn write evidence exists or a write tool reports a real blocker.",
-].join(" ");
-const REQUIRED_NEXSIGHT_EVIDENCE_NUDGE = [
-  "The user explicitly requested Nexsight in this turn, but no Nexsight tool evidence exists yet.",
-  "Use nexsight_gather for broad multi-file evidence, nexsight_execute for custom parsing/counting, nexsight_read for one file, or nexsight_index/batch/search for stored context.",
-  "Do not answer from narrative, generic listing, or direct file tools until Nexsight has run or a Nexsight tool reports a real blocker.",
-].join(" ");
-const REQUIRED_ACTIVE_SKILL_EVIDENCE_NUDGE = [
-  "An active skill is selected and this turn asks to run or continue it, but no tool evidence exists yet.",
-  "Use the active skill instructions now with the available tools.",
-  "Do not answer with only activated, started, ready, or a request to restate the target.",
-  "Answer only after current-turn tool evidence exists or a real tool/approval blocker is recorded.",
-].join(" ");
-const REQUIRED_TODO_EVIDENCE_NUDGE = [
-  "This is multi-stage work and needs visible task tracking.",
-  "Use the todo tool now to create a compact checklist, mark exactly one current task in_progress, then continue with the next required tool.",
-  "Update todos after evidence or verification. If blocked, leave the blocked task visible with the concrete reason.",
-].join(" ");
-const REQUIRED_ASK_USER_EVIDENCE_NUDGE = [
-  "This discussion/spec skill needs an interactive user choice before it can proceed.",
-  "Use ask_user_question now with one grouped question and 2-4 concrete options.",
-  "Ask before spending more tool calls. Do not describe that a question is needed; create the pending UI question.",
-].join(" ");
-const REQUIRED_CLAIM_EVIDENCE_NUDGE = [
-  "The previous response claimed test or Nexsight work without matching current-turn evidence.",
-  "Run the matching tool now, or correct the answer and explicitly state that the work was not run.",
-  "Do not claim tests, validation, or Nexsight work unless current-turn evidence exists.",
-].join(" ");
-const FINAL_TOOL_STEP_NUDGE = [
-  "Tool budget is almost exhausted.",
-  "You have one provider step left after this transcript.",
-  "Answer now from the available evidence unless one final tool call is required to complete a user-requested write, verification, or artifact update.",
-  "If another tool is still required, the harness may start one bounded continuation cycle with the tool count reset.",
-  "After that continuation cycle, it will return a partial result instead of failing the turn.",
-].join(" ");
-type RequiredEvidenceNudgeState = Partial<Record<MissingTurnEvidence, number>>;
-interface RequiredEvidenceNudge {
-  label: MissingTurnEvidence;
-  summary: string;
-  content: string;
-}
+// REQUIRED_ASK_USER_EVIDENCE_NUDGE remains registered in ./provider/nudges.ts for ask gate guidance.
 type RequiredEvidenceRecovery =
   | { kind: "retry"; prompt: string; usedFallback?: boolean }
   | { kind: "fallback-success"; result: ProviderResult }
   | { kind: "blocked"; result: ProviderFailure };
-const REQUIRED_EVIDENCE_NUDGE: Partial<Record<MissingTurnEvidence, RequiredEvidenceNudge>> = {
-  Nexsight: {
-    label: "Nexsight",
-    summary: "required nexsight evidence nudge applied",
-    content: REQUIRED_NEXSIGHT_EVIDENCE_NUDGE,
-  },
-  write: {
-    label: "write",
-    summary: "required write evidence nudge applied",
-    content: REQUIRED_WRITE_EVIDENCE_NUDGE,
-  },
-  "active skill": {
-    label: "active skill",
-    summary: "required active skill evidence nudge applied",
-    content: REQUIRED_ACTIVE_SKILL_EVIDENCE_NUDGE,
-  },
-  todo: {
-    label: "todo",
-    summary: "required todo evidence nudge applied",
-    content: REQUIRED_TODO_EVIDENCE_NUDGE,
-  },
-  "ask user": {
-    label: "ask user",
-    summary: "required ask_user_question evidence nudge applied",
-    content: REQUIRED_ASK_USER_EVIDENCE_NUDGE,
-  },
-};
 
 export async function executeProviderRequest(
   request: ProviderRequest,
   invokers: CodexInvokers = { exec: invokeCodexExecTransport, http: invokeCodexHttpTransport, codexHttp: invokeCodexChatGptHttpTransport },
 ): Promise<ProviderResult> {
-  const turnRun = new TurnRun({
-    session: request.session,
-    prompt: request.prompt,
-  });
-  let skillRun = beginSkillRun(request.session, request.prompt);
-  const startedAt = Date.now();
-  return turnRun.run(async () => {
-    let result: ProviderResult | null = null;
-    try {
-      await emitRuntimeExtensionEvent(request.session, "agent_start", { prompt: request.prompt });
-      result = await executeProviderRequestImpl(request, invokers, turnRun, (call, toolResult) => {
-        skillRun = recordSkillToolResult(skillRun, call, toolResult);
-      });
-      if (result.ok) {
-        completeSkillRun(skillRun, result.output);
-      }
-      return result;
-    } catch (error) {
-      await emitRuntimeExtensionEvent(request.session, "agent_error", { error });
-      throw error;
-    } finally {
-      await emitRuntimeExtensionEvent(request.session, "agent_end", { result });
-      const elapsedMs = Date.now() - startedAt;
-      if (request.session.ui?.notifyEnabled === true && elapsedMs >= notifyThresholdMs(request.session)) {
-        emitTerminalNotification("nexagent turn complete", `${Math.round(elapsedMs / 1000)}s`);
-      }
-    }
-  });
+  return runProviderTurn(
+    request,
+    (turnRun, onToolResult) => executeProviderRequestImpl(request, invokers, turnRun, onToolResult),
+    () => emitRuntimeExtensionEvent(request.session, "agent_start", { prompt: request.prompt }),
+  );
 }
 
 async function executeProviderRequestImpl(
@@ -298,27 +205,9 @@ async function executeProviderRequestImpl(
     };
   }
 
-  const resolvedModel = normalizeCodexModel(model) ?? model;
-  const modelOption = resolvedModel
-    ? getProviderModelOptions(request.session.providerRegistry, provider, request.session.providerTransport.mode)
-      .find((option) => option.id === resolvedModel)
-    : null;
-  if (resolvedModel && (!modelOption || modelOption.disabledReason)) {
-    const definition = getCodexModelDefinition(resolvedModel);
-    return {
-      ok: false,
-      provider,
-      model: resolvedModel,
-      transport: transport.transport,
-      adapter: transport.id,
-      fallbackApplied: false,
-      code: "unsupported_model",
-      message: `model ${resolvedModel} is not available for provider ${provider}`,
-      detail: modelOption?.disabledReason
-        ?? (definition?.upgrade
-          ? `Model ${resolvedModel} is not exposed on this transport. Suggested upgrade: ${definition.upgrade}.`
-          : `Model ${resolvedModel} is not configured for provider ${provider}.`),
-    };
+  const modelFailure = createUnavailableModelFailure(request.session, provider, model, transport);
+  if (modelFailure) {
+    return modelFailure;
   }
 
   const attachmentFailure = validateAttachmentSupport(request, transport);
@@ -370,7 +259,7 @@ async function executeProviderRequestImpl(
     const obligations = turnRun.getObligations();
     const toolTranscript: string[] = [];
     if (obligations.requiresNexsightEvidence) {
-      const preflight = await runRequiredNexsightPreflight(request, request.prompt);
+      const preflight = await runRequiredNexsightPreflight(request, request.prompt, executeToolWithRuntimeActivity);
       toolTranscript.push(formatInternalToolExchange(0, preflight.call, preflight.result));
     }
     let prompt = obligations.requiresNexsightEvidence && toolTranscript.length > 0
@@ -468,7 +357,7 @@ async function executeProviderRequestImpl(
               ...classifyToolCallMarkup(output),
             },
           });
-          prompt = createGuidedPrompt(assembled.prompt, toolTranscript, MALFORMED_TOOL_CALL_NUDGE);
+          prompt = createPromptWithToolTranscript(assembled.prompt, toolTranscript, PROVIDER_NUDGES.malformedToolCall);
           continue;
         }
         const missingRequiredEvidence = turnRun.evaluateRequiredEvidence(turnEventStart, toolTranscript, output);
@@ -513,7 +402,7 @@ async function executeProviderRequestImpl(
               summary: "write evidence nudge applied",
               detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
             });
-            prompt = createGuidedPrompt(assembled.prompt, toolTranscript, WRITE_EVIDENCE_NUDGE);
+            prompt = createPromptWithToolTranscript(assembled.prompt, toolTranscript, PROVIDER_NUDGES.writeEvidence);
             continue;
           }
           return createMissingWriteEvidenceFailure(request, model, transport.transport, transport.id, output);
@@ -528,7 +417,7 @@ async function executeProviderRequestImpl(
               summary: "claim evidence nudge applied",
               detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
             });
-            prompt = createGuidedPrompt(assembled.prompt, toolTranscript, REQUIRED_CLAIM_EVIDENCE_NUDGE);
+            prompt = createPromptWithToolTranscript(assembled.prompt, toolTranscript, PROVIDER_NUDGES.requiredClaimEvidence);
             continue;
           }
           return createMissingRequiredToolEvidenceFailure(request, model, transport.transport, transport.id, missingClaimEvidence, output);
@@ -557,7 +446,7 @@ async function executeProviderRequestImpl(
             summary: "continuation nudge applied",
             detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
           });
-          prompt = createGuidedPrompt(assembled.prompt, toolTranscript, CONTINUATION_NUDGE);
+          prompt = createPromptWithToolTranscript(assembled.prompt, toolTranscript, PROVIDER_NUDGES.continuation);
           continue;
         }
         recordRuntimeEvent(request.session, {
@@ -724,7 +613,7 @@ async function executeProviderRequestImpl(
           summary: "nexsight tool nudge applied",
           detail: toolCall.name,
         });
-        prompt = createGuidedPrompt(assembled.prompt, toolTranscript, NEXSIGHT_TOOL_NUDGE);
+        prompt = createPromptWithToolTranscript(assembled.prompt, toolTranscript, PROVIDER_NUDGES.nexsightTool);
         continue;
       }
 
@@ -739,8 +628,8 @@ async function executeProviderRequestImpl(
       });
       toolTranscript.push(formatInternalToolExchange(step + 1, toolCall, toolResult));
       onToolResult?.(toolCall, toolResult);
-      const finalStepNudge = step === MAX_INTERNAL_TOOL_STEPS - 2 ? `\n\n${FINAL_TOOL_STEP_NUDGE}` : "";
-      prompt = createGuidedPrompt(
+      const finalStepNudge = step === MAX_INTERNAL_TOOL_STEPS - 2 ? `\n\n${PROVIDER_NUDGES.finalToolStep}` : "";
+      prompt = createPromptWithToolTranscript(
         assembled.prompt,
         toolTranscript,
         `Continue. Either answer user directly or request one more tool with one <nexagent_tool_call> block only.${finalStepNudge}`,
@@ -797,11 +686,6 @@ async function executeProviderRequestImpl(
   );
 }
 
-function resolveModel(session: RuntimeSession): string | null {
-  const selected = session.providerRouting.modelSelection.configuredModels;
-  return normalizeCodexModel(selected[session.provider as keyof typeof selected] ?? null);
-}
-
 function createCodexFailure(
   provider: string,
   model: string | null,
@@ -856,32 +740,6 @@ function createCodexFailure(
     message: "codex transport failed",
     detail: detail || "codex exited without a result.",
   };
-}
-
-function createEmptyOutputFailure(
-  provider: string,
-  model: string | null,
-  adapter: ProviderFailure["adapter"],
-): ProviderFailure {
-  return {
-    ok: false,
-    provider,
-    model,
-    transport: provider === "openai" ? "openai" : "codex",
-    adapter,
-    fallbackApplied: false,
-    code: "transport_error",
-    message: "provider returned empty output",
-    detail: "provider finished with exit code 0 but produced no assistant text.",
-  };
-}
-
-function resolveTransport(session: RuntimeSession) {
-  return session.providerTransport.mode === "http-responses"
-    ? CODEX_HTTP_ADAPTER
-    : session.providerTransport.mode === "codex-http"
-      ? CODEX_CHATGPT_HTTP_ADAPTER
-      : CODEX_EXEC_ADAPTER;
 }
 
 async function invokeProviderWithSentrySpan(
@@ -948,38 +806,11 @@ async function invokeProviderWithSentrySpan(
   );
 }
 
-function extractGenAiUsage(raw: unknown): Record<string, number> {
-  const usage = isRecord(raw) ? raw.usage : undefined;
-  if (!isRecord(usage)) {
-    return {};
-  }
-
-  return {
-    "gen_ai.usage.input_tokens": readNumericUsage(usage, ["input_tokens", "prompt_tokens"]),
-    "gen_ai.usage.output_tokens": readNumericUsage(usage, ["output_tokens", "completion_tokens"]),
-    "gen_ai.usage.total_tokens": readNumericUsage(usage, ["total_tokens"]),
-  };
-}
-
-function readNumericUsage(record: Record<string, unknown>, keys: string[]): number {
-  for (const key of keys) {
-    const value = record[key];
-    if (typeof value === "number" && Number.isFinite(value)) {
-      return value;
-    }
-  }
-  return 0;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 async function executeOpenAiNativeToolLoop(
   request: ProviderRequest,
   assembledPrompt: string,
   model: string | null,
-  transport: ReturnType<typeof resolveTransport>,
+  transport: ProviderTransportAdapter,
   invokeHttp: CodexInvoker,
   turnRun: TurnRun,
   onToolResult?: (call: InternalToolCall, result: InternalToolResult) => void,
@@ -990,7 +821,7 @@ async function executeOpenAiNativeToolLoop(
   const obligations = turnRun.getObligations();
   const toolTranscript: string[] = [];
   if (obligations.requiresNexsightEvidence) {
-    const preflight = await runRequiredNexsightPreflight(request, request.prompt);
+    const preflight = await runRequiredNexsightPreflight(request, request.prompt, executeToolWithRuntimeActivity);
     toolTranscript.push(formatInternalToolExchange(0, preflight.call, preflight.result));
     nativeInput = [{ role: "user", content: createRequiredNexsightPreflightPrompt(assembledPrompt, toolTranscript) }];
   }
@@ -1066,7 +897,7 @@ async function executeOpenAiNativeToolLoop(
             ...classifyToolCallMarkup(output),
           },
         });
-        nativeInput = [{ role: "user", content: MALFORMED_TOOL_CALL_NUDGE }];
+        nativeInput = [{ role: "user", content: PROVIDER_NUDGES.malformedToolCall }];
         return null;
       }
       const missingRequiredEvidence = turnRun.evaluateRequiredEvidence(turnEventStart, [], output);
@@ -1086,7 +917,7 @@ async function executeOpenAiNativeToolLoop(
         }
         if (missingRequiredEvidence === "Nexsight" && step < MAX_INTERNAL_TOOL_STEPS - 1 && requiredNexsightFallbackCount < 1) {
           requiredNexsightFallbackCount += 1;
-          const fallback = await runRequiredNexsightFallback(request, request.prompt);
+          const fallback = await runRequiredNexsightFallback(request, request.prompt, executeToolWithRuntimeActivity);
           if (fallback.result.ok) {
             return createRequiredNexsightFallbackSuccess(
               request,
@@ -1116,7 +947,7 @@ async function executeOpenAiNativeToolLoop(
             summary: "write evidence nudge applied",
             detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
           });
-          nativeInput = [{ role: "user", content: WRITE_EVIDENCE_NUDGE }];
+          nativeInput = [{ role: "user", content: PROVIDER_NUDGES.writeEvidence }];
           return null;
         }
         return createMissingWriteEvidenceFailure(request, model, transport.transport, transport.id, output);
@@ -1130,7 +961,7 @@ async function executeOpenAiNativeToolLoop(
             summary: "claim evidence nudge applied",
             detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
           });
-          nativeInput = [{ role: "user", content: REQUIRED_CLAIM_EVIDENCE_NUDGE }];
+          nativeInput = [{ role: "user", content: PROVIDER_NUDGES.requiredClaimEvidence }];
           return null;
         }
         return createMissingRequiredToolEvidenceFailure(request, model, transport.transport, transport.id, missingClaimEvidence, output);
@@ -1142,7 +973,7 @@ async function executeOpenAiNativeToolLoop(
           summary: "continuation nudge applied",
           detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
         });
-        nativeInput = [{ role: "user", content: CONTINUATION_NUDGE }];
+        nativeInput = [{ role: "user", content: PROVIDER_NUDGES.continuation }];
           return null;
       }
       recordRuntimeEvent(request.session, {
@@ -1202,7 +1033,7 @@ async function executeOpenAiNativeToolLoop(
         output: toolResult.output,
       },
       ...(steer ? [{ role: "user", content: `Operator steer: ${steer}` }] : []),
-      ...(step === MAX_INTERNAL_TOOL_STEPS - 2 ? [{ role: "user", content: FINAL_TOOL_STEP_NUDGE }] : []),
+      ...(step === MAX_INTERNAL_TOOL_STEPS - 2 ? [{ role: "user", content: PROVIDER_NUDGES.finalToolStep }] : []),
     ];
     return null;
   });
@@ -1446,12 +1277,12 @@ async function createRequiredEvidenceRecovery(options: {
     recordRequiredEvidenceNudge(options.request.session, nudge.summary, options.output);
     return {
       kind: "retry",
-      prompt: createGuidedPrompt(options.basePrompt, options.toolTranscript, nudge.content),
+      prompt: createPromptWithToolTranscript(options.basePrompt, options.toolTranscript, nudge.content),
     };
   }
 
   if (options.missing === "Nexsight" && options.step < MAX_INTERNAL_TOOL_STEPS - 1 && options.runNexsightFallback) {
-    const fallback = await runRequiredNexsightFallback(options.request, options.request.prompt);
+    const fallback = await runRequiredNexsightFallback(options.request, options.request.prompt, executeToolWithRuntimeActivity);
     options.toolTranscript.push(formatInternalToolExchange(options.step + 1, fallback.call, fallback.result));
     if (fallback.result.ok) {
       return {
@@ -1483,59 +1314,6 @@ async function createRequiredEvidenceRecovery(options: {
       options.output,
     ),
   };
-}
-
-function getRequiredEvidenceNudge(missing: MissingTurnEvidence): RequiredEvidenceNudge {
-  const nudge = REQUIRED_EVIDENCE_NUDGE[missing];
-  if (!nudge) {
-    return {
-      label: missing,
-      summary: "required evidence nudge applied",
-      content: REQUIRED_CLAIM_EVIDENCE_NUDGE,
-    };
-  }
-  return nudge;
-}
-
-function incrementRequiredEvidenceNudge(counts: RequiredEvidenceNudgeState, missing: MissingTurnEvidence): number {
-  const next = (counts[missing] ?? 0) + 1;
-  counts[missing] = next;
-  return next;
-}
-
-function recordRequiredEvidenceNudge(session: RuntimeSession, summary: string, output: string): void {
-  recordRuntimeEvent(session, {
-    kind: "control",
-    status: "queued",
-    summary,
-    detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
-  });
-}
-
-function validateAttachmentSupport(
-  request: ProviderRequest,
-  transport: ReturnType<typeof resolveTransport>,
-): ProviderFailure | null {
-  const attachments = request.attachments ?? [];
-  if (attachments.length === 0) {
-    return null;
-  }
-
-  if (request.session.providerTransport.mode === "cli-exec") {
-    return {
-      ok: false,
-      provider: request.session.provider,
-      model: resolveModel(request.session),
-      transport: transport.transport,
-      adapter: transport.id,
-      fallbackApplied: false,
-      code: "transport_error",
-      message: "image attachment unsupported on cli-exec transport",
-      detail: "switch transport with /provider transport codex-http or /provider transport http-responses",
-    };
-  }
-
-  return null;
 }
 
 function buildNativeInputFromPrompt(prompt: string, attachments?: ImageAttachment[]): unknown {
@@ -1667,21 +1445,16 @@ async function executeToolWithRuntimeActivity(session: RuntimeSession, call: Int
   await emitRuntimeExtensionEvent(session, "tool_result", { tool: call.name, call, result, durationMs });
   if (!result.ok) {
     const failureClass = classifyToolFailure(result.output);
-    const diagnosticClass = classifyToolDiagnostic(call, failureClass);
-    recordRuntimeDiagnostic(session, {
-      class: diagnosticClass,
-      attributes: {
-        tool_name: call.name,
-        risk,
-        failure_class: failureClass,
-        failure_hint: summarizeToolFailure(result.output),
-        argument_count: Object.keys(call.arguments ?? {}).length,
-        duration_ms: durationMs,
-        input_tokens: inputTokens,
-        output_tokens: outputTokens,
-        ...mcpFailureDiagnosticAttributes(session, call),
-      },
-    });
+    recordRuntimeDiagnostic(session, createToolFailureDiagnosticInput({
+      session,
+      call,
+      risk,
+      failureClass,
+      output: result.output,
+      durationMs,
+      inputTokens,
+      outputTokens,
+    }));
     await rememberToolFailure(session, call.name, result.output, failureClass);
   } else {
     await rememberToolRecoveryIfPresent(session, call.name);
@@ -1719,96 +1492,6 @@ async function rememberToolRecoveryIfPresent(session: RuntimeSession, toolName: 
   }
 }
 
-function classifyToolFailure(output: string): string {
-  const normalized = output.toLowerCase();
-  if (normalized.includes("mcp server not hydrated")) {
-    return "mcp_server_not_hydrated";
-  }
-  if (normalized.includes("http mcp transport not bridged")) {
-    return "mcp_transport_unavailable";
-  }
-  if (normalized.includes("server and tool are required")) {
-    return "mcp_missing_target";
-  }
-  if (normalized.includes("required write evidence") || normalized.includes("missing evidence")) {
-    return "missing_evidence";
-  }
-  if (normalized.includes("requires") && normalized.includes("execution path")) {
-    return "async_tool_pending";
-  }
-  if (normalized.includes("timed out")) {
-    return "timeout";
-  }
-  if (normalized.includes("protected path") || normalized.includes("policy blocked")) {
-    return "policy_blocked";
-  }
-  if (normalized.includes("malformed") || normalized.includes("schema") || normalized.includes("arguments")) {
-    return "malformed_tool_call";
-  }
-  if (normalized.includes("blocked") || normalized.includes("rejected")) {
-    return "blocked_tool";
-  }
-  if (normalized.includes("is not a file")) {
-    return "path_not_file";
-  }
-  if (normalized.includes("not found") || normalized.includes("no such file")) {
-    return "path_not_found";
-  }
-  return "tool_failed";
-}
-
-function summarizeToolFailure(output: string): string {
-  const normalized = output.replace(/\s+/g, " ").trim();
-  if (!normalized) {
-    return "empty tool failure";
-  }
-  if (/code or command required/i.test(normalized)) {
-    return "missing code or command argument";
-  }
-  if (/server and tool are required/i.test(normalized)) {
-    return "missing MCP server or tool argument";
-  }
-  if (/MCP server not hydrated/i.test(normalized)) {
-    return "MCP server not hydrated";
-  }
-  if (/timed out/i.test(normalized)) {
-    return "tool timed out";
-  }
-  if (/protected path|policy blocked/i.test(normalized)) {
-    return "policy blocked";
-  }
-  if (/not found|no such file/i.test(normalized)) {
-    return "target not found";
-  }
-  return normalized.slice(0, 120);
-}
-
-function isMcpUnavailableFailure(call: InternalToolCall, failureClass: string): boolean {
-  return call.name === "mcp_call" && failureClass.startsWith("mcp_");
-}
-
-function mcpFailureDiagnosticAttributes(session: RuntimeSession, call: InternalToolCall): Record<string, string | number> {
-  if (call.name !== "mcp_call") {
-    return {};
-  }
-
-  const server = typeof call.arguments?.server === "string" ? call.arguments.server.trim() : "";
-  const tool = typeof call.arguments?.tool === "string" ? call.arguments.tool.trim() : "";
-  const status = server ? getMcpServerStatus(session.mcpRegistry, server) : null;
-
-  return {
-    mcp_server: server || "missing",
-    mcp_tool: tool || "missing",
-    mcp_status: status?.status ?? "missing",
-    mcp_transport: status?.transport ?? "unknown",
-    mcp_tool_count: status?.toolCount ?? 0,
-  };
-}
-
-function formatToolDuration(durationMs: number): string {
-  return `${(Math.max(0, durationMs) / 1000).toFixed(2)}s`;
-}
-
 function recordRuntimeDiagnostic(session: RuntimeSession, input: RuntimeDiagnosticInput): void {
   const event = captureSentryDiagnostic(input, { sendEvent: false });
   if (event.severity === "error") {
@@ -1818,34 +1501,6 @@ function recordRuntimeDiagnostic(session: RuntimeSession, input: RuntimeDiagnost
     logSentryError(event.summary, event.attributes);
   }
   recordRuntimeEvent(session, toDiagnosticRuntimeEvent(event));
-}
-
-function classifyToolDiagnostic(call: InternalToolCall, failureClass: string): RuntimeDiagnosticInput["class"] {
-  if (isMcpUnavailableFailure(call, failureClass)) {
-    return "tool.mcp_unavailable";
-  }
-  if (failureClass === "policy_blocked" || failureClass === "blocked_tool") {
-    return "tool.blocked";
-  }
-  if (failureClass === "path_not_found" || failureClass === "path_not_file" || failureClass === "malformed_tool_call") {
-    return "tool.blocked";
-  }
-  return "tool.failed";
-}
-
-function formatToolArgumentsPreview(value: unknown): string {
-  if (value === null || value === undefined) {
-    return "none";
-  }
-  try {
-    const raw = JSON.stringify(value);
-    if (!raw) {
-      return "none";
-    }
-    return raw.length > 220 ? `${raw.slice(0, 217)}...` : raw;
-  } catch {
-    return String(value);
-  }
 }
 
 async function maybeAwaitApproval(session: RuntimeSession, call: InternalToolCall, risk: ReturnType<typeof classifyInternalToolRisk>): Promise<boolean> {
@@ -2150,342 +1805,6 @@ function extractJsonAfterToken(value: string, token: string): string | null {
     }
   }
   return null;
-}
-
-function createGuidedPrompt(basePrompt: string, toolTranscript: string[], nudge: string): string {
-  return createPromptWithToolTranscript(basePrompt, toolTranscript, nudge);
-}
-
-async function runRequiredNexsightFallback(
-  request: ProviderRequest,
-  userPrompt: string,
-): Promise<{ call: InternalToolCall; result: InternalToolResult }> {
-  const call = createRequiredNexsightEvidenceCall(userPrompt, "fallback");
-  recordRuntimeEvent(request.session, {
-    kind: "control",
-    status: "queued",
-    summary: "required nexsight fallback started",
-    detail: "model ignored explicit Nexsight evidence requirement; harness running bounded inspection",
-  });
-  const result = await executeToolWithRuntimeActivity(request.session, call);
-  return { call, result };
-}
-
-async function runRequiredNexsightPreflight(
-  request: ProviderRequest,
-  userPrompt: string,
-): Promise<{ call: InternalToolCall; result: InternalToolResult }> {
-  const call = createRequiredNexsightEvidenceCall(userPrompt, "preflight");
-  recordRuntimeEvent(request.session, {
-    kind: "control",
-    status: "queued",
-    summary: "required nexsight preflight started",
-    detail: "user explicitly requested Nexsight; harness running bounded inspection before provider",
-  });
-  const result = await executeToolWithRuntimeActivity(request.session, call);
-  return { call, result };
-}
-
-function createRequiredNexsightPreflightPrompt(basePrompt: string, toolTranscript: string[]): string {
-  return [
-    basePrompt,
-    "",
-    "Required Nexsight preflight evidence:",
-    compactToolTranscriptEntries(toolTranscript, 3).join("\n\n"),
-    "",
-    "The harness already ran Nexsight because the user explicitly required it.",
-    "Answer from this evidence. If the evidence is insufficient, request one focused Nexsight tool call next.",
-    "Do not say Nexsight was not used.",
-  ].join("\n");
-}
-
-function createRequiredNexsightFallbackPrompt(basePrompt: string, toolTranscript: string[]): string {
-  return [
-    basePrompt,
-    "",
-    "Required Nexsight fallback evidence:",
-    compactToolTranscriptEntries(toolTranscript, 3).join("\n\n"),
-    "",
-    "The harness ran Nexsight because the user explicitly required it and prior output did not contain Nexsight tool evidence.",
-    "Answer from this evidence. Do not claim any additional inspection unless you request another valid tool call.",
-  ].join("\n");
-}
-
-function createRequiredNexsightFallbackSuccess(
-  request: ProviderRequest,
-  model: string | null,
-  transport: ProviderSuccess["transport"],
-  adapter: ProviderSuccess["adapter"],
-  result: InternalToolResult,
-): ProviderSuccess {
-  const output = summarizeRequiredNexsightFallbackOutput(result.output);
-  recordRuntimeEvent(request.session, {
-    kind: "assistant",
-    status: "completed",
-    summary: "assistant response completed",
-    detail: output,
-  });
-  recordRuntimeEvent(request.session, {
-    kind: "provider",
-    status: "completed",
-    summary: `${request.session.provider} turn completed`,
-    detail: `transport=${request.session.providerTransport.mode}; output_chars=${String(output.length)}; harness_nexsight_fallback=true`,
-  });
-  return {
-    ok: true,
-    provider: request.session.provider,
-    model,
-    transport,
-    adapter,
-    fallbackApplied: false,
-    output,
-  };
-}
-
-function summarizeRequiredNexsightFallbackOutput(rawOutput: string): string {
-  const parsed = parseJsonObject(rawOutput);
-  if (!parsed) {
-    return [
-      "Nexsight fallback completed.",
-      "",
-      "Nexsight returned unstructured output:",
-      rawOutput.slice(0, 1600),
-    ].join("\n");
-  }
-  if (!isRequiredNexsightScanObject(parsed)) {
-    return [
-      "Nexsight fallback did not produce repo scan output.",
-      "",
-      "Returned payload looked like runtime/session metadata or another non-scan object, so it was not treated as repo evidence.",
-      "",
-      "Output preview:",
-      rawOutput.slice(0, 1600),
-    ].join("\n");
-  }
-
-  const root = typeof parsed.root === "string" ? parsed.root : "(unknown)";
-  const requested = typeof parsed.requested === "string" ? parsed.requested : ".";
-  const exists = parsed.exists === true;
-  const kind = typeof parsed.kind === "string" ? parsed.kind : "(unknown)";
-  const topLevel = summarizeNamedEntries(parsed.topLevel, 20);
-  const keyFiles = summarizeStringArray(parsed.keyFiles, 16);
-  const directories = summarizeStringArray(parsed.directories, 16);
-  const fileTypes = summarizeFileTypes(parsed.filesByExt, 12);
-  const sampleFiles = summarizeStringArray(parsed.sampleFiles, 16);
-
-  return [
-    "Nexsight fallback completed.",
-    "",
-    "What Nexsight inspected:",
-    `- requested: ${requested}`,
-    `- root: ${root}`,
-    `- exists: ${String(exists)}`,
-    `- kind: ${kind}`,
-    "",
-    "Repo shape:",
-    `- top-level entries: ${topLevel}`,
-    `- directories: ${directories}`,
-    `- key files: ${keyFiles}`,
-    `- file types: ${fileTypes}`,
-    `- sample files: ${sampleFiles}`,
-  ].join("\n");
-}
-
-function parseJsonObject(rawOutput: string): Record<string, unknown> | null {
-  try {
-    const parsed: unknown = JSON.parse(rawOutput);
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-      ? parsed as Record<string, unknown>
-      : null;
-  } catch {
-    const start = rawOutput.indexOf("{");
-    const end = rawOutput.lastIndexOf("}");
-    if (start < 0 || end <= start) {
-      return null;
-    }
-    try {
-      const parsed: unknown = JSON.parse(rawOutput.slice(start, end + 1));
-      return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-        ? parsed as Record<string, unknown>
-        : null;
-    } catch {
-      return null;
-    }
-  }
-}
-
-function isRequiredNexsightScanObject(value: Record<string, unknown>): boolean {
-  return (
-    typeof value.requested === "string" &&
-    typeof value.root === "string" &&
-    typeof value.exists === "boolean" &&
-    "kind" in value &&
-    Array.isArray(value.topLevel) &&
-    Array.isArray(value.keyFiles) &&
-    Array.isArray(value.directories) &&
-    value.filesByExt !== null &&
-    typeof value.filesByExt === "object" &&
-    !Array.isArray(value.filesByExt) &&
-    Array.isArray(value.sampleFiles)
-  );
-}
-
-function summarizeStringArray(value: unknown, limit: number): string {
-  if (!Array.isArray(value)) {
-    return "(none)";
-  }
-  const names = value
-    .filter((entry): entry is string => typeof entry === "string" && entry.length > 0)
-    .slice(0, limit);
-  if (names.length === 0) {
-    return "(none)";
-  }
-  const suffix = value.length > names.length ? `, +${String(value.length - names.length)} more` : "";
-  return `${names.join(", ")}${suffix}`;
-}
-
-function summarizeNamedEntries(value: unknown, limit: number): string {
-  if (!Array.isArray(value)) {
-    return "(none)";
-  }
-  const names = value
-    .map((entry) => {
-      if (typeof entry === "string" && entry.length > 0) {
-        return entry;
-      }
-      if (entry && typeof entry === "object" && "name" in entry && typeof entry.name === "string") {
-        return entry.name;
-      }
-      return null;
-    })
-    .filter((entry): entry is string => Boolean(entry))
-    .slice(0, limit);
-  if (names.length === 0) {
-    return "(none)";
-  }
-  const suffix = value.length > names.length ? `, +${String(value.length - names.length)} more` : "";
-  return `${names.join(", ")}${suffix}`;
-}
-
-function summarizeFileTypes(value: unknown, limit: number): string {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return "(none)";
-  }
-  const entries = Object.entries(value as Record<string, unknown>)
-    .filter((entry): entry is [string, number] => typeof entry[1] === "number")
-    .sort((left, right) => right[1] - left[1])
-    .slice(0, limit)
-    .map(([ext, count]) => `${ext} ${String(count)}`);
-  return entries.length > 0 ? entries.join(", ") : "(none)";
-}
-
-function createRequiredNexsightEvidenceCall(userPrompt: string, mode: "preflight" | "fallback"): InternalToolCall {
-  const target = extractLikelyNexsightTarget(userPrompt);
-  const code = `
-const fs = require("fs");
-const path = require("path");
-
-const requested = ${JSON.stringify(target)};
-const cwd = process.env.NEXAGENT_CWD || process.cwd();
-const home = process.env.HOME || cwd;
-const skip = new Set([".git", "node_modules", "dist", "build", "coverage", ".next", ".cache", ".bun", ".nexagent"]);
-const keyFileRe = /^(README|AGENTS|CLAUDE|package|tsconfig|bun|pnpm|yarn|Cargo|pyproject|go\\.mod|Makefile|Dockerfile)/i;
-const sourceExt = new Set([".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".py", ".rs", ".go", ".sh", ".md", ".json", ".toml", ".yml", ".yaml"]);
-
-function resolveTarget(input) {
-  if (!input || input === ".") return cwd;
-  if (input.startsWith("~/")) return path.resolve(home, input.slice(2));
-  if (path.isAbsolute(input)) return path.resolve(input);
-  return path.resolve(cwd, input);
-}
-
-function safeReadDir(dir) {
-  try {
-    return fs.readdirSync(dir, { withFileTypes: true });
-  } catch {
-    return [];
-  }
-}
-
-const root = resolveTarget(requested);
-const out = {
-  requested,
-  root,
-  exists: false,
-  kind: null,
-  topLevel: [],
-  keyFiles: [],
-  directories: [],
-  filesByExt: {},
-  sampleFiles: [],
-};
-
-try {
-  if (!fs.existsSync(root)) {
-    console.log(JSON.stringify(out));
-    process.exit(0);
-  }
-  const stat = fs.statSync(root);
-  out.exists = true;
-  out.kind = stat.isDirectory() ? "directory" : stat.isFile() ? "file" : "other";
-  if (!stat.isDirectory()) {
-    out.keyFiles.push(path.basename(root));
-    console.log(JSON.stringify(out));
-    process.exit(0);
-  }
-
-  const top = safeReadDir(root).slice(0, 120);
-  out.topLevel = top.map((entry) => \`\${entry.isDirectory() ? "dir" : "file"}:\${entry.name}\`).slice(0, 32);
-  out.directories = top.filter((entry) => entry.isDirectory()).map((entry) => entry.name).slice(0, 20);
-  out.keyFiles = top.filter((entry) => entry.isFile() && keyFileRe.test(entry.name)).map((entry) => entry.name).slice(0, 20);
-
-  function walk(dir, depth) {
-    if (depth > 3 || out.sampleFiles.length >= 40) return;
-    for (const entry of safeReadDir(dir)) {
-      if (skip.has(entry.name)) continue;
-      const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
-        walk(full, depth + 1);
-        continue;
-      }
-      if (!entry.isFile()) continue;
-      const ext = path.extname(entry.name) || "<none>";
-      out.filesByExt[ext] = (out.filesByExt[ext] || 0) + 1;
-      if (sourceExt.has(ext) || keyFileRe.test(entry.name)) {
-        out.sampleFiles.push(path.relative(root, full));
-      }
-    }
-  }
-
-  walk(root, 0);
-  console.log(JSON.stringify(out));
-} catch (error) {
-  console.log(JSON.stringify({ requested, root, error: error && error.message ? error.message : String(error) }));
-}
-`.trim();
-
-  return {
-    name: "nexsight_execute",
-    arguments: {
-      language: "javascript",
-      reason: mode === "preflight"
-        ? "required Nexsight preflight for explicit user request"
-        : "required Nexsight fallback after missing model-provided evidence",
-      code,
-      timeoutMs: 10_000,
-    },
-  };
-}
-
-function extractLikelyNexsightTarget(prompt: string): string {
-  const candidates = prompt.match(/(?:~\/|\/)[^\s"'`),;]+/g) ?? [];
-  for (const candidate of candidates) {
-    const cleaned = candidate.replace(/[.?!:]+$/, "");
-    if (cleaned && !/^\/(?:etc|dev|proc|sys|run)\b/.test(cleaned)) {
-      return cleaned;
-    }
-  }
-  return ".";
 }
 
 function createToolBudgetContinuationPrompt(basePrompt: string, toolTranscript: string[], pendingToolName: string, cycleNumber: number): string {

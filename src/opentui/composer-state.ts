@@ -36,6 +36,7 @@ export type ComposerKeyEvent =
   | { kind: "tab"; completion?: PromptCompletionResult | null }
   | { kind: "move-selection"; direction: -1 | 1; rowCount: number }
   | { kind: "accept-selection"; values: string[] }
+  | { kind: "accept-value"; value: string }
   | { kind: "escape" }
   | { kind: "history"; direction: -1 | 1; force?: boolean; history: string[] }
   | { kind: "open-history-search" }
@@ -234,6 +235,24 @@ export function handleOpenTuiComposerEvent(
           notice: "selection accepted",
         },
         intent: state.overlayMode === "history-search" ? null : { kind: "accept-selection", value },
+      };
+    }
+    case "accept-value": {
+      if (!event.value) {
+        return { state: { ...state, notice: "No matches" }, intent: null };
+      }
+      const overlayMode = state.overlayMode === "history-search" ? "none" : overlayForText(event.value, state.overlayMode);
+      return {
+        state: {
+          ...state,
+          text: event.value,
+          cursorIndex: event.value.length,
+          overlayMode,
+          selectedIndex: 0,
+          historyIndex: -1,
+          notice: "selection accepted",
+        },
+        intent: state.overlayMode === "history-search" ? null : { kind: "accept-selection", value: event.value },
       };
     }
     case "escape": {

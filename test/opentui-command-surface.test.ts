@@ -20,10 +20,19 @@ test("OpenTUI command surface exposes first-match completion for Tab", () => {
 });
 
 test("OpenTUI command surface offers model and effort picker rows", () => {
+  const bareModelSurface = createCommandSurface(process.cwd(), "/model");
+  const modelListSurface = createCommandSurface(process.cwd(), "/model list");
   const modelSurface = createCommandSurface(process.cwd(), "/model gpt-5.5");
+  const bareEffortSurface = createCommandSurface(process.cwd(), "/effort");
   const effortSurface = createCommandSurface(process.cwd(), "/model gpt-5.5 h");
   const directEffortSurface = createCommandSurface(process.cwd(), "/effort x");
 
+  assert.equal(bareModelSurface.title, "Models");
+  assert.equal(modelListSurface.title, "Models");
+  assert.equal(bareEffortSurface.title, "Effort");
+  assert.ok(bareModelSurface.rows.some((row) => row.value === "/model gpt-5.5 "));
+  assert.ok(modelListSurface.rows.some((row) => row.value === "/model gpt-5.4 "));
+  assert.ok(bareEffortSurface.rows.some((row) => row.value === "/effort high"));
   assert.ok(modelSurface.rows.some((row) => row.value === "/model gpt-5.5 "));
   assert.ok(effortSurface.rows.some((row) => row.value === "/model gpt-5.5 high"));
   assert.ok(directEffortSurface.rows.some((row) => row.value === "/effort xhigh"));
