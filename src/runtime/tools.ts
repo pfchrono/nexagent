@@ -622,7 +622,76 @@ export function getInternalToolFunctionDefinitions(): ReadonlyArray<Record<strin
   }));
 }
 
+const TOOL_ARGUMENT_COMPAT_ALIASES: Partial<Record<InternalToolName, ReadonlyArray<string>>> = {
+  batch_edit: ["operations", "changes"],
+  git_status: ["path"],
+  search_content: ["query"],
+  search_files: ["query"],
+  shell_command: ["timeoutMs"],
+  nexsight_execute: ["lang"],
+  lsp_navigation: ["path", "char"],
+};
+
+export function validateInternalToolArguments(call: InternalToolCall): InternalToolResult | null {
+  const sanitized = sanitizeToolArguments(call);
+  return sanitized.ok ? null : sanitized.failure;
+}
+
+export function sanitizeToolArguments(call: InternalToolCall): { ok: true } | { ok: false; failure: InternalToolResult } {
+  const definition = getInternalToolDefinitions().find((tool) => tool.name === call.name);
+  if (!definition) {
+    return { ok: false, failure: fail(call.name, "unknown tool") };
+  }
+  const args = call.arguments ?? {};
+  const allowedAliases = new Set(TOOL_ARGUMENT_COMPAT_ALIASES[call.name] ?? []);
+  const unexpected = findUnexpectedToolArgumentPaths(definition.inputSchema, args, [], allowedAliases);
+  if (unexpected.length > 0) {
+    return { ok: false, failure: fail(call.name, `unexpected arguments for tool ${call.name}: ${unexpected.join(", ")}`) };
+  }
+  return { ok: true };
+}
+
+function findUnexpectedToolArgumentPaths(
+  schema: Record<string, unknown>,
+  value: unknown,
+  pathParts: string[],
+  allowedTopLevelAliases: ReadonlySet<string>,
+): string[] {
+  if (schema.additionalProperties !== false || !isRecord(value)) {
+    return [];
+  }
+
+  const properties = isRecord(schema.properties) ? schema.properties : {};
+  const unexpected: string[] = [];
+  for (const key of Object.keys(value)) {
+    if (!(key in properties) && !(pathParts.length === 0 && allowedTopLevelAliases.has(key))) {
+      unexpected.push([...pathParts, key].join("."));
+    }
+  }
+
+  for (const [key, childSchema] of Object.entries(properties)) {
+    if (!(key in value) || !isRecord(childSchema)) {
+      continue;
+    }
+    const childValue = value[key];
+    if (Array.isArray(childValue) && isRecord(childSchema.items)) {
+      childValue.forEach((item, index) => {
+        unexpected.push(...findUnexpectedToolArgumentPaths(childSchema.items as Record<string, unknown>, item, [...pathParts, key, String(index)], allowedTopLevelAliases));
+      });
+      continue;
+    }
+    unexpected.push(...findUnexpectedToolArgumentPaths(childSchema, childValue, [...pathParts, key], allowedTopLevelAliases));
+  }
+
+  return unexpected;
+}
+
 export function executeInternalTool(session: RuntimeSession, call: InternalToolCall): InternalToolResult {
+  const argumentFailure = validateInternalToolArguments(call);
+  if (argumentFailure) {
+    return argumentFailure;
+  }
+
   switch (call.name) {
     case "read_file":
       return executeReadFileToolSync(session, call.arguments ?? {});
@@ -710,6 +779,11 @@ export function executeInternalTool(session: RuntimeSession, call: InternalToolC
 }
 
 export async function executeInternalToolAsync(session: RuntimeSession, call: InternalToolCall): Promise<InternalToolResult> {
+  const argumentFailure = validateInternalToolArguments(call);
+  if (argumentFailure) {
+    return argumentFailure;
+  }
+
   switch (call.name) {
     case "read_file":
       return await executeReadFileTool(session, call.arguments ?? {});

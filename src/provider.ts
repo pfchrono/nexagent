@@ -67,7 +67,7 @@ import { consumeOperatorSteer, estimateTokenCount, recordRuntimeEvent, setRuntim
 import type { RuntimeApprovalRequest, RuntimeSession } from "./runtime/session.js";
 import { recordToolMemory } from "./runtime/tool-memory.js";
 import { TurnRun, type MissingTurnEvidence } from "./runtime/turn-run.js";
-import { classifyInternalToolRisk, executeInternalToolAsync, type InternalToolCall, type InternalToolResult } from "./runtime/tools.js";
+import { classifyInternalToolRisk, executeInternalToolAsync, validateInternalToolArguments, type InternalToolCall, type InternalToolResult } from "./runtime/tools.js";
 
 export interface ProviderRequest {
   session: RuntimeSession;
@@ -1379,6 +1379,17 @@ async function withAbortController<T>(
 }
 
 async function executeToolWithRuntimeActivity(session: RuntimeSession, call: InternalToolCall): Promise<InternalToolResult> {
+  const argumentFailure = validateInternalToolArguments(call);
+  if (argumentFailure) {
+    recordRuntimeEvent(session, {
+      kind: "tool",
+      status: "failed",
+      summary: `tool ${call.name} rejected invalid arguments`,
+      detail: argumentFailure.output,
+    });
+    return argumentFailure;
+  }
+
   const risk = classifyInternalToolRisk(call);
   const argsPreview = formatToolArgumentsPreview(call.arguments);
   const startedAt = Date.now();

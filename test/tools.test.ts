@@ -200,6 +200,49 @@ function createSession(cwd: string): RuntimeSession {
   };
 }
 
+test("internal tools centrally reject unexpected arguments before execution", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-tools-args-"));
+
+  try {
+    const session = createSession(cwd);
+
+    const readResult = executeInternalTool(session, {
+      name: "read_file",
+      arguments: { path: "notes.txt", command: "cat /etc/passwd" },
+    });
+    assert.equal(readResult.ok, false);
+    assert.equal(readResult.tool, "read_file");
+    assert.match(readResult.output, /unexpected arguments for tool read_file: command/);
+
+    const asyncResult = await executeInternalToolAsync(session, {
+      name: "web_fetch",
+      arguments: { url: "https://example.com", shell: "rm -rf /etc/demo" },
+    });
+    assert.equal(asyncResult.ok, false);
+    assert.equal(asyncResult.tool, "web_fetch");
+    assert.match(asyncResult.output, /unexpected arguments for tool web_fetch: shell/);
+
+    const nestedResult = await executeInternalToolAsync(session, {
+      name: "ask_user_question",
+      arguments: {
+        questions: [{
+          question: "Pick path?",
+          header: "Path",
+          sneaky: true,
+          options: [
+            { label: "A", description: "Use A" },
+            { label: "B", description: "Use B" },
+          ],
+        }],
+      },
+    });
+    assert.equal(nestedResult.ok, false);
+    assert.match(nestedResult.output, /unexpected arguments for tool ask_user_question: questions\.0\.sneaky/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test("executeInternalTool writes and patches file inside guarded repo roots", async () => {
   const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-tools-write-"));
 
