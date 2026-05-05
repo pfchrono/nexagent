@@ -110,7 +110,9 @@ export function getInternalToolDefinitions(): readonly InternalToolDefinition[] 
         properties: {
           path: { type: "string", description: "File path relative to current working directory." },
           startLine: { type: "number", description: "Optional 1-based first line to render." },
+          start_line: { type: "number", description: "Legacy alias for startLine." },
           endLine: { type: "number", description: "Optional 1-based last line to render." },
+          end_line: { type: "number", description: "Legacy alias for endLine." },
           maxLines: { type: "number", description: "Optional maximum lines to render in compact mode." },
           compact: { type: "boolean", description: "Render a bounded numbered preview instead of raw full content." },
         },
@@ -280,6 +282,8 @@ export function getInternalToolDefinitions(): readonly InternalToolDefinition[] 
         type: "object",
         properties: {
           command: { type: "string", description: "Shell command to run from current working directory." },
+          cwd: { type: "string", description: "Optional working directory under allowed roots." },
+          workdir: { type: "string", description: "Legacy alias for cwd." },
           timeoutMs: { type: "number", description: "Optional timeout in milliseconds, capped at 30000ms." },
           timeout: { type: "number", description: "Legacy alias for timeoutMs." },
           timeout_ms: { type: "number", description: "Legacy alias for timeoutMs." },
@@ -691,9 +695,10 @@ export function getInternalToolFunctionDefinitions(): ReadonlyArray<Record<strin
 const TOOL_ARGUMENT_COMPAT_ALIASES: Partial<Record<InternalToolName, ReadonlyArray<string>>> = {
   batch_edit: ["operations", "changes"],
   git_status: ["path"],
+  read_file: ["start_line", "end_line"],
   search_content: ["query"],
   search_files: ["query"],
-  shell_command: ["timeout", "timeout_ms", "timeoutMs", "maxOutputChars", "max_output_chars"],
+  shell_command: ["cwd", "workdir", "timeout", "timeout_ms", "timeoutMs", "maxOutputChars", "max_output_chars"],
   todo: ["items", "todos"],
   nexsight_execute: ["lang"],
   lsp_navigation: ["path", "char"],
@@ -1040,8 +1045,8 @@ function formatReadFileOutput(session: RuntimeSession, targetPath: string, conte
 }
 
 function resolveReadFileLineRange(args: Record<string, unknown>): { startLine: number; endLine: number } | null {
-  const rawStart = asNumber(args.startLine, NaN);
-  const rawEnd = asNumber(args.endLine, NaN);
+  const rawStart = asNumber(args.startLine ?? args.start_line, NaN);
+  const rawEnd = asNumber(args.endLine ?? args.end_line, NaN);
   if (!Number.isFinite(rawStart) && !Number.isFinite(rawEnd)) {
     return null;
   }
@@ -1572,6 +1577,10 @@ function executeShellCommandTool(session: RuntimeSession, command: string, args:
     return fail("shell_command", "command required");
   }
   const timeoutMs = Math.max(MIN_SHELL_TIMEOUT_MS, Math.min(asNumber(args.timeoutMs, DEFAULT_SHELL_TIMEOUT_MS), MAX_SHELL_TIMEOUT_MS));
+  const cwd = resolveShellCommandCwd(session, args);
+  if (!cwd.ok) {
+    return fail("shell_command", cwd.message);
+  }
 
   const blockedPattern = findBlockedShellPattern(normalized);
   if (blockedPattern) {
@@ -1603,7 +1612,7 @@ function executeShellCommandTool(session: RuntimeSession, command: string, args:
   }
 
   try {
-    const result = runShellCommandWithOutputAccumulator(normalized, session.cwd, timeoutMs);
+    const result = runShellCommandWithOutputAccumulator(normalized, cwd.path, timeoutMs);
 
     if (result.timedOut) {
       return fail("shell_command", `shell timed out after ${String(timeoutMs)}ms\n${result.output}`);
@@ -1624,16 +1633,40 @@ function executeShellCommandTool(session: RuntimeSession, command: string, args:
 }
 
 function normalizeShellCommandArguments(args: Record<string, unknown>): Record<string, unknown> {
-  if (args.timeoutMs !== undefined) {
-    return args;
+  const normalized = args.cwd === undefined && args.workdir !== undefined
+    ? { ...args, cwd: args.workdir }
+    : args;
+  if (normalized.timeoutMs !== undefined) {
+    return normalized;
   }
-  if (args.timeout !== undefined) {
-    return { ...args, timeoutMs: args.timeout };
+  if (normalized.timeout !== undefined) {
+    return { ...normalized, timeoutMs: normalized.timeout };
   }
-  if (args.timeout_ms !== undefined) {
-    return { ...args, timeoutMs: args.timeout_ms };
+  if (normalized.timeout_ms !== undefined) {
+    return { ...normalized, timeoutMs: normalized.timeout_ms };
   }
-  return args;
+  return normalized;
+}
+
+function resolveShellCommandCwd(session: RuntimeSession, args: Record<string, unknown>): { ok: true; path: string } | { ok: false; message: string } {
+  const requested = asOptionalString(args.cwd);
+  if (!requested) {
+    return { ok: true, path: session.cwd };
+  }
+  const targetPath = resolveRepoPath(session, requested);
+  const policyFailure = validateRepoToolPath(session, targetPath);
+  if (policyFailure) {
+    return { ok: false, message: policyFailure };
+  }
+  try {
+    const stats = statSync(targetPath);
+    if (!stats.isDirectory()) {
+      return { ok: false, message: `${formatToolPath(session, targetPath)} is not a directory` };
+    }
+  } catch (error) {
+    return { ok: false, message: formatToolError(targetPath, error) };
+  }
+  return { ok: true, path: targetPath };
 }
 
 function normalizeTodoToolArguments(args: Record<string, unknown>): Record<string, unknown> {

@@ -274,6 +274,17 @@ test("internal tool argument guard accepts known legacy aliases", async () => {
     });
     assert.equal(shell.ok, false);
     assert.match(shell.output, /shell timed out after 500ms/);
+
+    await mkdir(path.join(cwd, "nested"), { recursive: true });
+    const shellWorkdir = executeInternalTool(session, {
+      name: "shell_command",
+      arguments: {
+        command: "pwd",
+        workdir: "nested",
+      },
+    });
+    assert.equal(shellWorkdir.ok, true);
+    assert.equal(shellWorkdir.output, path.join(cwd, "nested"));
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }
@@ -291,6 +302,10 @@ test("internal strict tool schemas expose compatibility aliases", () => {
     return properties as Record<string, unknown>;
   };
 
+  assert.ok("start_line" in propertiesFor("read_file"));
+  assert.ok("end_line" in propertiesFor("read_file"));
+  assert.ok("cwd" in propertiesFor("shell_command"));
+  assert.ok("workdir" in propertiesFor("shell_command"));
   assert.ok("timeout" in propertiesFor("shell_command"));
   assert.ok("timeout_ms" in propertiesFor("shell_command"));
   assert.ok("max_output_chars" in propertiesFor("shell_command"));
@@ -852,6 +867,33 @@ test("executeInternalTool read_file renders explicit line ranges with line numbe
     assert.match(result.output, /^\[read_file range: sample\.txt lines 2-4 of 6\]/);
     assert.match(result.output, /^2 \| two$/m);
     assert.match(result.output, /^4 \| four$/m);
+    assert.doesNotMatch(result.output, /one/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("executeInternalTool read_file accepts snake_case line range aliases", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-tools-read-range-alias-"));
+
+  try {
+    const session = createSession(cwd);
+    await writeFile(path.join(cwd, "sample.txt"), "one\ntwo\nthree\nfour\nfive\n", "utf8");
+
+    const result = executeInternalTool(session, {
+      name: "read_file",
+      arguments: {
+        path: "sample.txt",
+        start_line: 3,
+        end_line: 5,
+      },
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.tool, "read_file");
+    assert.match(result.output, /^\[read_file range: sample\.txt lines 3-5 of 6\]/);
+    assert.match(result.output, /^3 \| three$/m);
+    assert.match(result.output, /^5 \| five$/m);
     assert.doesNotMatch(result.output, /one/);
   } finally {
     await rm(cwd, { recursive: true, force: true });
