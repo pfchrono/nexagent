@@ -267,7 +267,8 @@ test("internal tool argument guard accepts known legacy aliases", async () => {
       name: "shell_command",
       arguments: {
         command: "sleep 1",
-        timeout: 500,
+        timeout_ms: 500,
+        max_output_chars: 2000,
       },
     });
     assert.equal(shell.ok, false);
@@ -290,6 +291,8 @@ test("internal strict tool schemas expose compatibility aliases", () => {
   };
 
   assert.ok("timeout" in propertiesFor("shell_command"));
+  assert.ok("timeout_ms" in propertiesFor("shell_command"));
+  assert.ok("max_output_chars" in propertiesFor("shell_command"));
   assert.ok("items" in propertiesFor("todo"));
   assert.ok("operations" in propertiesFor("batch_edit"));
   assert.ok("query" in propertiesFor("search_content"));

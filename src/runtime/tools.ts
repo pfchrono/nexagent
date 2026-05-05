@@ -282,6 +282,9 @@ export function getInternalToolDefinitions(): readonly InternalToolDefinition[] 
           command: { type: "string", description: "Shell command to run from current working directory." },
           timeoutMs: { type: "number", description: "Optional timeout in milliseconds, capped at 30000ms." },
           timeout: { type: "number", description: "Legacy alias for timeoutMs." },
+          timeout_ms: { type: "number", description: "Legacy alias for timeoutMs." },
+          maxOutputChars: { type: "number", description: "Accepted compatibility output cap hint; runtime still applies built-in caps." },
+          max_output_chars: { type: "number", description: "Accepted compatibility output cap hint; runtime still applies built-in caps." },
         },
         required: ["command"],
         additionalProperties: false,
@@ -688,7 +691,7 @@ const TOOL_ARGUMENT_COMPAT_ALIASES: Partial<Record<InternalToolName, ReadonlyArr
   git_status: ["path"],
   search_content: ["query"],
   search_files: ["query"],
-  shell_command: ["timeout", "timeoutMs"],
+  shell_command: ["timeout", "timeout_ms", "timeoutMs", "maxOutputChars", "max_output_chars"],
   todo: ["items", "todos"],
   nexsight_execute: ["lang"],
   lsp_navigation: ["path", "char"],
@@ -1619,10 +1622,16 @@ function executeShellCommandTool(session: RuntimeSession, command: string, args:
 }
 
 function normalizeShellCommandArguments(args: Record<string, unknown>): Record<string, unknown> {
-  if (args.timeoutMs !== undefined || args.timeout === undefined) {
+  if (args.timeoutMs !== undefined) {
     return args;
   }
-  return { ...args, timeoutMs: args.timeout };
+  if (args.timeout !== undefined) {
+    return { ...args, timeoutMs: args.timeout };
+  }
+  if (args.timeout_ms !== undefined) {
+    return { ...args, timeoutMs: args.timeout_ms };
+  }
+  return args;
 }
 
 function normalizeTodoToolArguments(args: Record<string, unknown>): Record<string, unknown> {
