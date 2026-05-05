@@ -97,6 +97,8 @@ const DIFF_MAX_LINES = 400;
 const DIFF_MAX_CHARS = 20_000;
 const WEB_TIMEOUT_MS = 8_000;
 const WEB_MAX_CHARS = 12_000;
+const READ_FILE_COMPACT_LINE_LIMIT = 160;
+const READ_FILE_COMPACT_CHAR_LIMIT = 24_000;
 const readGuardState = new WeakMap<RuntimeSession, Map<string, { mtimeMs: number; size: number }>>();
 export function getInternalToolDefinitions(): readonly InternalToolDefinition[] {
   return [
@@ -107,6 +109,10 @@ export function getInternalToolDefinitions(): readonly InternalToolDefinition[] 
         type: "object",
         properties: {
           path: { type: "string", description: "File path relative to current working directory." },
+          startLine: { type: "number", description: "Optional 1-based first line to render." },
+          endLine: { type: "number", description: "Optional 1-based last line to render." },
+          maxLines: { type: "number", description: "Optional maximum lines to render in compact mode." },
+          compact: { type: "boolean", description: "Render a bounded numbered preview instead of raw full content." },
         },
         required: ["path"],
         additionalProperties: false,
@@ -619,7 +625,7 @@ export function getInternalToolFunctionDefinitions(): ReadonlyArray<Record<strin
 export function executeInternalTool(session: RuntimeSession, call: InternalToolCall): InternalToolResult {
   switch (call.name) {
     case "read_file":
-      return executeReadFileTool(session, asString(call.arguments?.path, "."));
+      return executeReadFileTool(session, call.arguments ?? {});
     case "write_file":
       return executeWriteFileTool(session, asString(call.arguments?.path, "."), asString(call.arguments?.content, ""));
     case "apply_patch":
@@ -849,7 +855,8 @@ export function validateWriteToolPath(session: RuntimeSession, targetPath: strin
   return validateWritePathPolicy(session, targetPath);
 }
 
-function executeReadFileTool(session: RuntimeSession, inputPath: string): InternalToolResult {
+function executeReadFileTool(session: RuntimeSession, args: Record<string, unknown>): InternalToolResult {
+  const inputPath = asString(args.path, ".");
   const targetPath = resolveRepoPath(session, inputPath);
   const policyFailure = validateReadToolPath(session, targetPath);
   if (policyFailure) {
@@ -865,10 +872,64 @@ function executeReadFileTool(session: RuntimeSession, inputPath: string): Intern
     const content = readFileSync(targetPath, "utf8");
     markReadGuardCoverage(session, targetPath);
     touchLspFileSync(session, targetPath);
-    return ok("read_file", content);
+    return ok("read_file", formatReadFileOutput(session, targetPath, content, args));
   } catch (error) {
     return fail("read_file", formatToolError(targetPath, error));
   }
+}
+
+function formatReadFileOutput(session: RuntimeSession, targetPath: string, content: string, args: Record<string, unknown>): string {
+  const lineRange = resolveReadFileLineRange(args);
+  const maxLines = clampPositiveInteger(asNumber(args.maxLines, READ_FILE_COMPACT_LINE_LIMIT), 1, READ_FILE_COMPACT_LINE_LIMIT);
+  const lines = content.split(/\r?\n/);
+  if (lineRange) {
+    return renderReadFileLines(session, targetPath, lines, lineRange.startLine, lineRange.endLine, "range");
+  }
+  if (asBoolean(args.compact) || content.length > READ_FILE_COMPACT_CHAR_LIMIT || lines.length > READ_FILE_COMPACT_LINE_LIMIT) {
+    return renderReadFileLines(session, targetPath, lines, 1, Math.min(lines.length, maxLines), "compact");
+  }
+  return content;
+}
+
+function resolveReadFileLineRange(args: Record<string, unknown>): { startLine: number; endLine: number } | null {
+  const rawStart = asNumber(args.startLine, NaN);
+  const rawEnd = asNumber(args.endLine, NaN);
+  if (!Number.isFinite(rawStart) && !Number.isFinite(rawEnd)) {
+    return null;
+  }
+  const startLine = Number.isFinite(rawStart) ? Math.max(1, Math.floor(rawStart)) : 1;
+  const endLine = Number.isFinite(rawEnd) ? Math.max(startLine, Math.floor(rawEnd)) : startLine + READ_FILE_COMPACT_LINE_LIMIT - 1;
+  return { startLine, endLine };
+}
+
+function renderReadFileLines(
+  session: RuntimeSession,
+  targetPath: string,
+  lines: string[],
+  startLine: number,
+  endLine: number,
+  mode: "compact" | "range",
+): string {
+  const totalLines = lines.length;
+  const boundedStart = clampPositiveInteger(startLine, 1, Math.max(totalLines, 1));
+  const boundedEnd = clampPositiveInteger(endLine, boundedStart, Math.max(totalLines, boundedStart));
+  const width = String(boundedEnd).length;
+  const renderedLines = lines
+    .slice(boundedStart - 1, boundedEnd)
+    .map((line, index) => `${String(boundedStart + index).padStart(width, " ")} | ${line}`);
+  const truncated = boundedEnd < totalLines ? [`... ${String(totalLines - boundedEnd)} more line${totalLines - boundedEnd === 1 ? "" : "s"} ...`] : [];
+  return [
+    `[read_file ${mode}: ${formatToolPath(session, targetPath)} lines ${String(boundedStart)}-${String(boundedEnd)} of ${String(totalLines)}]`,
+    ...renderedLines,
+    ...truncated,
+  ].join("\n");
+}
+
+function clampPositiveInteger(value: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) {
+    return min;
+  }
+  return Math.min(max, Math.max(min, Math.floor(value)));
 }
 
 function executeListDirTool(session: RuntimeSession, inputPath?: string): InternalToolResult {

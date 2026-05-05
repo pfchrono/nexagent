@@ -709,6 +709,59 @@ test("executeInternalTool reads reference files outside write roots but blocks p
   }
 });
 
+test("executeInternalTool read_file renders explicit line ranges with line numbers", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-tools-read-range-"));
+
+  try {
+    const session = createSession(cwd);
+    await writeFile(path.join(cwd, "sample.txt"), "one\ntwo\nthree\nfour\nfive\n", "utf8");
+
+    const result = executeInternalTool(session, {
+      name: "read_file",
+      arguments: {
+        path: "sample.txt",
+        startLine: 2,
+        endLine: 4,
+      },
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.tool, "read_file");
+    assert.match(result.output, /^\[read_file range: sample\.txt lines 2-4 of 6\]/);
+    assert.match(result.output, /^2 \| two$/m);
+    assert.match(result.output, /^4 \| four$/m);
+    assert.doesNotMatch(result.output, /one/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("executeInternalTool read_file auto-compacts large files", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-tools-read-compact-"));
+
+  try {
+    const session = createSession(cwd);
+    const content = Array.from({ length: 170 }, (_, index) => `line ${String(index + 1)}`).join("\n");
+    await writeFile(path.join(cwd, "large.txt"), content, "utf8");
+
+    const result = executeInternalTool(session, {
+      name: "read_file",
+      arguments: {
+        path: "large.txt",
+      },
+    });
+
+    assert.equal(result.ok, true);
+    assert.match(result.output, /^\[read_file compact: large\.txt lines 1-160 of 170\]/);
+    assert.match(result.output, /^  1 \| line 1$/m);
+    assert.match(result.output, /^160 \| line 160$/m);
+    assert.match(result.output, /\.\.\. 10 more lines \.\.\.$/);
+    assert.doesNotMatch(result.output, /line 170/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test("executeInternalTool expands home paths for readable references", async () => {
   const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-tools-home-"));
 
