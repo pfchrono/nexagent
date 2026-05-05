@@ -105,7 +105,7 @@ function createMergedKeyboardSource(primary: OpenTuiKeyboardSource, fallback: Op
         handler(key);
       };
       const emitFallback = (key: OpenTuiKeyEvent): void => {
-        if (!primarySeen) {
+        if (!primarySeen || key.paste) {
           handler(key);
         }
       };

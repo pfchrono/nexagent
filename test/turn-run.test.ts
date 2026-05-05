@@ -105,6 +105,28 @@ test("turn run exposes derived obligations", () => {
   assert.equal(run.getObligations().requiresWriteEvidence, true);
 });
 
+test("turn run requires ask evidence for active discussion skill", () => {
+  const session = createSession();
+  session.activeSkill = {
+    name: "gsd-discuss-phase",
+    source: "repo",
+    path: "/repo/.codex/skills/gsd-discuss-phase/SKILL.md",
+    args: "73",
+    content: "Discuss phase before planning.",
+  };
+  session.events.push({
+    at: new Date().toISOString(),
+    kind: "tool",
+    status: "completed",
+    summary: "tool git_status completed",
+    detail: "guarded",
+  });
+  const run = new TurnRun({ session, prompt: "start" });
+
+  assert.equal(run.getObligations().requiresAskEvidence, true);
+  assert.equal(run.evaluateFinalEvidence(0, [], "Need to choose a direction."), "ask user");
+});
+
 test("turn run owns final evidence checks for claimed tests and Nexsight work", () => {
   const session = createSession();
   const run = new TurnRun({ session, prompt: "summarize validation" });

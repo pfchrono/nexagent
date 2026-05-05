@@ -6,17 +6,34 @@ import path from "node:path";
 
 import { checkpointArchivistSession, saveArchivistMemory } from "./archivist.js";
 import { buildPatchPreview, searchFilesWithIgnore } from "./core-helpers.js";
-import { formatLspStatus, summarizeLspDiagnostics, summarizeLspSymbols, touchLspFileSync } from "./lsp.js";
+import { formatLspStatus, summarizeLspDiagnostics, summarizeLspNavigation, summarizeLspSymbols, touchLspFileSync } from "./lsp.js";
 import { callMcpTool, listMcpTools } from "./mcp.js";
-import { batchIndexNexsight, executeNexsight, indexNexsight, indexNexsightFile, searchNexsight } from "./nexsight.js";
+import { batchIndexNexsight, executeNexsight, gatherNexsight, indexNexsight, indexNexsightFile, readNexsight, searchNexsight } from "./nexsight.js";
 import {
   analyzeBlockedShellCommand,
+  analyzeSafeGitCommand,
   findBlockedShellPattern,
   validateReadToolPath as validateReadPathPolicy,
   validateRepoToolPath as validateRepoPathPolicy,
   validateWriteToolPath as validateWritePathPolicy,
 } from "./policy.js";
+import {
+  ASK_USER_TOOL_NAME,
+  MAX_QUESTIONNAIRE_HEADER_LENGTH,
+  MAX_QUESTIONNAIRE_LABEL_LENGTH,
+  MAX_QUESTIONNAIRE_OPTIONS,
+  MAX_QUESTIONNAIRE_QUESTIONS,
+  MIN_QUESTIONNAIRE_OPTIONS,
+  createQuestionnaireRequest,
+  formatQuestionnaireResponseText,
+  parseQuestionnaireQuestions,
+  validateQuestionnaire,
+} from "./questionnaire.js";
+import { savePersistedRuntimeState } from "./persistence.js";
 import type { RuntimeSession } from "./session.js";
+import { executeTodoTool } from "./todos.js";
+import { executeAgentTool, executeGetSubagentResultTool, executeSteerSubagentTool } from "./subagents.js";
+import { executeGetGoalTool, executeUpdateGoalTool } from "./goal.js";
 
 export type InternalToolName =
   | "read_file"
@@ -33,6 +50,8 @@ export type InternalToolName =
   | "git_diff"
   | "shell_command"
   | "nexsight_execute"
+  | "nexsight_read"
+  | "nexsight_gather"
   | "nexsight_index"
   | "nexsight_batch"
   | "nexsight_search"
@@ -40,9 +59,17 @@ export type InternalToolName =
   | "archivist_checkpoint"
   | "mcp_list_tools"
   | "mcp_call"
+  | "ask_user_question"
+  | "todo"
+  | "get_goal"
+  | "update_goal"
+  | "Agent"
+  | "get_subagent_result"
+  | "steer_subagent"
   | "lsp_status"
   | "lsp_symbols"
-  | "lsp_diagnostics";
+  | "lsp_diagnostics"
+  | "lsp_navigation";
 
 export interface InternalToolCall {
   name: InternalToolName;
@@ -70,6 +97,7 @@ const DIFF_MAX_LINES = 400;
 const DIFF_MAX_CHARS = 20_000;
 const WEB_TIMEOUT_MS = 8_000;
 const WEB_MAX_CHARS = 12_000;
+const readGuardState = new WeakMap<RuntimeSession, Map<string, { mtimeMs: number; size: number }>>();
 export function getInternalToolDefinitions(): readonly InternalToolDefinition[] {
   return [
     {
@@ -257,6 +285,36 @@ export function getInternalToolDefinitions(): readonly InternalToolDefinition[] 
       },
     },
     {
+      name: "nexsight_read",
+      description: "Lean-ctx style compressed file read. Use modes auto, full, map, signatures, outline, or lines:N-M to avoid dumping large files.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Readable repo-local file path." },
+          mode: { type: "string", description: "Read mode: auto, full, map, signatures, outline, or lines:N-M." },
+          maxChars: { type: "number", description: "Maximum source chars to inspect, capped at 120000." },
+        },
+        required: ["path"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "nexsight_gather",
+      description: "Batch gather compact maps/signatures from many readable files in one call. Prefer this over many nexsight_read calls for audits, phase docs, repo mapping, or broad evidence collection.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          root: { type: "string", description: "Repo-local root or file path. Defaults to cwd." },
+          pattern: { type: "string", description: "Optional glob suffix, such as *.ts or *.md." },
+          query: { type: "string", description: "Optional terms; only files containing matching terms are included." },
+          mode: { type: "string", description: "Read mode per file: map, signatures, outline, lines:N-M, full, or auto." },
+          limit: { type: "number", description: "Maximum matching files, capped at 80." },
+          maxCharsPerFile: { type: "number", description: "Maximum source chars per file, capped at 120000." },
+        },
+        additionalProperties: false,
+      },
+    },
+    {
       name: "nexsight_index",
       description: "Index bounded file or text content into the local nexsight search store.",
       inputSchema: {
@@ -346,6 +404,141 @@ export function getInternalToolDefinitions(): readonly InternalToolDefinition[] 
       },
     },
     {
+      name: "ask_user_question",
+      description: `Ask the user up to ${MAX_QUESTIONNAIRE_QUESTIONS} structured clarifying questions during execution. Use for GSD discussions, specs, design choices, or blocked implementation decisions when you need user intent. Group questions in one call. Each question needs ${MIN_QUESTIONNAIRE_OPTIONS}-${MAX_QUESTIONNAIRE_OPTIONS} options. First option should be recommended when one path is best. The user may answer with an option number or free text.`,
+      inputSchema: {
+        type: "object",
+        properties: {
+          questions: {
+            type: "array",
+            minItems: 1,
+            maxItems: MAX_QUESTIONNAIRE_QUESTIONS,
+            items: {
+              type: "object",
+              properties: {
+                question: { type: "string", description: "Complete question to ask the user. Should be clear and specific." },
+                header: { type: "string", maxLength: MAX_QUESTIONNAIRE_HEADER_LENGTH, description: "Short chip label, max 12 characters." },
+                options: {
+                  type: "array",
+                  minItems: MIN_QUESTIONNAIRE_OPTIONS,
+                  maxItems: MAX_QUESTIONNAIRE_OPTIONS,
+                  items: {
+                    type: "object",
+                    properties: {
+                      label: { type: "string", maxLength: MAX_QUESTIONNAIRE_LABEL_LENGTH, description: "Concise option label, 1-5 words." },
+                      description: { type: "string", description: "What this option means or trade-off." },
+                      preview: { type: "string", description: "Optional markdown/code/ASCII preview for concrete alternatives." },
+                    },
+                    required: ["label", "description"],
+                    additionalProperties: false,
+                  },
+                },
+                multiSelect: { type: "boolean", description: "True when multiple options may be selected." },
+              },
+              required: ["question", "header", "options"],
+              additionalProperties: false,
+            },
+          },
+        },
+        required: ["questions"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "todo",
+      description: "Manage visual task checklist for current model work. Use near the start of GSD workflows, next-slice/full-loop requests, and multi-step work; not trivial one-shot replies.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          action: { type: "string", description: "create, update, list, get, delete, or clear." },
+          id: { type: "string", description: "Todo id for update/get/delete." },
+          subject: { type: "string", description: "Short task subject." },
+          description: { type: "string", description: "Optional detail." },
+          activeForm: { type: "string", description: "Short present-tense label shown while active." },
+          status: { type: "string", description: "pending, in_progress, completed, or deleted." },
+          blockedBy: { type: "array", items: { type: "string" }, description: "Complete dependency id list." },
+          addBlockedBy: { type: "array", items: { type: "string" }, description: "Dependency ids to add." },
+          removeBlockedBy: { type: "array", items: { type: "string" }, description: "Dependency ids to remove." },
+          owner: { type: "string", description: "Optional owner label." },
+          metadata: { type: "object", description: "Optional structured metadata." },
+          includeDeleted: { type: "boolean", description: "Include deleted tombstones in list output." },
+        },
+        required: ["action"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "get_goal",
+      description: "Read current persistent /goal objective, status, token budget, and usage.",
+      inputSchema: {
+        type: "object",
+        properties: {},
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "update_goal",
+      description: "Mark current /goal complete after strict evidence audit. Only accepts status=complete.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          status: { type: "string", enum: ["complete"], description: "Only complete is accepted." },
+        },
+        required: ["status"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "Agent",
+      description: "Launch a Claude-style subagent in a child Nexagent session. Foreground waits for result; background returns an id for get_subagent_result.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          prompt: { type: "string", description: "Task for subagent." },
+          description: { type: "string", description: "Short 3-5 word UI summary." },
+          subagent_type: { type: "string", description: "general-purpose, Explore, Plan, or custom .pi/agents type." },
+          model: { type: "string", description: "Optional model hint recorded for compatibility." },
+          thinking: { type: "string", description: "Optional thinking level hint recorded for compatibility." },
+          max_turns: { type: "number", description: "Optional turn limit hint." },
+          run_in_background: { type: "boolean", description: "Return immediately and let agent finish in background." },
+          resume: { type: "string", description: "Reserved compatibility field." },
+          isolated: { type: "boolean", description: "Reserved compatibility field." },
+          isolation: { type: "string", description: "Reserved compatibility field." },
+          inherit_context: { type: "boolean", description: "Fork recent parent conversation into subagent." },
+          fork_context: { type: "boolean", description: "Alias for inherit_context." },
+        },
+        required: ["prompt", "description", "subagent_type"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "get_subagent_result",
+      description: "Check status and retrieve a background subagent result.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          agent_id: { type: "string", description: "Subagent id." },
+          wait: { type: "boolean", description: "Wait for completion if still running." },
+          verbose: { type: "boolean", description: "Return full result instead of preview." },
+        },
+        required: ["agent_id"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "steer_subagent",
+      description: "Queue steering text for a running/background subagent.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          agent_id: { type: "string", description: "Subagent id." },
+          message: { type: "string", description: "Steering message." },
+        },
+        required: ["agent_id", "message"],
+        additionalProperties: false,
+      },
+    },
+    {
       name: "lsp_status",
       description: "Report safe local LSP status. Enabled by default with bounded fallback; never auto-downloads language servers.",
       inputSchema: {
@@ -378,6 +571,22 @@ export function getInternalToolDefinitions(): readonly InternalToolDefinition[] 
         additionalProperties: false,
       },
     },
+    {
+      name: "lsp_navigation",
+      description: "Pi Lens-inspired bounded code navigation: definition, references, hover, documentSymbol, workspaceSymbol, implementation, workspaceDiagnostics.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          operation: { type: "string", description: "Operation: definition, references, hover, documentSymbol, workspaceSymbol, implementation, workspaceDiagnostics." },
+          filePath: { type: "string", description: "Project file path for file/position operations." },
+          line: { type: "number", description: "1-based line for position operations." },
+          character: { type: "number", description: "1-based character for position operations." },
+          query: { type: "string", description: "Workspace symbol query." },
+        },
+        required: ["operation"],
+        additionalProperties: false,
+      },
+    },
   ] as const;
 }
 
@@ -388,6 +597,12 @@ export function formatInternalToolPromptGuidance(): string[] {
     '<nexagent_tool_call>{"name":"read_file","arguments":{"path":"src/cli.ts"}}</nexagent_tool_call>',
     `Available internal tools: ${tools.map((tool) => tool.name).join(", ")}`,
     "Use tools for repo inspection instead of narrating intended actions.",
+    "Use ask_user_question when user intent is truly ambiguous, especially GSD discussion/spec/design choices, framework selection, or implementation trade-offs that cannot be safely inferred.",
+    "Group all needed clarifying questions into one ask_user_question call; do not ask serial free-form questions when structured choices fit.",
+    "Use todo near the start for GSD workflows, phases, milestones, next-slice/full-loop requests, or any task with three or more meaningful steps. Keep it current, prefer one in_progress task, and mark completed only after evidence or verification.",
+    "When a multi-stage turn blocks, update the current todo with blocker detail before final response when the todo tool is available.",
+    "Do not create todos for trivial one-step answers unless user asks for task tracking.",
+    "Use Agent for genuinely parallel or specialist work. Prefer concrete descriptions, bounded prompts, and get_subagent_result for background results.",
   ];
 }
 
@@ -442,6 +657,10 @@ export function executeInternalTool(session: RuntimeSession, call: InternalToolC
       return executeShellCommandTool(session, asString(call.arguments?.command, ""), call.arguments ?? {});
     case "nexsight_execute":
       return executeNexsightExecuteTool(session, call.arguments ?? {});
+    case "nexsight_read":
+      return executeNexsightReadTool(session, call.arguments ?? {});
+    case "nexsight_gather":
+      return executeNexsightGatherTool(session, call.arguments ?? {});
     case "nexsight_index":
       return executeNexsightIndexTool(session, call.arguments ?? {});
     case "nexsight_batch":
@@ -457,11 +676,29 @@ export function executeInternalTool(session: RuntimeSession, call: InternalToolC
       return pending("archivist_checkpoint", "async");
     case "mcp_list_tools":
     case "mcp_call":
+    case "ask_user_question":
       return pending(call.name, "async");
+    case "todo": {
+      const result = executeTodoTool(session, call.arguments ?? {});
+      if (result.ok) {
+        savePersistedRuntimeState(session);
+      }
+      return result;
+    }
+    case "get_goal":
+      return toToolResult("get_goal", executeGetGoalTool(session));
+    case "update_goal":
+      return toToolResult("update_goal", executeUpdateGoalTool(session, call.arguments ?? {}));
+    case "Agent":
+    case "get_subagent_result":
+      return pending(call.name, "async");
+    case "steer_subagent":
+      return toToolResult("steer_subagent", executeSteerSubagentTool(session, call.arguments ?? {}));
     case "lsp_status":
       return ok("lsp_status", formatLspStatus(session));
     case "lsp_symbols":
     case "lsp_diagnostics":
+    case "lsp_navigation":
       return pending(call.name, "async");
   }
 }
@@ -486,10 +723,18 @@ export async function executeInternalToolAsync(session: RuntimeSession, call: In
       return ok("mcp_list_tools", listMcpTools(session.mcpRegistry));
     case "mcp_call":
       return await executeMcpCallTool(session, call.arguments ?? {});
+    case "ask_user_question":
+      return await executeAskUserQuestionTool(session, call.arguments ?? {});
     case "lsp_symbols":
       return await executeLspSymbolsTool(session, asString(call.arguments?.path, ""));
     case "lsp_diagnostics":
       return await executeLspDiagnosticsTool(session, asString(call.arguments?.path, ""));
+    case "lsp_navigation":
+      return executeLspNavigationTool(session, call.arguments ?? {});
+    case "Agent":
+      return toToolResult("Agent", await executeAgentTool(session, call.arguments ?? {}));
+    case "get_subagent_result":
+      return toToolResult("get_subagent_result", await executeGetSubagentResultTool(session, call.arguments ?? {}));
     default:
       return executeInternalTool(session, call);
   }
@@ -514,8 +759,45 @@ export function classifyInternalToolRisk(call: InternalToolCall): "low" | "guard
     || call.name === "archivist_checkpoint"
     || call.name === "lsp_symbols"
     || call.name === "lsp_diagnostics"
+    || call.name === "lsp_navigation"
     ? "guarded"
     : "low";
+}
+
+async function executeAskUserQuestionTool(session: RuntimeSession, args: Record<string, unknown>): Promise<InternalToolResult> {
+  if (session.operationControls.pendingQuestionnaire) {
+    return fail(ASK_USER_TOOL_NAME, "ask_user_question already pending; wait for user answer");
+  }
+  const questions = normalizeQuestionnaireForUi(parseQuestionnaireQuestions(args.questions));
+  const validation = validateQuestionnaire(questions);
+  if (!validation.ok) {
+    return fail(ASK_USER_TOOL_NAME, validation.message);
+  }
+  const request = createQuestionnaireRequest(questions);
+  session.operationControls.pendingQuestionnaire = request;
+  while (session.operationControls.pendingQuestionnaire === request && !request.response) {
+    await sleep(50);
+  }
+  const response = request.response ?? { answers: request.answers, cancelled: true };
+  if (session.operationControls.pendingQuestionnaire === request) {
+    session.operationControls.pendingQuestionnaire = null;
+  }
+  return ok(ASK_USER_TOOL_NAME, formatQuestionnaireResponseText(response));
+}
+
+function normalizeQuestionnaireForUi(questions: ReturnType<typeof parseQuestionnaireQuestions>): ReturnType<typeof parseQuestionnaireQuestions> {
+  return questions.slice(0, MAX_QUESTIONNAIRE_QUESTIONS).map((question) => ({
+    ...question,
+    header: question.header.slice(0, MAX_QUESTIONNAIRE_HEADER_LENGTH),
+    options: question.options.slice(0, MAX_QUESTIONNAIRE_OPTIONS).map((option) => ({
+      ...option,
+      label: option.label.slice(0, MAX_QUESTIONNAIRE_LABEL_LENGTH),
+    })),
+  }));
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function executeMcpCallTool(session: RuntimeSession, args: Record<string, unknown>): Promise<InternalToolResult> {
@@ -581,6 +863,7 @@ function executeReadFileTool(session: RuntimeSession, inputPath: string): Intern
     }
 
     const content = readFileSync(targetPath, "utf8");
+    markReadGuardCoverage(session, targetPath);
     touchLspFileSync(session, targetPath);
     return ok("read_file", content);
   } catch (error) {
@@ -613,11 +896,21 @@ function executeWriteFileTool(session: RuntimeSession, inputPath: string, conten
   }
 
   try {
+    const guardFailure = validateReadBeforeEdit(session, targetPath);
+    if (guardFailure) {
+      return fail("write_file", guardFailure);
+    }
+    const secretFailure = scanWriteSecrets(content);
+    if (secretFailure) {
+      return fail("write_file", secretFailure);
+    }
+    const formattedContent = formatContentForWrite(targetPath, content);
     const current = readExistingFileForDiff(targetPath);
     mkdirSync(path.dirname(targetPath), { recursive: true });
-    writeFileSync(targetPath, content, "utf8");
+    writeFileSync(targetPath, formattedContent, "utf8");
+    markReadGuardCoverage(session, targetPath);
     touchLspFileSync(session, targetPath);
-    return ok("write_file", formatEditToolOutput(session, targetPath, current, content, `wrote ${formatToolPath(session, targetPath)} (${String(content.length)} chars)`));
+    return ok("write_file", formatEditToolOutput(session, targetPath, current, formattedContent, `wrote ${formatToolPath(session, targetPath)} (${String(formattedContent.length)} chars)`));
   } catch (error) {
     return fail("write_file", formatToolError(targetPath, error));
   }
@@ -654,9 +947,18 @@ function executeApplyPatchTool(
     if (!replaceAll && occurrences > 1) {
       return fail("apply_patch", `patch target ambiguous in ${formatToolPath(session, targetPath)}; ${String(occurrences)} matches`);
     }
+    const guardFailure = validateReadBeforeEdit(session, targetPath);
+    if (guardFailure) {
+      return fail("apply_patch", guardFailure);
+    }
 
-    const next = replaceAll ? current.split(find).join(replace) : current.replace(find, replace);
+    const next = formatContentForWrite(targetPath, replaceAll ? current.split(find).join(replace) : current.replace(find, replace));
+    const secretFailure = scanWriteSecrets(next);
+    if (secretFailure) {
+      return fail("apply_patch", secretFailure);
+    }
     writeFileSync(targetPath, next, "utf8");
+    markReadGuardCoverage(session, targetPath);
     touchLspFileSync(session, targetPath);
     return ok("apply_patch", formatEditToolOutput(session, targetPath, current, next, `patched ${formatToolPath(session, targetPath)} (${String(occurrences)} match${occurrences === 1 ? "" : "es"})`));
   } catch (error) {
@@ -712,8 +1014,19 @@ function executeBatchEditTool(session: RuntimeSession, args: Record<string, unkn
   }
 
   for (const [targetPath, next] of nextByPath) {
+    const guardFailure = validateReadBeforeEdit(session, targetPath);
+    if (guardFailure) {
+      return fail("batch_edit", guardFailure);
+    }
+    const formattedNext = formatContentForWrite(targetPath, next);
+    const secretFailure = scanWriteSecrets(formattedNext);
+    if (secretFailure) {
+      return fail("batch_edit", secretFailure);
+    }
     mkdirSync(path.dirname(targetPath), { recursive: true });
-    writeFileSync(targetPath, next, "utf8");
+    writeFileSync(targetPath, formattedNext, "utf8");
+    nextByPath.set(targetPath, formattedNext);
+    markReadGuardCoverage(session, targetPath);
     touchLspFileSync(session, targetPath);
   }
 
@@ -771,6 +1084,64 @@ function readBatchEditCurrent(targetPath: string, currentByPath: Map<string, str
   }
   currentByPath.set(targetPath, current);
   return current;
+}
+
+function markReadGuardCoverage(session: RuntimeSession, targetPath: string): void {
+  try {
+    const stats = statSync(targetPath);
+    if (!stats.isFile()) return;
+    const state = readGuardState.get(session) ?? new Map<string, { mtimeMs: number; size: number }>();
+    state.set(targetPath, { mtimeMs: stats.mtimeMs, size: stats.size });
+    readGuardState.set(session, state);
+  } catch {
+    // Best effort only.
+  }
+}
+
+function validateReadBeforeEdit(session: RuntimeSession, targetPath: string): string | null {
+  let stats;
+  try {
+    stats = statSync(targetPath);
+  } catch {
+    return null;
+  }
+  if (!stats.isFile()) {
+    return null;
+  }
+  const covered = readGuardState.get(session)?.get(targetPath);
+  if (!covered) {
+    return `read guard blocked ${formatToolPath(session, targetPath)}; read file first or create via new path`;
+  }
+  if (covered.mtimeMs !== stats.mtimeMs || covered.size !== stats.size) {
+    return `read guard blocked ${formatToolPath(session, targetPath)}; file changed since last read`;
+  }
+  return null;
+}
+
+function scanWriteSecrets(content: string): string | null {
+  const patterns: Array<[RegExp, string]> = [
+    [/-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----/, "private key"],
+    [/\bAKIA[0-9A-Z]{16}\b/, "AWS access key"],
+    [/\bghp_[A-Za-z0-9_]{30,}\b/, "GitHub token"],
+    [/\bsk-[A-Za-z0-9]{32,}\b/, "OpenAI-style API key"],
+  ];
+  for (const [pattern, label] of patterns) {
+    if (pattern.test(content)) {
+      return `secrets guard blocked write; detected ${label}`;
+    }
+  }
+  return null;
+}
+
+function formatContentForWrite(targetPath: string, content: string): string {
+  if (path.extname(targetPath) !== ".json") {
+    return content;
+  }
+  try {
+    return `${JSON.stringify(JSON.parse(content), null, 2)}\n`;
+  } catch {
+    return content;
+  }
 }
 
 function applyBatchEditOperation(
@@ -1008,6 +1379,20 @@ function executeShellCommandTool(session: RuntimeSession, command: string, args:
     return fail("shell_command", formatShellPolicyBlockReport(report));
   }
 
+  const safeGitBlock = analyzeSafeGitCommand(normalized);
+  if (safeGitBlock) {
+    const report = {
+      command: normalized,
+      pattern: safeGitBlock.pattern.source,
+      reason: safeGitBlock.reason,
+      matchedText: safeGitBlock.matchedText,
+      source: session.activeSkill ? `skill ${session.activeSkill.name}` : "safe-git",
+      advice: safeGitBlock.advice,
+    };
+    session.operationControls.lastShellBlocker = report;
+    return fail("shell_command", formatShellPolicyBlockReport(report));
+  }
+
   try {
     const result = spawnSync("bash", ["-lc", normalized], {
       cwd: session.cwd,
@@ -1195,6 +1580,42 @@ function executeNexsightExecuteTool(session: RuntimeSession, args: Record<string
   }));
 }
 
+function executeNexsightReadTool(session: RuntimeSession, args: Record<string, unknown>): InternalToolResult {
+  const inputPath = asString(args.path, "");
+  if (!inputPath.trim()) {
+    return fail("nexsight_read", "path required");
+  }
+  const targetPath = resolveRepoPath(session, inputPath);
+  const policyFailure = validateReadToolPath(session, targetPath);
+  if (policyFailure) {
+    return fail("nexsight_read", policyFailure);
+  }
+  return toToolResult("nexsight_read", readNexsight(session, {
+    path: targetPath,
+    mode: asOptionalString(args.mode),
+    maxChars: asNumber(args.maxChars, 120_000),
+  }));
+}
+
+function executeNexsightGatherTool(session: RuntimeSession, args: Record<string, unknown>): InternalToolResult {
+  const inputPath = asOptionalString(args.root);
+  if (inputPath) {
+    const targetPath = resolveRepoPath(session, inputPath);
+    const policyFailure = validateReadToolPath(session, targetPath);
+    if (policyFailure) {
+      return fail("nexsight_gather", policyFailure);
+    }
+  }
+  return toToolResult("nexsight_gather", gatherNexsight(session, {
+    root: inputPath,
+    pattern: asOptionalString(args.pattern),
+    query: asOptionalString(args.query),
+    mode: asOptionalString(args.mode),
+    limit: asNumber(args.limit, 24),
+    maxCharsPerFile: asNumber(args.maxCharsPerFile, 40_000),
+  }));
+}
+
 function isNexsightShellCall(args: Record<string, unknown>): boolean {
   const language = normalizeNexsightLanguage(asOptionalString(args.language ?? args.lang));
   return language === "shell" || Boolean(asOptionalString(args.command ?? args.cmd));
@@ -1271,6 +1692,21 @@ async function executeLspDiagnosticsTool(session: RuntimeSession, inputPath: str
     return ok("lsp_diagnostics", result.output);
   } catch (error) {
     return fail("lsp_diagnostics", error instanceof Error ? error.message : String(error));
+  }
+}
+
+async function executeLspNavigationTool(session: RuntimeSession, args: Record<string, unknown>): Promise<InternalToolResult> {
+  try {
+    const result = await summarizeLspNavigation(session, {
+      operation: asString(args.operation, ""),
+      filePath: asOptionalString(args.filePath ?? args.path),
+      line: asNumber(args.line, 0),
+      character: asNumber(args.character ?? args.char, 0),
+      query: asOptionalString(args.query),
+    });
+    return ok("lsp_navigation", result.output);
+  } catch (error) {
+    return fail("lsp_navigation", error instanceof Error ? error.message : String(error));
   }
 }
 

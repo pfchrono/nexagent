@@ -84,9 +84,6 @@ function findTrailingSkillToken(input: string): { start: number; token: string }
     return null;
   }
   const token = match[1] ?? "";
-  if (token.length <= 1) {
-    return null;
-  }
   return {
     start: match.index + match[0].length - token.length,
     token,

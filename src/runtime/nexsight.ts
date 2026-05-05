@@ -28,6 +28,21 @@ export interface NexsightSearchInput {
   limit?: number;
 }
 
+export interface NexsightReadInput {
+  path: string;
+  mode?: string;
+  maxChars?: number;
+}
+
+export interface NexsightGatherInput {
+  root?: string;
+  pattern?: string;
+  query?: string;
+  mode?: string;
+  limit?: number;
+  maxCharsPerFile?: number;
+}
+
 export interface NexsightResult {
   ok: boolean;
   output: string;
@@ -62,6 +77,7 @@ const NEXSIGHT_TIMEOUT_MS = 30_000;
 const NEXSIGHT_MAX_OUTPUT_CHARS = 8_000;
 const NEXSIGHT_PROCESS_MAX_BUFFER_CHARS = 1_000_000;
 const NEXSIGHT_MAX_INDEX_CHARS = 240_000;
+const NEXSIGHT_MAX_READ_CHARS = 120_000;
 const NEXSIGHT_CHUNK_CHARS = 2_400;
 const NEXSIGHT_MAX_CHUNKS = 500;
 const NEXSIGHT_MAX_FILE_CHARS = 120_000;
@@ -125,9 +141,12 @@ export function executeNexsight(session: RuntimeSession, input: NexsightExecuteI
       maxBuffer: NEXSIGHT_PROCESS_MAX_BUFFER_CHARS,
     });
 
-    const transcript = [result.stdout?.trimEnd() ?? "", result.stderr?.trimEnd() ?? ""]
+    const rawTranscript = [result.stdout?.trimEnd() ?? "", result.stderr?.trimEnd() ?? ""]
       .filter((value) => value.length > 0)
       .join("\n");
+    const transcript = language === "shell"
+      ? compressShellTranscript(input.code, result.stdout ?? "", result.stderr ?? "")
+      : rawTranscript;
     const capped = capOutput(transcript || "(no output)");
     const header = [
       `language: ${language}`,
@@ -145,6 +164,68 @@ export function executeNexsight(session: RuntimeSession, input: NexsightExecuteI
   } finally {
     rmSync(tempDir, { recursive: true, force: true });
   }
+}
+
+export function readNexsight(session: RuntimeSession, input: NexsightReadInput): NexsightResult {
+  const targetPath = path.resolve(session.cwd, input.path);
+  const mode = normalizeReadMode(input.mode ?? "auto");
+  const maxChars = Math.max(1_000, Math.min(input.maxChars ?? NEXSIGHT_MAX_READ_CHARS, NEXSIGHT_MAX_READ_CHARS));
+  try {
+    const stats = statSync(targetPath);
+    if (!stats.isFile()) {
+      return fail(`${targetPath} is not a file`);
+    }
+    const content = readFileSync(targetPath, "utf8").slice(0, maxChars);
+    const rel = path.relative(session.cwd, targetPath).split(path.sep).join("/") || path.basename(targetPath);
+    const output = renderReadMode(rel, content, mode);
+    return ok(output);
+  } catch (error) {
+    return fail(error instanceof Error ? error.message : String(error));
+  }
+}
+
+export function gatherNexsight(session: RuntimeSession, input: NexsightGatherInput = {}): NexsightResult {
+  const root = path.resolve(session.cwd, input.root ?? ".");
+  const pattern = input.pattern?.trim() ?? "";
+  const queryTerms = tokenize(input.query ?? "");
+  const mode = normalizeReadMode(input.mode ?? "map");
+  const limit = Math.max(1, Math.min(input.limit ?? 24, 80));
+  const maxCharsPerFile = Math.max(1_000, Math.min(input.maxCharsPerFile ?? 40_000, NEXSIGHT_MAX_FILE_CHARS));
+  const files = collectIndexableFiles(root, pattern, Math.max(limit * 4, limit));
+  const selected: Array<{ rel: string; output: string }> = [];
+
+  for (const file of files) {
+    if (selected.length >= limit) break;
+    try {
+      const content = readFileSync(file, "utf8").slice(0, maxCharsPerFile);
+      const rel = path.relative(session.cwd, file).split(path.sep).join("/") || path.basename(file);
+      if (queryTerms.length > 0 && scoreText(`${rel}\n${content}`, queryTerms) <= 0) {
+        continue;
+      }
+      selected.push({ rel, output: renderReadMode(rel, content, mode) });
+    } catch {
+      // Ignore unreadable candidates; gather is best-effort.
+    }
+  }
+
+  if (selected.length === 0) {
+    return ok("nexsight gather\n(no matching files)");
+  }
+
+  const body = selected.map((entry, index) => [
+    `## ${String(index + 1)}. ${entry.rel}`,
+    entry.output.split("\n").slice(4).join("\n").trim(),
+  ].join("\n")).join("\n\n");
+  return ok([
+    "nexsight gather",
+    `root: ${path.relative(session.cwd, root).split(path.sep).join("/") || "."}`,
+    `pattern: ${pattern || "(any text)"}`,
+    `query: ${input.query?.trim() || "(none)"}`,
+    `mode: ${mode}`,
+    `files: ${String(selected.length)}/${String(files.length)}`,
+    "",
+    capOutput(body),
+  ].join("\n"));
 }
 
 export function resolveNexsightRuntime(
@@ -365,6 +446,146 @@ function formatSearchResults(results: Array<{ chunk: NexsightChunk; score: numbe
   ].join("\n")).join("\n\n");
 }
 
+function renderReadMode(source: string, content: string, mode: string): string {
+  const effectiveMode = mode === "auto" ? inferBestReadMode(source, content) : mode;
+  const body = effectiveMode === "full"
+    ? capOutput(content.trimEnd())
+    : effectiveMode.startsWith("lines:")
+      ? renderLineRange(content, effectiveMode)
+      : effectiveMode === "signatures"
+        ? renderSignatures(content)
+        : effectiveMode === "outline"
+          ? renderOutline(content)
+          : renderMap(content);
+  const originalTokens = estimateNexsightTokens(content);
+  const compressedTokens = estimateNexsightTokens(body);
+  return [
+    `nexsight read`,
+    `source: ${source}`,
+    `mode: ${effectiveMode}`,
+    `tokens: ${String(compressedTokens)}/${String(originalTokens)}`,
+    "",
+    body || "(no readable content)",
+  ].join("\n");
+}
+
+function normalizeReadMode(mode: string): string {
+  const normalized = mode.trim().toLowerCase();
+  if (/^lines:\d+-\d+$/.test(normalized)) return normalized;
+  if (normalized === "sigs" || normalized === "signature") return "signatures";
+  if (normalized === "map" || normalized === "full" || normalized === "signatures" || normalized === "outline" || normalized === "auto") {
+    return normalized;
+  }
+  if (normalized === "reference" || normalized === "task" || normalized === "aggressive" || normalized === "entropy" || normalized === "diff") {
+    return "map";
+  }
+  return "auto";
+}
+
+function inferBestReadMode(source: string, content: string): string {
+  const ext = path.extname(source).toLowerCase();
+  if (content.length <= 6_000) return "full";
+  if (ext === ".md" || ext === ".txt") return "outline";
+  return "map";
+}
+
+function renderLineRange(content: string, mode: string): string {
+  const match = /^lines:(\d+)-(\d+)$/.exec(mode);
+  if (!match) return "";
+  const start = Math.max(1, Number.parseInt(match[1] ?? "1", 10));
+  const end = Math.max(start, Number.parseInt(match[2] ?? String(start), 10));
+  return content.split(/\r?\n/).slice(start - 1, end).map((line, index) => `${String(start + index)}: ${line}`).join("\n");
+}
+
+function renderMap(content: string): string {
+  const sections = [
+    ["imports", extractMatchingLines(content, /^\s*(import|export\s+.*\s+from|const\s+\w+\s*=\s*require\()/, 40)],
+    ["signatures", extractSignatureLines(content, 80)],
+    ["headings", extractMatchingLines(content, /^\s*#{1,6}\s+\S/, 40)],
+  ].filter(([, lines]) => lines.length > 0);
+  return sections.map(([title, lines]) => [`## ${title}`, ...(lines as string[])].join("\n")).join("\n\n");
+}
+
+function renderSignatures(content: string): string {
+  return extractSignatureLines(content, 160).join("\n");
+}
+
+function renderOutline(content: string): string {
+  const headings = extractMatchingLines(content, /^\s*#{1,6}\s+\S/, 160);
+  if (headings.length > 0) return headings.join("\n");
+  return content.split(/\r?\n/).map((line, index) => ({ line: line.trim(), number: index + 1 }))
+    .filter((entry) => entry.line.length > 0)
+    .slice(0, 80)
+    .map((entry) => `${String(entry.number)}: ${entry.line.slice(0, 160)}`)
+    .join("\n");
+}
+
+function extractMatchingLines(content: string, pattern: RegExp, limit: number): string[] {
+  return content.split(/\r?\n/).map((line, index) => ({ line, index }))
+    .filter((entry) => pattern.test(entry.line))
+    .slice(0, limit)
+    .map((entry) => `${String(entry.index + 1)}: ${entry.line.trim()}`);
+}
+
+function extractSignatureLines(content: string, limit: number): string[] {
+  const signaturePattern = /^\s*(export\s+)?(async\s+)?(function|class|interface|type|enum|const|let|var)\s+[A-Za-z0-9_$]+|^\s*(public|private|protected)?\s*(async\s+)?[A-Za-z0-9_$]+\s*\([^)]*\)\s*[:{]/;
+  return extractMatchingLines(content, signaturePattern, limit);
+}
+
+function compressShellTranscript(command: string, stdout: string, stderr: string): string {
+  const combined = [stdout.trimEnd(), stderr.trimEnd()].filter(Boolean).join("\n");
+  const lines = combined.split(/\r?\n/);
+  const compact = commandLooksLikeTest(command)
+    ? compressTestLikeOutput(lines)
+    : commandLooksLikeGit(command)
+      ? compressGitLikeOutput(lines)
+      : compressGenericOutput(lines);
+  const originalTokens = estimateNexsightTokens(combined);
+  const compressedTokens = estimateNexsightTokens(compact);
+  if (combined.length <= NEXSIGHT_MAX_OUTPUT_CHARS && compressedTokens >= originalTokens) {
+    return combined;
+  }
+  return `${compact}\n[nexsight lean: ${String(compressedTokens)}/${String(originalTokens)} tok]`;
+}
+
+function commandLooksLikeTest(command: string): boolean {
+  return /\b(test|pytest|vitest|jest|mocha|cargo\s+test|bun\s+test|npm\s+test)\b/i.test(command);
+}
+
+function commandLooksLikeGit(command: string): boolean {
+  return /^\s*git\b/i.test(command);
+}
+
+function compressTestLikeOutput(lines: string[]): string {
+  const keep = lines.filter((line) =>
+    /\b(fail|failed|error|panic|exception|expected|actual|not ok|pass|passed|tests?|Ran \d+|Exit|FAIL|PASS)\b/.test(line)
+  );
+  return compressLineSet(keep.length > 0 ? keep : lines, 120);
+}
+
+function compressGitLikeOutput(lines: string[]): string {
+  const keep = lines.filter((line) =>
+    /^(\s*(M|A|D|R|\?\?)\s+|commit\s|Author:|Date:|diff --git|@@|[+-]{3}\s|On branch|Your branch|nothing to commit|Changes|Untracked)/.test(line)
+  );
+  return compressLineSet(keep.length > 0 ? keep : lines, 120);
+}
+
+function compressGenericOutput(lines: string[]): string {
+  return compressLineSet(lines, 160);
+}
+
+function compressLineSet(lines: string[], limit: number): string {
+  const cleaned = lines.map((line) => line.replace(/\x1b\[[0-9;]*m/g, "").trimEnd()).filter((line) => line.trim().length > 0);
+  if (cleaned.length <= limit) return cleaned.join("\n");
+  const head = cleaned.slice(0, Math.floor(limit / 2));
+  const tail = cleaned.slice(-Math.ceil(limit / 2));
+  return [...head, `... omitted ${String(cleaned.length - limit)} lines ...`, ...tail].join("\n");
+}
+
+function estimateNexsightTokens(value: string): number {
+  return Math.max(0, Math.ceil(value.length / 4));
+}
+
 function chunkContent(source: string, content: string): NexsightChunk[] {
   const chunks: NexsightChunk[] = [];
   let index = 0;
@@ -402,9 +623,15 @@ function tokenize(value: string): string[] {
 
 function scoreChunk(chunk: NexsightChunk, terms: string[]): number {
   const haystack = `${chunk.source}\n${chunk.title}\n${chunk.content}`.toLowerCase();
+  return scoreText(haystack, terms, chunk.title.toLowerCase());
+}
+
+function scoreText(haystackInput: string, terms: string[], titleInput = ""): number {
+  const haystack = haystackInput.toLowerCase();
+  const title = titleInput.toLowerCase();
   return terms.reduce((score, term) => {
     const matches = haystack.split(term).length - 1;
-    return score + matches * (chunk.title.toLowerCase().includes(term) ? 2 : 1);
+    return score + matches * (title.includes(term) ? 2 : 1);
   }, 0);
 }
 

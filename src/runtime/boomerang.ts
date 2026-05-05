@@ -1,5 +1,6 @@
 import type { RuntimeConversationTurn, RuntimeEvent, RuntimeSession } from "./session.js";
 import { addArchivistMemorySync } from "./archivist.js";
+import { formatTodoPromptSummary } from "./todos.js";
 
 const BOOMERANG_INSTRUCTIONS = [
   "BOOMERANG MODE ACTIVE",
@@ -45,7 +46,11 @@ export function completeBoomerang(session: RuntimeSession, finalOutput: string):
 
   const events = session.events.slice(state.startEventIndex);
   const turns = session.conversation.slice(state.startConversationIndex);
-  const summary = summarizeBoomerangWork(state.task, events, turns, finalOutput);
+  const todoSummary = formatTodoPromptSummary(session.todos);
+  const summary = [
+    summarizeBoomerangWork(state.task, events, turns, finalOutput),
+    todoSummary ? `\nTodos:\n${todoSummary}` : null,
+  ].filter((value): value is string => Boolean(value)).join("\n");
   session.conversation = [
     ...session.conversation.slice(0, state.startConversationIndex),
     { role: "user", content: `/boomerang ${state.task}`, tokens: estimateBoomerangTokens(state.task) },
@@ -76,7 +81,7 @@ function summarizeBoomerangWork(
   const reads = collectToolPaths(completedTools, BOOMERANG_TOOL_READ_NAMES);
   const writes = collectToolPaths(completedTools, BOOMERANG_TOOL_WRITE_NAMES);
   const commands = completedTools.filter((event) => /\btool shell_command\b/i.test(event.summary));
-  const failures = failedTools.map((event) => formatToolFailure(event)).slice(0, 5);
+  const failures = summarizeToolFailures(failedTools);
   const assistantFinal = firstUsefulLine(finalOutput) ?? firstUsefulLine([...turns].reverse().find((turn) => turn.role === "assistant")?.content ?? "");
 
   return [
@@ -137,10 +142,54 @@ function parseToolArgs(detail: string): Record<string, unknown> {
   }
 }
 
+function summarizeToolFailures(events: RuntimeEvent[]): string[] {
+  const counts = new Map<string, number>();
+  for (const event of events) {
+    const failure = formatToolFailure(event);
+    counts.set(failure, (counts.get(failure) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([failure, count]) => count > 1 ? `${failure} (${String(count)}x)` : failure)
+    .slice(0, 5);
+}
+
 function formatToolFailure(event: RuntimeEvent): string {
   const tool = parseToolName(event.summary) ?? "tool";
   const detail = (event.detail ?? event.summary).replace(/\s+/g, " ").trim();
-  return `${tool}: ${detail.length > 140 ? `${detail.slice(0, 137)}...` : detail}`;
+  if (/policy blocked|protected path|shell policy blocked/i.test(detail)) {
+    return `${tool}: blocked by shell policy`;
+  }
+  const output = detail.match(/\boutput=(.+)$/i)?.[1]?.trim();
+  if (output) {
+    return `${tool}: ${truncateBoomerangFailure(cleanFailureOutput(output), 160)}`;
+  }
+  return `${tool}: ${truncateBoomerangFailure(stripToolFailureMetadata(detail), 160)}`;
+}
+
+function stripToolFailureMetadata(value: string): string {
+  const stripped = value
+    .replace(/\b(?:read-only|guarded|dangerous);?\s*/gi, "")
+    .replace(/\bduration=[^;]+;?\s*/gi, "")
+    .replace(/\bin~\d+;?\s*/gi, "")
+    .replace(/\bout~\d+;?\s*/gi, "")
+    .replace(/\bargs=\{.*?\};?\s*/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return stripped.length > 0 ? stripped : "failed";
+}
+
+function cleanFailureOutput(value: string): string {
+  const cleaned = value
+    .replace(/\\n/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/^shell exit\s+\d+\s+---\s*/i, "shell exit: ")
+    .replace(/\s+---\s+/g, " ")
+    .trim();
+  return cleaned.length > 0 ? cleaned : "failed";
+}
+
+function truncateBoomerangFailure(value: string, maxChars: number): string {
+  return value.length <= maxChars ? value : `${value.slice(0, Math.max(0, maxChars - 3))}...`;
 }
 
 function firstUsefulLine(value: string): string | null {

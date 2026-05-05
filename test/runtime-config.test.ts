@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { createDefaultProviderRegistry } from "../src/provider/registry.js";
-import { bootstrapRuntime, createRuntimeState } from "../src/runtime/bootstrap.js";
+import { createRuntimeState } from "../src/runtime/bootstrap.js";
 import { loadHarnessConfig } from "../src/runtime/config.js";
 import { loadMcpRegistrySummary, shutdownMcpRegistry } from "../src/runtime/mcp.js";
 import { loadPersistedRuntimeState, savePersistedRuntimeState } from "../src/runtime/persistence.js";
@@ -94,12 +94,12 @@ const EXPECTED_TOOL_AVAILABILITY = [
   "Path rule: absolute paths and ~/ paths are supported; if a requested path is under a readable root, inspect it with tools instead of refusing because it is outside cwd.",
   "Enabled MCP servers: context7",
   "MCP guidance: if an enabled MCP server/tool is relevant, call it through the available tool interface instead of saying it is unavailable or asking the user to run it.",
-  "Tool routing matrix: broad repo analysis -> nexsight_execute/nexsight_batch/nexsight_search; exact small file -> read_file; file edit -> apply_patch/write_file/batch_edit; git state -> git_status/git_diff; verification/build/test/local binary -> shell_command; current docs/URLs -> web_search/web_fetch or MCP docs tools; persistent facts -> archivist_save/archivist_checkpoint.",
+  "Tool routing matrix: broad repo analysis -> nexsight_gather/nexsight_execute/nexsight_read/nexsight_batch/nexsight_search; exact small file -> read_file or nexsight_read full; file edit -> apply_patch/write_file/batch_edit; git state -> git_status/git_diff; verification/build/test/local binary -> shell_command; current docs/URLs -> web_search/web_fetch or MCP docs tools; persistent facts -> archivist_save/archivist_checkpoint.",
   "Tool loop discipline: after each tool result, decide whether evidence is enough. If enough, answer. If not enough, call the smallest next tool. Do not narrate future tool use instead of calling the tool.",
   "Tool truth rule: report what the tool returned, not what you expected. If output is an envelope, parse the useful payload. If output is missing, say missing and run a better targeted tool.",
   "GSD rule: GSD agents are file-backed definitions, not shell commands. Validate GSD with gsd-new-workspace --raw or gsd-sdk init new-workspace --raw and inspect agents_installed/missing_agents; do not use command -v gsd-planner style checks.",
-  "Tool decision rule: inspect with read_file, list_dir, search_content, search_files, nexsight_batch, or nexsight_search before editing; use nexsight_execute for counts/parsing/filtering so raw data stays out of chat; write with write_file/apply_patch for small edits or batch_edit for multi-file/multi-anchor edits that must validate insertion points before writing; verify with git_diff, git_status, shell_command, nexsight_execute, or focused tests.",
-  "Nexsight rule: for broad repo/codebase/directory inspection, counting, filtering, summarizing, semantic search, or any output that could be large, prefer Nexsight first: use nexsight_execute to compute concise results, nexsight_batch/nexsight_index to store context, and nexsight_search to retrieve relevant excerpts. Use direct read/list/search only for known small files/paths, exact content requests, or narrow follow-ups after Nexsight routes the work.",
+  "Tool decision rule: inspect with read_file, list_dir, search_content, search_files, nexsight_gather, nexsight_read, nexsight_batch, or nexsight_search before editing; use nexsight_execute for counts/parsing/filtering so raw data stays out of chat; write with write_file/apply_patch for small edits or batch_edit for multi-file/multi-anchor edits that must validate insertion points before writing; verify with git_diff, git_status, shell_command, nexsight_execute, or focused tests.",
+  "Nexsight rule: for broad repo/codebase/directory inspection, audits, phase docs, or multi-file evidence collection, prefer one nexsight_gather call over many small reads. Use nexsight_execute only when custom parsing/counting is needed, nexsight_read map/signatures/lines for one file, nexsight_batch/nexsight_index to store context, and nexsight_search to retrieve indexed excerpts.",
   "Nexsight execute rule: nexsight_execute needs executable code or command, plus a short reason when useful. Do not pass only a natural-language task. It supports javascript, python, and shell; Python-looking code is inferred as python when language is omitted.",
   "Web/tool reference rule: use web_fetch/web_search or relevant MCP tools for current external facts, docs, URLs, and references; do not invent current facts from memory.",
   "Tool execution rule: when a runnable command or file edit is needed, emit the tool call directly; do not output command blocks for the user to execute.",
@@ -107,7 +107,7 @@ const EXPECTED_TOOL_AVAILABILITY = [
   "Missing tool rule: if a command/tool is missing, search package scripts, node_modules/.bin, local bins, available MCP/tool registries, and official web docs when needed; install project-local dependencies only when safe and scoped; ask user only for root/admin installs.",
   "Internal tool protocol: when tool use is required, respond with only one XML block:",
   '<nexagent_tool_call>{"name":"read_file","arguments":{"path":"src/cli.ts"}}</nexagent_tool_call>',
-  "Available internal tools: read_file, write_file, apply_patch, batch_edit, preview_patch, list_dir, search_content, search_files, web_fetch, web_search, git_status, git_diff, shell_command, nexsight_execute, nexsight_index, nexsight_batch, nexsight_search, archivist_save, archivist_checkpoint, mcp_list_tools, mcp_call",
+  "Available internal tools: read_file, write_file, apply_patch, batch_edit, preview_patch, list_dir, search_content, search_files, web_fetch, web_search, git_status, git_diff, shell_command, nexsight_execute, nexsight_read, nexsight_gather, nexsight_index, nexsight_batch, nexsight_search, archivist_save, archivist_checkpoint, mcp_list_tools, mcp_call",
   "Use tools for repo inspection instead of narrating intended actions.",
 ];
 
@@ -178,7 +178,7 @@ test("loadHarnessConfig discovers repo-local instruction sources", async () => {
   }
 });
 
-test("loadHarnessConfig and bootstrapRuntime normalize invalid cwd inputs", async () => {
+test("loadHarnessConfig normalizes invalid cwd inputs", async () => {
   const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-invalid-cwd-"));
   const previousCwd = process.cwd();
 
@@ -187,9 +187,6 @@ test("loadHarnessConfig and bootstrapRuntime normalize invalid cwd inputs", asyn
 
     const config = await loadHarnessConfig({ path: cwd });
     assert.equal(config.cwd, cwd);
-
-    const runtime = await bootstrapRuntime({ path: cwd });
-    assert.equal(runtime.config.cwd, cwd);
   } finally {
     process.chdir(previousCwd);
     await rm(cwd, { recursive: true, force: true });
@@ -895,16 +892,16 @@ test("createRuntimeState exposes discovered instruction sources", () => {
       instructionSources,
       promptV2Summary: {
         assembly: "v2",
-        count: 63,
+        count: 68,
         stableSections: "identity, execution_contract, tool_routing, editing_safety, provider_guidance",
         dynamicSections: "repo_context, runtime_state",
         dynamicBoundary: "__NEXAGENT_PROMPT_DYNAMIC_BOUNDARY__",
         identity:
           "You are nexagent, a local terminal-first software engineering agent. | Primary job: complete repo-aware engineering work with tools, evidence, and verification; do not merely describe future work. | Repo-local instructions, skills, modes, and donor references are context overlays; direct user intent and core execution contract still control behavior.",
         executionContract:
-          "Actionable request means act in this turn: inspect, edit, run, verify, or report a real blocker. | Operate loop: understand goal, inspect state, choose best tool, execute, observe, recover from failures, verify, then answer with evidence. | At turn start, the harness may display a short Attempting line. Treat it as orientation; do not repeat it unless useful. | Default to action for coding, debugging, testing, docs, repo inspection, and verification. Discuss only when user explicitly asks to brainstorm, compare, pla... | Do not end with a plan, promise, apology, self-correction, or ask-for-approval loop when tools can make progress. | Continue until task is done, verified, or genuinely blocked by missing access, approval gate, or unavailable external dependency. | When user says ok, yes, do that, same, continue, proceed, go ahead, start, finish, test, debug, implement, verify, or next, execute the most recent actionabl... | If user approves a sequence or asks for a no-hand-holding run, treat that as authorization to execute the sequence without asking for another target. | Do not ask user to say proceed, confirm, or continue after they gave a concrete task; execute or report the real blocker. | If user names a flow or goal without an exact file/script/test target, inspect repo state, choose the nearest representative target, and state the choice wit... | A missing user-selected target is not a blocker when repo evidence can identify scripts, tests, docs, or files to exercise. | Failed tool result means diagnose and vary path, query, command, or tool before stopping. | If a needed tool is unavailable, search repo-local scripts, node_modules/.bin, local user bins, MCP/tool registries, or current docs; install project-local d... | Final answer needs completed current-turn evidence or a named blocker, but keep it human-readable and compact. | Default final style: one short sentence for what changed, one short verification line if checks ran, one blocker line only if blocked. | Avoid long observed/verified/completed-evidence ledgers in chat unless user explicitly asks for audit detail or the artifact itself requires it. | Never claim file, test, tool, GSD, MCP, Nexsight, or runtime state without current-turn evidence.",
+          "Actionable request means act in this turn: inspect, edit, run, verify, or report a real blocker. | Operate loop: understand goal, inspect state, choose best tool, execute, observe, recover from failures, verify, then answer with evidence. | At turn start, the harness may display a short Attempting line. Treat it as orientation; do not repeat it unless useful. | Default to action for coding, debugging, testing, docs, repo inspection, and verification. Discuss only when user explicitly asks to brainstorm, compare, pla... | Do not end with a plan, promise, apology, self-correction, or ask-for-approval loop when tools can make progress. | Continue until task is done, verified, or genuinely blocked by missing access, approval gate, or unavailable external dependency. | When user says ok, yes, do that, same, continue, proceed, go ahead, start, finish, test, debug, implement, verify, or next, execute the most recent actionabl... | If user approves a sequence or asks for a no-hand-holding run, treat that as authorization to execute the sequence without asking for another target. | Do not ask user to say proceed, confirm, or continue after they gave a concrete task; execute or report the real blocker. | If user names a flow or goal without an exact file/script/test target, inspect repo state, choose the nearest representative target, and state the choice wit... | A missing user-selected target is not a blocker when repo evidence can identify scripts, tests, docs, or files to exercise. | Failed tool result means diagnose and vary path, query, command, or tool before stopping. | Failure recovery ladder: parse exact error, classify blocker, try one smaller/safe equivalent, try one alternate tool/path, preserve useful state in todo/Arc... | Hard-stop format when blocked: state exact blocker, evidence already gathered, recovery attempts tried, why no further safe action can continue, and what use... | If a needed tool is unavailable, search repo-local scripts, node_modules/.bin, local user bins, MCP/tool registries, or current docs; install project-local d... | Multi-stage work rule: for GSD workflows, phases, milestones, next-slice work, full-loop requests, or any goal with three or more meaningful steps, use the t... | Final answer needs completed current-turn evidence or a named blocker, but keep it human-readable and compact. | Default final style: one short sentence for what changed, one short verification line if checks ran, one blocker line only if blocked. | Avoid long observed/verified/completed-evidence ledgers in chat unless user explicitly asks for audit detail or the artifact itself requires it. | Never claim file, test, tool, GSD, MCP, Nexsight, or runtime state without current-turn evidence.",
         toolRouting:
-          "Use dedicated internal tools before generic shell when available. | Broad repo map/count/parse/compare/summarize -> nexsight_execute, nexsight_batch, nexsight_index, nexsight_search. | Use Nexsight like context-mode: run bounded code that prints distilled findings, index/search when useful, then answer from processed stdout/excerpts instead... | Nexsight execute rule: pass executable code or command plus reason when useful; do not pass only a natural-language task. | Nexsight result handling: parse stdout/stderr/envelopes, extract useful payload, cite source labels or paths, and run a narrower follow-up query when output ... | Exact small file read for editing or exact content -> read_file. | Exact symbol/text search -> search_content, search_files, or nexsight_search. | Precise edits -> apply_patch after reading target context. | Generated whole file -> write_file. | Multi-file mechanical edit -> batch_edit or Nexsight-assisted patch with validated insertion points. | Tests/build/git/local binaries -> shell_command. | Current web docs/URLs/facts -> web_fetch/web_search or relevant MCP docs tool. | Durable user/project fact -> archivist_save or archivist_checkpoint. | If stronger task-specific tool exists, use it before generic shell/listing. | If tool schema mismatch happens, correct call shape immediately and retry once.",
+          "Use dedicated internal tools before generic shell when available. | Broad repo map/audit/phase-doc evidence -> nexsight_gather first; broad count/parse/compare/summarize -> nexsight_execute; store/retrieve -> nexsight_batch, ... | Use Nexsight like context-mode: batch gather before repeated reads, run bounded code that prints distilled findings, index/search when useful, then answer fr... | Nexsight batching rule: if you are about to call nexsight_read or nexsight_execute more than twice for related files, stop and use one nexsight_gather or one... | Nexsight execute rule: pass executable code or command plus reason when useful; do not pass only a natural-language task. | Nexsight result handling: parse stdout/stderr/envelopes, extract useful payload, cite source labels or paths, and run a narrower follow-up query when output ... | GSD full-loop routing: todo for visible stages, Nexsight gather for phase/artifact evidence, direct read_file only for exact edit context, apply_patch/batch_... | Exact small file read for editing or exact content -> read_file. | Exact symbol/text search -> search_content, search_files, or nexsight_search. | Precise edits -> apply_patch after reading target context. | Generated whole file -> write_file. | Multi-file mechanical edit -> batch_edit or Nexsight-assisted patch with validated insertion points. | Tests/build/git/local binaries -> shell_command. | Current web docs/URLs/facts -> web_fetch/web_search or relevant MCP docs tool. | Durable user/project fact -> archivist_save or archivist_checkpoint. | If stronger task-specific tool exists, use it before generic shell/listing. | If tool schema mismatch happens, correct call shape immediately and retry once.",
         editingSafety:
           "Read relevant code before editing behavior. | Keep changes scoped to requested outcome. | Do not revert user changes unless explicitly requested. | Prefer existing repo patterns over new abstractions. | Use structured parsers or repo helpers over ad hoc text manipulation when available. | Run focused verification when available before reporting completion. | If verification fails, report actual failing command/output and either fix it or name the blocker. | When edit tool output already rendered an Edited-file block or bounded diff preview, final answer should not repeat the full diff; summarize changed paths, l...",
         providerGuidance:
@@ -943,9 +940,113 @@ test("createRuntimeState exposes discovered instruction sources", () => {
       },
       ui: {
         logoMode: "full",
+        sessionEmoji: undefined,
+        sessionColorIndex: undefined,
+        notifyEnabled: false,
+        notifyThresholdMs: 2000,
       },
+      btw: {
+        visible: false,
+        mode: "contextual",
+        thread: [],
+        pending: null,
+        nextId: 1,
+        modelOverride: null,
+        thinkingOverride: null,
+        updatedAt: null,
+      },
+      todos: {
+        tasks: [],
+        nextId: 1,
+        updatedAt: null,
+      },
+      toolMemory: {
+        entries: [],
+        nextId: 1,
+        updatedAt: null,
+      },
+      subagents: {
+        agents: [],
+        types: [
+          {
+            name: "Explore",
+            description: "Fast read-only codebase exploration",
+            prompt: "Explore codebase state. Prefer read/search/list commands. Do not edit files.",
+            tools: "read, search, shell",
+            source: "default",
+          },
+          {
+            name: "general-purpose",
+            description: "General-purpose autonomous agent",
+            prompt: "Use the same engineering standards as the parent session. Inspect, edit, test, and report evidence.",
+            tools: "all",
+            source: "default",
+          },
+          {
+            name: "Plan",
+            description: "Implementation planning architect",
+            prompt: "Create an implementation plan grounded in repo evidence. Do not edit files.",
+            tools: "read, search, shell",
+            source: "default",
+          },
+        ].sort((a, b) => a.name.localeCompare(b.name)),
+        nextId: 1,
+        updatedAt: null,
+      },
+      goal: {
+        goal: null,
+        statusBarEnabled: true,
+        activeTurnStartedAt: null,
+        updatedAt: null,
+      },
+      extensions: undefined,
     },
   );
+});
+
+test("createRuntimeState defaults missing provider routing for legacy bootstrap callers", () => {
+  const state = createRuntimeState({
+    config: {
+      cwd: "/repo",
+      productName: "nexagent",
+      provider: "codex",
+      prompt: { assembly: "v2" },
+      mcpConfigPath: "/repo/.mcp.json",
+      enabledMcpServers: [],
+      imports: { claude: null },
+      instructionSources: [],
+      repo: {
+        root: null,
+        name: "repo",
+        vcs: "none",
+        branch: null,
+        freshness: {
+          status: "no-repo",
+          tracking: null,
+          ahead: null,
+          behind: null,
+          dirty: false,
+          needsPull: false,
+          checkedAt: null,
+        },
+      },
+      toolPolicy: {
+        mode: "repo-local-guarded",
+        allowedRoots: ["/repo"],
+        protectedRoots: [],
+        readRoots: ["/repo"],
+        shell: "limited",
+        lastBlock: null,
+      },
+      archivist: { enabled: false, storagePath: null, maxEntries: 0 },
+    },
+    mcp: { serverNames: [], servers: {}, tools: [], statuses: [], clients: new Map() },
+    auth: { available: true, loggedIn: true, status: "ok", source: "codex" },
+  });
+
+  assert.equal(state.providerRouting.fallback.policy, "require-open-spec");
+  assert.equal(state.providerRouting.modelSelection.activeProvider, "codex");
+  assert.deepEqual(state.providerRouting.modelSelection.configuredModels, {});
 });
 
 test("syncRuntimeSession preserves selected provider when reload still supports it", () => {
@@ -1592,6 +1693,54 @@ test("persisted runtime state stores provider and transport mode", async () => {
 
     applyProviderSelection(session, "openai");
     applyTransportMode(session, "http-responses");
+    session.todos.tasks.push({
+      id: "todo-1",
+      subject: "Persist task",
+      activeForm: "Persisting task",
+      status: "in_progress",
+      blockedBy: [],
+      createdAt: "2026-05-04T00:00:00.000Z",
+      updatedAt: "2026-05-04T00:00:00.000Z",
+    });
+    session.todos.nextId = 2;
+    session.todos.updatedAt = "2026-05-04T00:00:00.000Z";
+    session.btw.thread.push({
+      id: "btw-1",
+      mode: "contextual",
+      question: "Side?",
+      answer: "Answer.",
+      saved: false,
+      createdAt: "2026-05-04T00:00:00.000Z",
+      updatedAt: "2026-05-04T00:00:00.000Z",
+    });
+    session.btw.nextId = 2;
+    session.toolMemory.entries.push({
+      id: "toolmem-1",
+      tool: "read_file",
+      ok: true,
+      args: "{\"path\":\"README.md\"}",
+      summary: "README mentions usage",
+      createdAt: "2026-05-04T00:00:00.000Z",
+    });
+    session.toolMemory.nextId = 2;
+    session.subagents.agents.push({
+      id: "agent-1",
+      type: "Explore",
+      description: "Inspect files",
+      prompt: "Inspect files",
+      status: "completed",
+      background: false,
+      inheritContext: false,
+      result: "Found files.",
+      error: null,
+      steerMessages: [],
+      createdAt: "2026-05-04T00:00:00.000Z",
+      startedAt: "2026-05-04T00:00:00.000Z",
+      completedAt: "2026-05-04T00:00:01.000Z",
+      inputTokens: 10,
+      outputTokens: 5,
+    });
+    session.subagents.nextId = 2;
     savePersistedRuntimeState(session);
 
     const persisted = await loadPersistedRuntimeState(cwd);
@@ -1599,6 +1748,15 @@ test("persisted runtime state stores provider and transport mode", async () => {
     assert.equal(persisted?.transportMode, "http-responses");
     assert.equal(persisted?.operationControls?.requireApprovalForGuarded, false);
     assert.deepEqual(persisted?.auth, AUTH_STATE);
+    assert.equal(persisted?.todos?.tasks[0]?.subject, "Persist task");
+    assert.equal(persisted?.todos?.tasks[0]?.status, "in_progress");
+    assert.equal(persisted?.todos?.nextId, 2);
+    assert.equal(persisted?.btw?.thread[0]?.question, "Side?");
+    assert.equal(persisted?.btw?.nextId, 2);
+    assert.equal(persisted?.toolMemory?.entries[0]?.summary, "README mentions usage");
+    assert.equal(persisted?.toolMemory?.nextId, 2);
+    assert.equal(persisted?.subagents?.agents[0]?.id, "agent-1");
+    assert.equal(persisted?.subagents?.nextId, 2);
     assert.match(persisted?.savedAt ?? "", /^\d{4}-\d{2}-\d{2}T/);
 
     const raw = await readFile(path.join(cwd, ".nexagent", "session.json"), "utf8");

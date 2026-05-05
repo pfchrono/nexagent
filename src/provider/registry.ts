@@ -47,7 +47,7 @@ export interface ProviderConfigInput {
 
 const DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex";
 const DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
-const SPARK_DISABLED_REASON = "needs websocket/realtime Codex adapter";
+const CODEX_SPARK_MODEL = "gpt-5.3-codex-spark";
 
 export function createDefaultProviderRegistry(): ProviderRegistry {
   return {
@@ -386,10 +386,12 @@ function getModelDisabledReason(
   if (provider.disabledReason) {
     return provider.disabledReason;
   }
-  if (model.id === "gpt-5.3-codex-spark") {
-    return SPARK_DISABLED_REASON;
-  }
-  if (mode !== "cli-exec" && !model.supportedInApi) {
+  const usesCodexChatGptRoute =
+    model.id === CODEX_SPARK_MODEL &&
+    provider.id === "codex" &&
+    mode === "codex-http" &&
+    provider.adapter === "codex-chatgpt-http";
+  if (mode !== "cli-exec" && !model.supportedInApi && !usesCodexChatGptRoute) {
     return "not available on this API transport";
   }
   return undefined;

@@ -9,17 +9,36 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { executeProviderRequest, type ImageAttachment } from "./provider.js";
 import { launchCodexLogin, probeCodexAuthStateSync } from "./runtime/auth.js";
-import { checkpointArchivistSession, maintainArchivistMemorySync, saveArchivistMemory } from "./runtime/archivist.js";
+import { addArchivistMemorySync, maintainArchivistMemorySync, saveArchivistMemory } from "./runtime/archivist.js";
 import { bootstrapRuntime } from "./runtime/bootstrap.js";
 import { beginBoomerang, buildBoomerangPrompt, cancelBoomerang, completeBoomerang } from "./runtime/boomerang.js";
+import { beginBtwTurn, buildBtwInjectPrompt, cancelBtwTurn, clearBtwThread, completeBtwTurn, formatBtwStatus, type RuntimeBtwMode } from "./runtime/btw.js";
+import { formatSubagentsStatus } from "./runtime/subagents.js";
 import { initializeRuntimeDebug, writeDebugLog, type RuntimeDebugOptions } from "./runtime/debug.js";
 import { buildPromptV2, summarizePromptV2 } from "./runtime/prompt-v2.js";
 import { formatTurnStartIntent } from "./runtime/turn-intent.js";
 import { checkpointNexsightSession, getNexsightStats, purgeNexsight, searchNexsight } from "./runtime/nexsight.js";
-import { formatLspSetup, formatLspStatus, getLspStatus, scanLspWorkspaceSync, summarizeLspDiagnosticsSync, summarizeLspSymbolsSync } from "./runtime/lsp.js";
+import { emitTerminalNotification, formatSessionColorSwatch, getSessionColorCode, getSessionColorIndex, getSessionEmoji, notifyThresholdMs, SESSION_COLORS, SESSION_EMOJIS } from "./runtime/pi-compat.js";
+import { createRuntimeExtensionArgs, createRuntimeExtensionContext, findRuntimeExtensionCommand, formatRuntimeExtensionsStatus } from "./runtime/extensions.js";
+import { formatLspHealth, formatLspSetup, formatLspStatus, getLspStatus, scanLspWorkspaceSync, summarizeLspDiagnosticsSync, summarizeLspNavigationSync, summarizeLspSymbolsSync, warmLspWorkspaceSync } from "./runtime/lsp.js";
+import { formatSafeGitPatterns } from "./runtime/policy.js";
+import { applyQuestionnaireCommand, formatQuestionnaireStatus } from "./runtime/questionnaire.js";
 import { toDiagnosticRuntimeEvent } from "./runtime/diagnostics.js";
 import { savePersistedRuntimeState } from "./runtime/persistence.js";
 import { executeInternalTool, getInternalToolDefinitions } from "./runtime/tools.js";
+import { formatTodosCommandOutput } from "./runtime/todos.js";
+import {
+  beginGoalTurn,
+  buildGoalContinuationPrompt,
+  clearRuntimeGoal,
+  completeGoalTurn,
+  formatGoalStatus,
+  parseGoalTokenBudget,
+  pauseRuntimeGoal,
+  resumeRuntimeGoal,
+  startRuntimeGoal,
+} from "./runtime/goal.js";
+import { loadPiUsageStats, type UsageStats } from "./runtime/usage.js";
 import { DEFAULT_CODEX_MODEL, DEFAULT_CODEX_REASONING_EFFORT, getCodexModelDefinition, normalizeCodexModel, normalizeCodexReasoningEffort, type CodexReasoningEffort } from "./models.js";
 import { getProviderDefinition, getProviderModelOptions, type ProviderModelOption } from "./provider/registry.js";
 import { ANSI, padLine, padVisibleLine, renderRule, renderScreen, resetScreenRenderer, tintLine, truncateLine, wrapText } from "./tui/primitives.js";
@@ -642,6 +661,7 @@ export function createRuntimeTuiView(session: RuntimeSession): RuntimeTuiView {
       ["status", session.action.status],
       ["detail", session.action.detail],
       ["lastActivity", session.action.lastActivity ?? "none"],
+      ["sessionStyle", `${getSessionEmoji(session)} color=${String(getSessionColorCode(session))}`],
       ["styles", formatStyleStack(session)],
       ["turns", String(session.telemetry.turnCount)],
       ["lastTokens", formatTurnTokens(session)],
@@ -847,7 +867,9 @@ export async function runPromptCommand(session: RuntimeSession, prompt: string):
     }
   }
 
-  if (session.operationControls.pendingApproval && !trimmedPrompt.startsWith("/")) {
+  if (session.operationControls.pendingQuestionnaire && !trimmedPrompt.startsWith("/")) {
+    effectivePrompt = `/ask ${trimmedPrompt}`;
+  } else if (session.operationControls.pendingApproval && !trimmedPrompt.startsWith("/")) {
     const lowerPrompt = trimmedPrompt.toLowerCase();
     if (APPROVE_PROMPT_ALIASES.has(lowerPrompt)) {
       effectivePrompt = "/approval approve";
@@ -952,6 +974,7 @@ export async function runPromptCommand(session: RuntimeSession, prompt: string):
     if (autoCompact.compacted) {
       setRuntimeAction(session, "running", `auto compact · ${autoCompact.beforeTokens} -> ${autoCompact.afterTokens}`);
     }
+    beginGoalTurn(session);
     const result = await executeProviderRequest({ session, prompt: effectivePrompt });
 
     if (result.ok) {
@@ -963,9 +986,21 @@ export async function runPromptCommand(session: RuntimeSession, prompt: string):
           output: result.output,
         }, { verboseOnly: true });
       }
-      recordConversationTurn(session, "user", transcriptPrompt);
-      recordConversationTurn(session, "assistant", result.output);
+      const btwExchange = completeBtwTurn(session, result.output);
+      if (btwExchange) {
+        savePersistedRuntimeState(session);
+        recordRuntimeEvent(session, {
+          kind: "assistant",
+          status: "completed",
+          summary: "btw response captured",
+          detail: btwExchange.saved ? `saved note: ${btwExchange.question}` : btwExchange.question,
+        });
+      } else {
+        recordConversationTurn(session, "user", transcriptPrompt);
+        recordConversationTurn(session, "assistant", result.output);
+      }
       recordTurnTelemetry(session, effectivePrompt, result.output);
+      const goalContinuation = completeGoalTurn(session, effectivePrompt, result.output);
       checkpointNexsightSession(session, "turn");
       const boomerangSummary = completeBoomerang(session, result.output);
       if (boomerangSummary) {
@@ -978,12 +1013,13 @@ export async function runPromptCommand(session: RuntimeSession, prompt: string):
       }
       setRuntimeAction(session, "ready", `response received · ${result.provider}`);
       await maybeArchiveAgedChatHistory(session);
-      process.stdout.write(`${result.output}\n`);
+      process.stdout.write(`${result.output}${goalContinuation ? `\n${goalContinuation.promptSummary}; use /goal resume in interactive mode to continue if needed.` : ""}\n`);
       return;
     }
 
     setRuntimeAction(session, "error", result.message);
     cancelBoomerang(session);
+    cancelBtwTurn(session);
     if (session.debug) {
       writeDebugLog(session.debug, "provider.failure", {
         provider: result.provider,
@@ -1005,6 +1041,7 @@ export async function runPromptCommand(session: RuntimeSession, prompt: string):
     const message = error instanceof Error ? error.message : String(error);
     setRuntimeAction(session, "error", message);
     cancelBoomerang(session);
+    cancelBtwTurn(session);
     recordRuntimeEvent(session, {
       kind: "provider",
       status: "failed",
@@ -1082,10 +1119,44 @@ function dispatchRuntimeCommand(session: RuntimeSession, input: string): Runtime
       return handleSkillCommand(session, args);
     case "/boomerang":
       return handleBoomerangCommand(session, args);
+    case "/btw":
+    case "/btw:new":
+    case "/btw:tangent":
+    case "/btw:clear":
+    case "/btw:inject":
+    case "/btw:summarize":
+    case "/btw:model":
+    case "/btw:thinking":
+      return handleBtwCommand(session, command, args);
+    case "/agents":
+      return handleAgentsCommand(session, args);
     case "/mouse":
       return handleMouseCommand(session, args);
     case "/status":
       return handleStatusCommand(session, args);
+    case "/usage":
+      return handleUsageCommand(session, args);
+    case "/todos":
+      return handleTodosCommand(session, args);
+    case "/goal":
+      return handleGoalCommand(session, args);
+    case "/notify":
+    case "/notify-status":
+    case "/notify-test":
+      return handleNotifyCommand(session, command, args);
+    case "/emoji":
+    case "/emoji-test":
+      return handleEmojiCommand(session, command, args);
+    case "/color":
+    case "/color-next":
+    case "/color-set":
+      return handleColorCommand(session, command, args);
+    case "/safegit":
+    case "/safegit-status":
+    case "/safegit-level":
+      return handleSafeGitCommand(session, command, args);
+    case "/scip":
+      return handleScipCommand(session, args);
     case "/doctor":
       return handleDoctorCommand(session, args);
     case "/caveman-mode":
@@ -1096,6 +1167,8 @@ function dispatchRuntimeCommand(session: RuntimeSession, input: string): Runtime
       return handleStyleToggleCommand(session, args, "statusline");
     case "/approval":
       return handleApprovalCommand(session, args);
+    case "/ask":
+      return handleAskCommand(session, args);
     case "/cancel":
       return handleCancelCommand(session, args);
     case "/steer":
@@ -1130,6 +1203,8 @@ function dispatchRuntimeCommand(session: RuntimeSession, input: string): Runtime
       return handleLspCommand(session, args);
     case "/hooks":
       return handleHooksCommand(session, args);
+    case "/extensions":
+      return handleExtensionsCommand(session, args);
     case "/attach":
     case "/detach":
       return {
@@ -1138,6 +1213,12 @@ function dispatchRuntimeCommand(session: RuntimeSession, input: string): Runtime
         activity: "attachment command rejected",
       };
     default:
+      {
+        const extensionResult = handleExtensionRuntimeCommand(session, command, args);
+        if (extensionResult) {
+          return extensionResult;
+        }
+      }
       return {
         ok: false,
         message: `unknown command ${command}; use /help`,
@@ -1231,6 +1312,88 @@ function handleMouseCommand(session: RuntimeSession, args: string[]): RuntimeCom
     output: formatMouseStatus(session),
     activity: `mouse mode set · ${next}`,
   };
+}
+
+function handleNotifyCommand(session: RuntimeSession, command: string, args: string[]): RuntimeCommandResult {
+  const arg = args.join(" ").trim().toLowerCase();
+  if (command === "/notify-test") {
+    emitTerminalNotification("nexagent", "test notification");
+    return { ok: true, output: formatNotifyStatus(session), activity: "notify test" };
+  }
+  if (command === "/notify-status" || args.length === 0 || (args.length === 1 && STATUS_ARGS.has(arg))) {
+    return { ok: true, output: formatNotifyStatus(session), activity: "notify status" };
+  }
+  if (args.length === 1 && (ENABLE_ARGS.has(arg) || DISABLE_ARGS.has(arg))) {
+    session.ui = session.ui ?? { logoMode: "full" };
+    session.ui.notifyEnabled = ENABLE_ARGS.has(arg);
+    savePersistedRuntimeState(session);
+    return { ok: true, output: formatNotifyStatus(session), activity: `notify ${session.ui.notifyEnabled ? "on" : "off"}` };
+  }
+  if (args.length === 2 && args[0]?.toLowerCase() === "threshold") {
+    const threshold = Number.parseInt(args[1] ?? "", 10);
+    if (!Number.isFinite(threshold) || threshold < 0) {
+      return { ok: false, message: "usage: /notify [on|off|status|threshold <ms>] | /notify-test", activity: "command failed · /notify usage" };
+    }
+    session.ui = session.ui ?? { logoMode: "full" };
+    session.ui.notifyThresholdMs = threshold;
+    savePersistedRuntimeState(session);
+    return { ok: true, output: formatNotifyStatus(session), activity: `notify threshold · ${String(threshold)}ms` };
+  }
+  return { ok: false, message: "usage: /notify [on|off|status|threshold <ms>] | /notify-test", activity: "command failed · /notify usage" };
+}
+
+function handleEmojiCommand(session: RuntimeSession, command: string, args: string[]): RuntimeCommandResult {
+  if (command === "/emoji-test") {
+    return { ok: true, output: SESSION_EMOJIS.join(" "), activity: "emoji test" };
+  }
+  if (args.length === 0 || (args.length === 1 && STATUS_ARGS.has(args[0]?.toLowerCase() ?? ""))) {
+    return { ok: true, output: formatEmojiStatus(session), activity: "emoji status" };
+  }
+  if (args.length === 1) {
+    session.ui = session.ui ?? { logoMode: "full" };
+    session.ui.sessionEmoji = args[0];
+    savePersistedRuntimeState(session);
+    return { ok: true, output: formatEmojiStatus(session), activity: `emoji set · ${args[0]}` };
+  }
+  return { ok: false, message: "usage: /emoji [status|emoji] | /emoji-test", activity: "command failed · /emoji usage" };
+}
+
+function handleColorCommand(session: RuntimeSession, command: string, args: string[]): RuntimeCommandResult {
+  if (command === "/color-next") {
+    session.ui = session.ui ?? { logoMode: "full" };
+    session.ui.sessionColorIndex = (getSessionColorIndex(session) + 1) % SESSION_COLORS.length;
+    savePersistedRuntimeState(session);
+    return { ok: true, output: formatColorStatus(session), activity: "color next" };
+  }
+  const value = command === "/color-set" ? args[0] : args[0]?.toLowerCase();
+  if (args.length === 0 || (args.length === 1 && STATUS_ARGS.has(value ?? ""))) {
+    return { ok: true, output: formatColorStatus(session), activity: "color status" };
+  }
+  if ((command === "/color-set" || command === "/color") && args.length === 1) {
+    const index = Number.parseInt(args[0] ?? "", 10);
+    if (!Number.isFinite(index)) {
+      return { ok: false, message: "usage: /color [status|index] | /color-next | /color-set <index>", activity: "command failed · /color usage" };
+    }
+    session.ui = session.ui ?? { logoMode: "full" };
+    session.ui.sessionColorIndex = Math.max(0, index) % SESSION_COLORS.length;
+    savePersistedRuntimeState(session);
+    return { ok: true, output: formatColorStatus(session), activity: `color set · ${String(session.ui.sessionColorIndex)}` };
+  }
+  return { ok: false, message: "usage: /color [status|index] | /color-next | /color-set <index>", activity: "command failed · /color usage" };
+}
+
+function handleSafeGitCommand(session: RuntimeSession, command: string, args: string[]): RuntimeCommandResult {
+  const arg = args.join(" ").trim().toLowerCase();
+  if (command === "/safegit-level") {
+    return { ok: true, output: "level: high\nmode: high-risk git commands blocked; other shell git commands stay guarded by approval policy", activity: "safegit level" };
+  }
+  if (command === "/safegit-status" || args.length === 0 || (args.length === 1 && STATUS_ARGS.has(arg))) {
+    return { ok: true, output: formatSafeGitStatus(session), activity: "safegit status" };
+  }
+  if (args.length === 1 && arg === "patterns") {
+    return { ok: true, output: formatSafeGitPatterns(), activity: "safegit patterns" };
+  }
+  return { ok: false, message: "usage: /safegit [status|patterns] | /safegit-status | /safegit-level", activity: "command failed · /safegit usage" };
 }
 
 function writeTerminalMouseMode(session: RuntimeSession): void {
@@ -1337,6 +1500,64 @@ function handleBoomerangCommand(session: RuntimeSession, args: string[]): Runtim
   };
 }
 
+function handleGoalCommand(session: RuntimeSession, args: string[]): RuntimeCommandResult {
+  const trimmed = args.join(" ").trim();
+  if (!trimmed || STATUS_ARGS.has(trimmed.toLowerCase())) {
+    return { ok: true, output: formatGoalStatus(session.goal), activity: "goal status" };
+  }
+  const normalized = trimmed.toLowerCase();
+  if (normalized === "statusbar" || normalized === "statusbar toggle" || normalized === "statusbar on" || normalized === "statusbar off") {
+    const [, value] = normalized.split(/\s+/, 2);
+    session.goal.statusBarEnabled = value === "on" ? true : value === "off" ? false : !session.goal.statusBarEnabled;
+    savePersistedRuntimeState(session);
+    return { ok: true, output: formatGoalStatus(session.goal), activity: `goal statusbar ${session.goal.statusBarEnabled ? "on" : "off"}` };
+  }
+  if (normalized === "pause") {
+    const paused = pauseRuntimeGoal(session);
+    return { ok: true, output: paused ? formatGoalStatus(session.goal) : "goal\nstatus: none", activity: paused ? "goal paused" : "goal idle" };
+  }
+  if (normalized === "resume") {
+    const goal = resumeRuntimeGoal(session);
+    if (!goal) {
+      return { ok: true, output: "goal\nstatus: none", activity: "goal idle" };
+    }
+    return {
+      ok: true,
+      output: formatGoalStatus(session.goal),
+      activity: "goal resumed",
+      autoInvokeAfterSkill: true,
+      invokePrompt: buildGoalContinuationPrompt(goal),
+      transcriptPrompt: `/goal resume ${goal.id}`,
+      promptSummary: "goal resumed",
+    };
+  }
+  if (normalized === "clear") {
+    const cleared = clearRuntimeGoal(session);
+    return { ok: true, output: cleared ? "goal cleared" : "goal idle", activity: cleared ? "goal cleared" : "goal idle" };
+  }
+  const parsed = parseGoalTokenBudget(trimmed);
+  if (parsed.error) {
+    return { ok: false, message: parsed.error, activity: "command failed · /goal usage" };
+  }
+  if (!parsed.objective) {
+    return {
+      ok: false,
+      message: "usage: /goal [--tokens 50k] <objective> | /goal status | /goal pause | /goal resume | /goal clear | /goal statusbar on|off",
+      activity: "command failed · /goal usage",
+    };
+  }
+  const goal = startRuntimeGoal(session, parsed.objective, parsed.tokenBudget);
+  return {
+    ok: true,
+    output: formatGoalStatus(session.goal),
+    activity: "goal active",
+    autoInvokeAfterSkill: true,
+    invokePrompt: buildGoalContinuationPrompt(goal),
+    transcriptPrompt: `/goal ${parsed.objective}`,
+    promptSummary: "goal active",
+  };
+}
+
 function formatBoomerangStatus(session: RuntimeSession): string {
   const state = session.operationControls.boomerang;
   return [
@@ -1345,6 +1566,132 @@ function formatBoomerangStatus(session: RuntimeSession): string {
     `task: ${state.task ?? "none"}`,
     `lastSummary: ${state.lastSummary ? firstBoomerangSummaryLine(state.lastSummary) : "none"}`,
   ].join("\n");
+}
+
+function handleBtwCommand(session: RuntimeSession, command: string, args: string[]): RuntimeCommandResult {
+  if (args.length === 1 && (args[0] === "--help" || args[0] === "-h" || args[0] === "help")) {
+    return { ok: true, output: BTW_HELP, activity: "btw help" };
+  }
+
+  if (command === "/btw:clear") {
+    if (args.length !== 0) {
+      return { ok: false, message: "usage: /btw:clear", activity: "command failed · /btw usage" };
+    }
+    clearBtwThread(session);
+    savePersistedRuntimeState(session);
+    return { ok: true, output: "btw cleared", activity: "btw cleared" };
+  }
+
+  if (command === "/btw:model") {
+    const value = args.join(" ").trim();
+    session.btw.modelOverride = value === "clear" || !value ? null : value;
+    session.btw.updatedAt = new Date().toISOString();
+    savePersistedRuntimeState(session);
+    return { ok: true, output: formatBtwStatus(session.btw), activity: "btw model" };
+  }
+
+  if (command === "/btw:thinking") {
+    const value = args.join(" ").trim();
+    session.btw.thinkingOverride = value === "clear" || !value ? null : value;
+    session.btw.updatedAt = new Date().toISOString();
+    savePersistedRuntimeState(session);
+    return { ok: true, output: formatBtwStatus(session.btw), activity: "btw thinking" };
+  }
+
+  if (command === "/btw:inject" || command === "/btw:summarize") {
+    if (session.btw.thread.length === 0) {
+      return { ok: false, message: "No BTW thread to inject.", activity: "command failed · /btw empty" };
+    }
+    const summarize = command === "/btw:summarize";
+    const prompt = buildBtwInjectPrompt(session.btw, args.join(" "), summarize);
+    clearBtwThread(session);
+    savePersistedRuntimeState(session);
+    return {
+      ok: true,
+      output: summarize ? "btw summary queued for main agent" : "btw thread queued for main agent",
+      activity: summarize ? "btw summarize" : "btw inject",
+      autoInvokeAfterSkill: true,
+      invokePrompt: prompt,
+      transcriptPrompt: `${command}${args.length > 0 ? ` ${args.join(" ")}` : ""}`,
+      promptSummary: summarize ? "btw summary injected" : "btw thread injected",
+    };
+  }
+
+  if (command === "/btw:new") {
+    clearBtwThread(session, "contextual");
+    if (args.length === 0) {
+      session.btw.visible = true;
+      savePersistedRuntimeState(session);
+      return { ok: true, output: "btw new thread ready", activity: "btw new" };
+    }
+    return startBtwProviderTurn(session, "contextual", args.join(" "));
+  }
+
+  if (command === "/btw:tangent") {
+    const parsed = parseBtwArgs(args);
+    if (!parsed.question) {
+      return { ok: false, message: "usage: /btw:tangent [--save] <question>", activity: "command failed · /btw usage" };
+    }
+    return startBtwProviderTurn(session, "tangent", parsed.question, parsed.save);
+  }
+
+  const parsed = parseBtwArgs(args);
+  if (!parsed.question) {
+    return { ok: true, output: formatBtwStatus(session.btw), activity: "btw status" };
+  }
+  return startBtwProviderTurn(session, "contextual", parsed.question, parsed.save);
+}
+
+const BTW_HELP = [
+  "btw",
+  "usage: /btw [--save] <question>",
+  "usage: /btw:new [question]",
+  "usage: /btw:tangent [--save] <question>",
+  "usage: /btw:clear",
+  "usage: /btw:inject [instructions]",
+  "usage: /btw:summarize [instructions]",
+  "usage: /btw:model [model|clear]",
+  "usage: /btw:thinking [effort|clear]",
+  "",
+  "/btw asks a contextual side question without adding the exchange to the main conversation until injected.",
+  "/btw:clear removes pending/thread state from prompt overlays.",
+].join("\n");
+
+function parseBtwArgs(args: string[]): { question: string; save: boolean } {
+  const save = args.includes("--save") || args.includes("-s");
+  return {
+    save,
+    question: args.filter((arg) => arg !== "--save" && arg !== "-s").join(" ").trim(),
+  };
+}
+
+function startBtwProviderTurn(session: RuntimeSession, mode: RuntimeBtwMode, question: string, save = false): RuntimeCommandResult {
+  const prompt = beginBtwTurn(session, mode, question, save);
+  savePersistedRuntimeState(session);
+  return {
+    ok: true,
+    output: `btw ${mode} queued`,
+    activity: `btw ${mode}`,
+    autoInvokeAfterSkill: true,
+    invokePrompt: prompt,
+    transcriptPrompt: `/btw ${question}`,
+    promptSummary: `btw ${mode} side question accepted`,
+  };
+}
+
+function handleAgentsCommand(session: RuntimeSession, args: string[]): RuntimeCommandResult {
+  if (args.length !== 0) {
+    return {
+      ok: false,
+      message: "usage: /agents",
+      activity: "command failed · /agents usage",
+    };
+  }
+  return {
+    ok: true,
+    output: formatSubagentsStatus(session),
+    activity: "agents status",
+  };
 }
 
 export function buildActiveSkillExecutionPrompt(session: RuntimeSession, originalCommand: string): string {
@@ -1538,6 +1885,23 @@ function handleCodexCommand(session: RuntimeSession, args: string[]): RuntimeCom
 }
 
 function handleMemoryCommand(session: RuntimeSession, args: string[]): RuntimeCommandResult {
+  const mutation = parseMemoryMutationCommand(`/memory ${args.join(" ")}`);
+  if (mutation) {
+    try {
+      return {
+        ok: true,
+        output: applyMemoryMutationCommandSync(session, mutation),
+        activity: mutation.kind === "checkpoint" ? "memory checkpoint" : mutation.kind === "session" ? "memory session" : "memory save",
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        message: error instanceof Error ? error.message : String(error),
+        activity: `command failed · /memory ${mutation.kind}`,
+      };
+    }
+  }
+
   const { detailMode, args: normalizedArgs } = splitVerboseArg(args);
   if (normalizedArgs.length === 1 && STATUS_ARGS.has(normalizedArgs[0]?.toLowerCase() ?? "")) {
     return {
@@ -1590,6 +1954,20 @@ function handleLspCommand(session: RuntimeSession, args: string[]): RuntimeComma
       ok: true,
       output: formatLspSetup(session),
       activity: "lsp setup",
+    };
+  }
+  if (args.length === 1 && args[0] === "health") {
+    return {
+      ok: true,
+      output: formatLspHealth(session),
+      activity: "lsp health",
+    };
+  }
+  if (args.length === 1 && args[0] === "warm") {
+    return {
+      ok: true,
+      output: warmLspWorkspaceSync(session).output,
+      activity: "lsp warm",
     };
   }
   if (args.length === 2 && args[0] === "mode") {
@@ -1655,6 +2033,31 @@ function handleLspCommand(session: RuntimeSession, args: string[]): RuntimeComma
       };
     }
   }
+  if (args[0] === "nav" || args[0] === "navigation") {
+    const operation = args[1] ?? "";
+    const filePath = args[2];
+    const line = args[3] ? Number.parseInt(args[3], 10) : undefined;
+    const character = args[4] ? Number.parseInt(args[4], 10) : undefined;
+    try {
+      return {
+        ok: true,
+        output: summarizeLspNavigationSync(session, {
+          operation,
+          filePath,
+          line,
+          character,
+          query: operation === "workspaceSymbol" ? args.slice(2).join(" ") : undefined,
+        }).output,
+        activity: "lsp navigation",
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        message: error instanceof Error ? error.message : String(error),
+        activity: "command failed · /lsp navigation",
+      };
+    }
+  }
   return {
     ok: false,
     message: LSP_USAGE,
@@ -1662,8 +2065,27 @@ function handleLspCommand(session: RuntimeSession, args: string[]): RuntimeComma
   };
 }
 
-const LSP_USAGE = "usage: /lsp [status|setup|mode <on|off>|symbols <path>|diagnostics <path>|check [path]]";
+const LSP_USAGE = "usage: /lsp [status|setup|health|warm|mode <on|off>|symbols <path>|diagnostics <path>|check [path]|nav <operation> [path] [line] [character]]";
+const SCIP_USAGE = "usage: /scip [status|symbols <path>|diagnostics <path>|check [path]]";
 const CONFIG_USAGE = "usage: /config [status] | /config [set] logo <full|condensed|off> | /config [set] lsp <on|off> | /config [set] lsp-index <on|off>";
+
+function handleScipCommand(session: RuntimeSession, args: string[]): RuntimeCommandResult {
+  if (args.length === 0 || (args.length === 1 && STATUS_ARGS.has(args[0]?.toLowerCase() ?? ""))) {
+    return {
+      ok: true,
+      output: ["pi-agent-scip compatibility", formatLspStatus(session)].join("\n"),
+      activity: "scip status",
+    };
+  }
+  if (args[0] === "symbols" || args[0] === "diagnostics" || args[0] === "check") {
+    return handleLspCommand(session, args);
+  }
+  return {
+    ok: false,
+    message: SCIP_USAGE,
+    activity: "command failed · /scip usage",
+  };
+}
 
 function handleConfigCommand(session: RuntimeSession, args: string[]): RuntimeCommandResult {
   if (args.length === 0 || (args.length === 1 && STATUS_ARGS.has(args[0]?.toLowerCase() ?? ""))) {
@@ -1782,6 +2204,45 @@ function handleStatusCommand(session: RuntimeSession, args: string[]): RuntimeCo
   };
 }
 
+function handleUsageCommand(session: RuntimeSession, args: string[]): RuntimeCommandResult {
+  if (args.length !== 0) {
+    return {
+      ok: false,
+      message: "usage: /usage",
+      activity: "command failed · /usage usage",
+    };
+  }
+
+  return {
+    ok: true,
+    output: formatUsageStatus(session),
+    activity: "usage",
+  };
+}
+
+function handleTodosCommand(session: RuntimeSession, args: string[]): RuntimeCommandResult {
+  if (args.length > 1) {
+    return {
+      ok: false,
+      message: "usage: /todos [pending|in_progress|completed|all]",
+      activity: "command failed · /todos usage",
+    };
+  }
+  const mode = args[0] ?? "active";
+  if (!["active", "pending", "in_progress", "completed", "all"].includes(mode)) {
+    return {
+      ok: false,
+      message: "usage: /todos [pending|in_progress|completed|all]",
+      activity: "command failed · /todos usage",
+    };
+  }
+  return {
+    ok: true,
+    output: formatTodosCommandOutput(session.todos, mode),
+    activity: "todos",
+  };
+}
+
 function handleDoctorCommand(session: RuntimeSession, args: string[]): RuntimeCommandResult {
   if (args.length !== 0) {
     return {
@@ -1796,6 +2257,202 @@ function handleDoctorCommand(session: RuntimeSession, args: string[]): RuntimeCo
     output: formatDoctorStatus(session),
     activity: "doctor status",
   };
+}
+
+function formatUsageStatus(session: RuntimeSession): string {
+  const persisted = loadPiUsageStats(session.cwd);
+  const usage = persisted.messages > 0 ? null : collectCurrentSessionUsage(session);
+  const rows = persisted.messages > 0 ? createUsageBarRowsFromStats(persisted) : [{
+    provider: usage!.provider,
+    model: usage!.model,
+    sessions: usage!.sessions,
+    messages: usage!.assistantMessages,
+    turns: usage!.turns,
+    input: usage!.inputTokens,
+    output: usage!.outputTokens,
+    cacheRead: 0,
+    cacheWrite: 0,
+    cost: 0,
+    tokens: usage!.tokens,
+  }];
+  const totalTokens = rows.reduce((sum, row) => sum + row.tokens, 0);
+  const totalSessions = persisted.messages > 0 ? persisted.sessions.size : 1;
+  const totalMessages = persisted.messages > 0 ? persisted.messages : usage!.assistantMessages;
+  const totalCost = rows.reduce((sum, row) => sum + row.cost, 0);
+  const sortedRows = [...rows].sort((a, b) => b.tokens - a.tokens);
+  const visibleRows = sortedRows.slice(0, 8);
+  const hiddenRows = sortedRows.length - visibleRows.length;
+  const period = persisted.messages > 0
+    ? "all time · Pi-compatible JSONL"
+    : `current session · ${formatUsageDuration(usage!.startedAt, usage!.lastAt)}`;
+  const lines = [
+    "usage",
+    `${period} · sessions ${formatUsageNumber(totalSessions)} · messages ${formatUsageNumber(totalMessages)} · tokens ${formatUsageNumber(totalTokens)} · cost ${formatUsageCost(totalCost)}`,
+    "",
+  ];
+  for (const row of visibleRows) {
+    const share = totalTokens > 0 ? (row.tokens / totalTokens) * 100 : 0;
+    lines.push(`${row.provider} / ${row.model}`);
+    lines.push(`${formatUsageBar(share, 18)} ${formatUsagePercent(share)} share · ${formatUsageNumber(row.tokens)} tokens`);
+    lines.push([
+      `in ${formatUsageNumber(row.input + row.cacheWrite)}`,
+      `out ${formatUsageNumber(row.output)}`,
+      `cache ${formatUsageNumber(row.cacheRead + row.cacheWrite)}`,
+      `msgs ${formatUsageNumber(row.messages)}`,
+      `cost ${formatUsageCost(row.cost)}`,
+    ].join(" · "));
+    lines.push("");
+  }
+  if (hiddenRows > 0) {
+    lines.push(`+${String(hiddenRows)} more provider/model rows`);
+    lines.push("");
+  }
+  lines.push("notes: local telemetry only; bars show token share, not provider quota");
+  return lines.join("\n").trimEnd();
+}
+
+type UsageBarRow = {
+  provider: string;
+  model: string;
+  sessions: number;
+  messages: number;
+  turns: number;
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  cost: number;
+  tokens: number;
+};
+
+function createUsageBarRowsFromStats(stats: UsageStats): UsageBarRow[] {
+  const rows: UsageBarRow[] = [];
+  for (const [provider, providerStats] of stats.providers.entries()) {
+    for (const [model, modelStats] of providerStats.models.entries()) {
+      rows.push({
+        provider,
+        model,
+        sessions: modelStats.sessions.size,
+        messages: modelStats.messages,
+        turns: modelStats.messages,
+        input: modelStats.input,
+        output: modelStats.output,
+        cacheRead: modelStats.cacheRead,
+        cacheWrite: modelStats.cacheWrite,
+        cost: modelStats.cost,
+        tokens: usageFreshTokens(modelStats),
+      });
+    }
+  }
+  return rows;
+}
+
+function usageFreshTokens(stats: Pick<UsageStats, "input" | "output" | "cacheWrite">): number {
+  return stats.input + stats.output + stats.cacheWrite;
+}
+
+function formatUsageBar(percent: number, width: number): string {
+  const bounded = Math.max(0, Math.min(100, percent));
+  const filled = Math.min(width, Math.round((bounded / 100) * width));
+  return `${"█".repeat(filled)}${"░".repeat(width - filled)}`;
+}
+
+function formatUsagePercent(percent: number): string {
+  if (percent >= 99.5) {
+    return "100%";
+  }
+  if (percent < 1 && percent > 0) {
+    return "<1%";
+  }
+  return `${Math.round(percent).toString()}%`;
+}
+
+function formatUsageCost(cost: number): string {
+  if (cost === 0) {
+    return "n/a";
+  }
+  if (cost < 0.01) {
+    return `$${cost.toFixed(4)}`;
+  }
+  if (cost < 100) {
+    return `$${cost.toFixed(2)}`;
+  }
+  return `$${Math.round(cost)}`;
+}
+
+function collectCurrentSessionUsage(session: RuntimeSession): {
+  provider: string;
+  model: string;
+  sessions: number;
+  turns: number;
+  assistantMessages: number;
+  inputTokens: number;
+  outputTokens: number;
+  tokens: number;
+  startedAt: string;
+  lastAt: string;
+} {
+  const completedTurns = session.events.filter((event) =>
+    event.kind === "control" && event.status === "completed" && /\bturn run\b/i.test(event.summary)
+  );
+  const tokenTotals = completedTurns.reduce((totals, event) => {
+    const detail = event.detail ?? "";
+    totals.input += readUsageMetric(detail, "turn_in") || readUsageMetric(detail, "in");
+    totals.output += readUsageMetric(detail, "turn_out") || readUsageMetric(detail, "out");
+    return totals;
+  }, { input: 0, output: 0 });
+
+  const conversationInput = session.conversation
+    .filter((turn) => turn.role === "user")
+    .reduce((sum, turn) => sum + turn.tokens, 0);
+  const conversationOutput = session.conversation
+    .filter((turn) => turn.role === "assistant")
+    .reduce((sum, turn) => sum + turn.tokens, 0);
+  const inputTokens = tokenTotals.input || session.telemetry.lastInputTokens || conversationInput;
+  const outputTokens = tokenTotals.output || session.telemetry.lastOutputTokens || conversationOutput;
+  const assistantMessages = Math.max(
+    session.conversation.filter((turn) => turn.role === "assistant").length,
+    session.events.filter((event) => event.kind === "assistant" && event.status === "completed").length,
+  );
+  const lastEventAt = [...session.events].reverse().find((event) => event.at)?.at;
+  return {
+    provider: session.providerTransport.activeProvider,
+    model: getCurrentProviderModel(session),
+    sessions: 1,
+    turns: completedTurns.length || session.telemetry.turnCount,
+    assistantMessages,
+    inputTokens,
+    outputTokens,
+    tokens: inputTokens + outputTokens,
+    startedAt: session.startedAt,
+    lastAt: lastEventAt ?? new Date().toISOString(),
+  };
+}
+
+function readUsageMetric(detail: string, key: "in" | "out" | "turn_in" | "turn_out"): number {
+  const match = new RegExp(`(?:^|[;\\s])${key}~(\\d+)`).exec(detail);
+  return match ? Number.parseInt(match[1] ?? "0", 10) : 0;
+}
+
+function formatUsageNumber(value: number): string {
+  return new Intl.NumberFormat("en-US").format(value);
+}
+
+function formatUsageDuration(startedAt: string, lastAt: string): string {
+  const start = Date.parse(startedAt);
+  const end = Date.parse(lastAt);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+    return "0s";
+  }
+  const seconds = Math.floor((end - start) / 1000);
+  if (seconds < 60) {
+    return `${String(seconds)}s`;
+  }
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) {
+    return `${String(minutes)}m`;
+  }
+  return `${String(Math.floor(minutes / 60))}h`;
 }
 
 function formatSentryStatus(sendTestEvent: boolean): string {
@@ -1923,6 +2580,65 @@ function handleHooksCommand(session: RuntimeSession, args: string[]): RuntimeCom
   };
 }
 
+function handleExtensionsCommand(session: RuntimeSession, args: string[]): RuntimeCommandResult {
+  if (args.length !== 0) {
+    return {
+      ok: false,
+      message: "usage: /extensions",
+      activity: "command failed · /extensions usage",
+    };
+  }
+  return {
+    ok: true,
+    output: formatRuntimeExtensionsStatus(session),
+    activity: "extensions status",
+  };
+}
+
+function handleExtensionRuntimeCommand(session: RuntimeSession, command: string, args: string[]): RuntimeCommandResult | null {
+  const extensionCommand = findRuntimeExtensionCommand(session, command);
+  if (!extensionCommand) {
+    return null;
+  }
+  try {
+    const output = extensionCommand.handler(createRuntimeExtensionArgs(args), createRuntimeExtensionContext(session));
+    if (output && typeof (output as Promise<unknown>).then === "function") {
+      void (output as Promise<unknown>).catch((error) => {
+        session.extensions?.invalidEntries.push(`${command}: ${error instanceof Error ? error.message : String(error)}`);
+      });
+      return {
+        ok: true,
+        output: "queued",
+        activity: `extension ${command}`,
+      };
+    }
+    return {
+      ok: true,
+      output: formatExtensionCommandOutput(output),
+      activity: `extension ${command}`,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      message: error instanceof Error ? error.message : String(error),
+      activity: `command failed · ${command}`,
+    };
+  }
+}
+
+function formatExtensionCommandOutput(output: unknown): string {
+  if (typeof output === "string") {
+    return output;
+  }
+  if (output === undefined || output === null) {
+    return "ok";
+  }
+  if (typeof output === "object" && "message" in output && typeof (output as { message?: unknown }).message === "string") {
+    return (output as { message: string }).message;
+  }
+  return JSON.stringify(output, null, 2);
+}
+
 function handleToolsCommand(session: RuntimeSession, args: string[]): RuntimeCommandResult {
   const { detailMode, args: normalizedArgs } = splitVerboseArg(args);
   if (normalizedArgs.length !== 0) {
@@ -1978,9 +2694,10 @@ function handleNexsightCommand(session: RuntimeSession, args: string[]): Runtime
       ok: true,
       output: formatDiagnosticSection("nexsight", "compact", [
         ["store", path.join(session.cwd, ".nexagent", "nexsight", "index.json")],
-        ["execute", "shell,javascript"],
-        ["index", "json chunks; repo batch; session checkpoints"],
-        ["routing", "large outputs should use nexsight_execute/index/search"],
+        ["execute", "shell,javascript,python; lean shell compression"],
+        ["read", "auto,full,map,signatures,outline,lines:N-M"],
+        ["index", "sqlite/json chunks; repo batch; session checkpoints"],
+        ["routing", "large outputs should use nexsight_gather/execute/read/index/search"],
       ]).join("\n"),
       activity: "nexsight doctor",
     };
@@ -2001,8 +2718,38 @@ function handleNexsightCommand(session: RuntimeSession, args: string[]): Runtime
       ? { ok: true, output: result.output, activity: `nexsight search · ${query}` }
       : { ok: false, message: result.output, activity: `nexsight failed · ${query}` };
   }
-  if (subcommand === "index") {
+  if (subcommand === "read") {
+    const target = rest[0];
+    if (!target) {
+      return { ok: false, message: "usage: /nexsight read <path> [mode]", activity: "command failed · /nexsight read usage" };
+    }
+    const mode = rest[1];
+    return toolResultToCommandResult("nexsight", "read", executeInternalTool(session, {
+      name: "nexsight_read",
+      arguments: {
+        path: target,
+        ...(mode ? { mode } : {}),
+      },
+    }));
+  }
+  if (subcommand === "gather") {
     const root = rest[0] ?? ".";
+    const pattern = rest[1];
+    const query = rest.slice(2).join(" ").trim();
+    return toolResultToCommandResult("nexsight", "gather", executeInternalTool(session, {
+      name: "nexsight_gather",
+      arguments: {
+        root,
+        ...(pattern ? { pattern } : {}),
+        ...(query ? { query } : {}),
+      },
+    }));
+  }
+  if (subcommand === "index") {
+    if (!rest[0]) {
+      return { ok: false, message: "usage: /nexsight index <path> [pattern]", activity: "command failed · /nexsight index usage" };
+    }
+    const root = rest[0];
     const pattern = rest[1];
     return toolResultToCommandResult("nexsight", "index", executeInternalTool(session, {
       name: "nexsight_batch",
@@ -2014,7 +2761,7 @@ function handleNexsightCommand(session: RuntimeSession, args: string[]): Runtime
   }
   return {
     ok: false,
-    message: "usage: /nexsight [stats|index <path> [pattern]|search <query>|purge|doctor]",
+    message: "usage: /nexsight [stats|gather <root> [pattern] [query]|read <path> [mode]|index <path> [pattern]|search <query>|purge|doctor]",
     activity: "command failed · /nexsight usage",
   };
 }
@@ -2089,12 +2836,34 @@ function handleApprovalCommand(session: RuntimeSession, args: string[]): Runtime
   return { ok: true, output: formatOperationControlsStatus(session), activity: `approval ${nextValue ? "on" : "off"}` };
 }
 
+function handleAskCommand(session: RuntimeSession, args: string[]): RuntimeCommandResult {
+  if (args.length === 0 || args.join(" ").trim().toLowerCase() === "status") {
+    return { ok: true, output: formatQuestionnaireStatus(session), activity: "ask status" };
+  }
+  const result = applyQuestionnaireCommand(session, args);
+  if (!result.ok) {
+    return { ok: false, message: result.message, activity: "command failed · /ask" };
+  }
+  savePersistedRuntimeState(session);
+  return {
+    ok: true,
+    output: result.output,
+    activity: result.submitted ? "ask answered" : "ask updated",
+  };
+}
+
 function handleCancelCommand(session: RuntimeSession, args: string[]): RuntimeCommandResult {
   if (args.length !== 0) {
     return { ok: false, message: "usage: /cancel", activity: "command failed · /cancel usage" };
   }
 
   session.operationControls.cancelRequested = true;
+  if (session.operationControls.pendingQuestionnaire) {
+    session.operationControls.pendingQuestionnaire.response = {
+      answers: session.operationControls.pendingQuestionnaire.answers,
+      cancelled: true,
+    };
+  }
   if (session.operationControls.pendingApproval) {
     session.operationControls.pendingApproval = null;
     session.operationControls.lastDecision = "canceled";
@@ -2735,6 +3504,9 @@ function formatConfigStatus(session: RuntimeSession): string {
     "ui",
     `logoMode: ${session.ui?.logoMode ?? "full"}`,
     `mouseMode: ${session.commandModes.mouseMode}`,
+    `sessionEmoji: ${getSessionEmoji(session)}`,
+    `sessionColor: ${String(getSessionColorCode(session))}`,
+    `notify: ${session.ui?.notifyEnabled === true ? "on" : "off"} threshold=${String(notifyThresholdMs(session))}ms`,
     "memory",
     `archivist: ${session.archivist.enabled ? "on" : "off"}`,
     `storage: ${session.archivist.storagePath ?? "disabled"}`,
@@ -2746,6 +3518,39 @@ function formatConfigStatus(session: RuntimeSession): string {
     "diagnostics",
     "sentry: /status --sentry",
     "redaction: tags-only",
+  ].join("\n");
+}
+
+function formatNotifyStatus(session: RuntimeSession): string {
+  return [
+    `enabled: ${session.ui?.notifyEnabled === true ? "on" : "off"}`,
+    `thresholdMs: ${String(notifyThresholdMs(session))}`,
+    "backend: terminal bell + notify-send/osascript when available",
+  ].join("\n");
+}
+
+function formatEmojiStatus(session: RuntimeSession): string {
+  return [
+    `emoji: ${getSessionEmoji(session)}`,
+    `configured: ${session.ui?.sessionEmoji ?? "deterministic"}`,
+    `available: ${SESSION_EMOJIS.join(" ")}`,
+  ].join("\n");
+}
+
+function formatColorStatus(session: RuntimeSession): string {
+  return [
+    `swatch: ${formatSessionColorSwatch(session)}`,
+    `configuredIndex: ${session.ui?.sessionColorIndex ?? "deterministic"}`,
+    `palette: ${SESSION_COLORS.join(", ")}`,
+  ].join("\n");
+}
+
+function formatSafeGitStatus(session: RuntimeSession): string {
+  return [
+    "enabled: true",
+    "level: high",
+    "highRisk: force push, hard reset, forced clean, stash deletion, forced branch delete, reflog expire",
+    `lastBlocker: ${session.operationControls.lastShellBlocker?.source === "safe-git" ? session.operationControls.lastShellBlocker.reason : "none"}`,
   ].join("\n");
 }
 
@@ -2951,6 +3756,7 @@ function formatCommandCatalog(): string {
 
 function formatStatusline(session: RuntimeSession): string {
   return [
+    `${getSessionEmoji(session)} color=${String(getSessionColorCode(session))}`,
     session.provider,
     getCurrentProviderModel(session),
     session.providerTransport.mode,
@@ -4602,18 +5408,69 @@ async function applyMemoryMutationCommand(session: RuntimeSession, command: Memo
   }
 
   if (command.kind === "checkpoint") {
-    const result = await checkpointArchivistSession(session, command.reason ?? "manual checkpoint");
+    const result = checkpointArchivistSessionSync(session, command.reason ?? "manual checkpoint");
     return `memory checkpoint saved; entries=${String(result.entryCount)}\n${result.preview}`;
   }
 
   const sessionDigest = buildSessionMemoryDigest(session, command.focus);
-  const saved = await saveArchivistMemory(session, {
+  const saved = addArchivistMemorySync(session, {
     summary: sessionDigest.summary,
     content: sessionDigest.content,
     type: "session-summary",
     tags: ["session", "summary", ...(command.focus ? ["focused"] : [])],
   });
   return `memory session summary saved; entries=${String(saved.entryCount)}\n${saved.preview}`;
+}
+
+function applyMemoryMutationCommandSync(session: RuntimeSession, command: MemoryMutationCommand): string {
+  if (!session.archivist.enabled) {
+    throw new Error("archivist memory disabled");
+  }
+
+  if (command.kind === "save") {
+    if (!command.text.trim()) {
+      throw new Error("usage: /memory save <text>");
+    }
+    const result = addArchivistMemorySync(session, {
+      summary: command.text,
+      content: command.text,
+      type: "operator-memory",
+    });
+    return `memory saved; entries=${String(result.entryCount)}\n${result.preview}`;
+  }
+
+  if (command.kind === "checkpoint") {
+    const result = checkpointArchivistSessionSync(session, command.reason ?? "manual checkpoint");
+    return `memory checkpoint saved; entries=${String(result.entryCount)}\n${result.preview}`;
+  }
+
+  const sessionDigest = buildSessionMemoryDigest(session, command.focus);
+  const saved = addArchivistMemorySync(session, {
+    summary: sessionDigest.summary,
+    content: sessionDigest.content,
+    type: "session-summary",
+    tags: ["session", "summary", ...(command.focus ? ["focused"] : [])],
+  });
+  return `memory session summary saved; entries=${String(saved.entryCount)}\n${saved.preview}`;
+}
+
+function checkpointArchivistSessionSync(session: RuntimeSession, reason: string): ReturnType<typeof addArchivistMemorySync> {
+  const summary = `Session checkpoint: ${normalizeCompactText(reason || "manual checkpoint")}`;
+  const content = [
+    summary,
+    `Provider: ${session.provider}`,
+    `Transport: ${session.providerTransport.mode}`,
+    `Turns: ${String(session.telemetry.turnCount)}`,
+    session.compaction.summary ? `Compaction: ${normalizeCompactText(session.compaction.summary)}` : "Compaction: none",
+  ].join("\n");
+  return addArchivistMemorySync(session, {
+    type: "checkpoint",
+    summary,
+    content,
+    tags: ["checkpoint", session.provider],
+    sourceCategory: "session-checkpoint",
+    action: "checkpoint",
+  });
 }
 
 function buildSessionMemoryDigest(session: RuntimeSession, focus: string | null): { summary: string; content: string } {
@@ -4980,7 +5837,7 @@ async function persistSessionDigestMemory(
   type: string,
   tags: string[],
 ): Promise<void> {
-  await checkpointArchivistSession(session, checkpointReason);
+  checkpointArchivistSessionSync(session, checkpointReason);
   const digest = buildSessionMemoryDigest(session, focus);
   await saveArchivistMemory(session, {
     summary: digest.summary,

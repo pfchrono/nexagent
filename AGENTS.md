@@ -23,12 +23,22 @@ Canonical guidance for coding agents working in `nexagent`.
   - `shell_command`
   - `archivist_save`
   - `archivist_checkpoint`
+  - `ask_user_question`
+  - `nexsight_execute`
+  - `nexsight_read`
+  - `nexsight_gather`
+  - `nexsight_index`
+  - `nexsight_batch`
+  - `nexsight_search`
+  - `get_goal`
+  - `update_goal`
   - `lsp_status`
   - `lsp_symbols`
   - `lsp_diagnostics`
-- slash commands including `/status`, `/status --sentry`, `/provider`, `/model`, `/effort`, `/tools`, `/memory`, `/memory --maintenance`, `/config`, `/lsp`, `/skill`, `/boomerang`, `/attach`, `/detach`, `/mouse`, `/approval`, `/compact`, `/diff`, `/rg`
+- slash commands including `/status`, `/status --sentry`, `/usage`, `/todos`, `/goal`, `/btw`, `/agents`, `/notify`, `/emoji`, `/color`, `/safegit`, `/scip`, `/extensions`, `/nexsight`, `/provider`, `/model`, `/effort`, `/tools`, `/memory`, `/memory --maintenance`, `/config`, `/lsp`, `/skill`, `/boomerang`, `/attach`, `/detach`, `/mouse`, `/approval`, `/compact`, `/diff`, `/rg`
 - `$skill` shorthand routed into `/skill`
 - guarded `!<command>` shell transcript command
+- Pi-like runtime extension lifecycle shim with startup discovery from `.nexagent/extensions`, `.pi/extensions`, global `~/.nexagent/extensions`, and `~/.pi/agent/extensions`; supports `on(...)`, sync slash command registration, tool registration metadata, and lifecycle events
 - `--yolo` session mode that bypasses guarded approvals while preserving protected OS-root shell/tool blocks
 - provider-gated multi-image attachment flow for HTTP transports, with `Alt+V` clipboard image paste and `/attach` path attach
 - startup MCP hydration from `.nexagent/mcp.json`, global `~/.nexagent/mcp.json`, and legacy `.mcp.json` with deduped server names and bounded startup timeouts
@@ -80,6 +90,17 @@ If a slash command changes, update `src/cli/catalog.ts`, README command docs, an
 
 - Start non-trivial code changes with a short plan before broad file reading. Clarify intended behavior, likely files, and verification path first.
 - Prefer focused codebase reads. Read the full target file before editing a frequently changed or high-churn file, then keep edits narrow.
+- Prefer Nexsight for broad repo inspection, audits, phase artifacts, and multi-file evidence. Use one `nexsight_gather` call for related files before making repeated `nexsight_read` or `nexsight_execute` calls.
+- Use `nexsight_execute` for custom counting/parsing/filtering only when one script can process all relevant targets and print a compact table or summary. Do not burn tool budget on many small one-file scripts.
+- Use `nexsight_read` for one known file with `map`, `signatures`, `outline`, or `lines:N-M`; use `read_file` when exact content is needed for editing.
+- Use `todo` near the start for GSD workflows, phases, milestones, next-slice/full-loop work, or any task with three or more meaningful steps. Keep exactly one current task `in_progress` when possible and mark tasks complete only after evidence or verification.
+- For GSD full-loop work, route visible stages through `todo`, broad phase/artifact evidence through `nexsight_gather`, exact edit context through `read_file`, artifact changes through `apply_patch`/`batch_edit`, and verification through focused tests or `shell_command`.
+- Tool loops have a hard budget. If evidence remains broad after two related tool calls, batch the next inspection or stop with a named blocker instead of continuing narrow probes.
+- If a tool fails, parse exact error, retry once with a smaller/safe equivalent, retry once with an alternate tool/path if available, preserve useful state in `todo` or memory, then hard-stop only when no safe path remains.
+- Hard-stop reports must include exact blocker, evidence gathered, recovery attempts tried, why no further safe action can continue, and what user access/input/dependency would unblock it.
+- Questions that ask why/how/what happened are diagnostic unless they explicitly request edits. Do not require write-tool evidence for explanation-only turns.
+- Use `ask_user_question` for genuine user intent gaps: GSD discussion/spec choices, design tradeoffs, framework selection, destructive or high-risk decisions, or implementation choices that cannot be inferred from repo evidence. Group related questions in one call with short options.
+- Do not use `ask_user_question` as an approval loop, progress update, or substitute for repo inspection. If tools can safely discover answer or continue work, use tools instead.
 - When a file shows repeated rework, write or update a spec, test, or concrete acceptance check before continuing implementation.
 - Record recurring error patterns, rejected approaches, and project-specific constraints in durable guidance instead of rediscovering them each session.
 - Use evidence labels for claims: observed, verified, inferred, assumption, or unknown. Do not present inference as verified. Evidence labels guide claim discipline only; they are not a reason to stop loop work while useful inspection or verification tools remain.

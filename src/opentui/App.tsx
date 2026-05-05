@@ -1,5 +1,6 @@
 import { flushSync, useRenderer, useTerminalDimensions } from "@opentui/react";
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { useEffect, useRef, useState } from "react";
 
 import {
@@ -13,8 +14,19 @@ import {
 } from "../cli.js";
 import { executeProviderRequest, type ImageAttachment } from "../provider.js";
 import { cancelBoomerang, completeBoomerang } from "../runtime/boomerang.js";
+import {
+  createRuntimeExtensionArgs,
+  createRuntimeExtensionContext,
+  findRuntimeExtensionCommand,
+  type RuntimeExtensionCustomComponent,
+} from "../runtime/extensions.js";
 import { checkpointNexsightSession } from "../runtime/nexsight.js";
 import type { RuntimeSession } from "../runtime/session.js";
+import { cancelBtwTurn, completeBtwTurn, formatBtwOverlayRows } from "../runtime/btw.js";
+import { savePersistedRuntimeState } from "../runtime/persistence.js";
+import { formatSubagentOverlayRows } from "../runtime/subagents.js";
+import { formatTodoOverlayRows } from "../runtime/todos.js";
+import { beginGoalTurn, completeGoalTurn, formatGoalOverlayRows, type GoalContinuation } from "../runtime/goal.js";
 import { formatTurnStartIntent } from "../runtime/turn-intent.js";
 import {
   maybeCompactConversation,
@@ -62,6 +74,8 @@ const WIDE_COCKPIT_MIN_COLUMNS = 120;
 const IDLE_REFRESH_INTERVAL_MS = 1000;
 const RUNNING_REFRESH_INTERVAL_MS = 80;
 const MOUSE_SCROLL_LINES = 1;
+const ANSI_ESCAPE_PATTERN = /\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\))/g;
+const CONTROL_CHARACTER_PATTERN = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g;
 
 function summarizeBoomerangEvent(summary: string): string {
   return summary
@@ -70,6 +84,48 @@ function summarizeBoomerangEvent(summary: string): string {
     .filter(Boolean)
     .slice(0, 8)
     .join("\n");
+}
+
+function sanitizeExtensionUiText(value: string): string {
+  return value
+    .replace(ANSI_ESCAPE_PATTERN, "")
+    .replace(CONTROL_CHARACTER_PATTERN, "");
+}
+
+function formatExtensionInputKey(key: OpenTuiKeyEvent): string {
+  if (key.name === "escape") {
+    return "escape";
+  }
+  if (key.name === "enter" || key.name === "return") {
+    return "enter";
+  }
+  if (key.name === "space") {
+    return " ";
+  }
+  if (key.sequence && key.sequence.length > 0 && !key.ctrl && !key.meta && !key.option) {
+    return key.sequence;
+  }
+  return key.name;
+}
+
+function findExtensionShortcutForKey(session: RuntimeSession, key: OpenTuiKeyEvent) {
+  if (!session.extensions) {
+    return null;
+  }
+  const candidates: string[] = [];
+  if (key.ctrl) {
+    candidates.push(`ctrl+${key.name}`);
+  }
+  if (key.meta || key.option) {
+    candidates.push(`alt+${key.name}`, `option+${key.name}`, `meta+${key.name}`);
+  }
+  for (const candidate of candidates) {
+    const shortcut = session.extensions.shortcuts.get(candidate);
+    if (shortcut) {
+      return shortcut;
+    }
+  }
+  return null;
 }
 
 interface OpenTuiMouseLikeEvent {
@@ -112,11 +168,18 @@ export function OpenTuiApp({ view: initialView, session, keyboardSource, promptH
   const [cockpitExpanded, setCockpitExpanded] = useState(false);
   const [configExpanded, setConfigExpanded] = useState(false);
   const [configSelectedIndex, setConfigSelectedIndex] = useState(0);
+  const [askSelectedIndex, setAskSelectedIndex] = useState(0);
+  const [extensionCustomLines, setExtensionCustomLines] = useState<string[] | null>(null);
   const [spinnerTick, setSpinnerTick] = useState(0);
   const providerRunningRef = useRef(false);
   const mountedRef = useRef(true);
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const clipboardPasteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const composerRef = useRef<OpenTuiComposerState>(composer);
+  const extensionCustomRef = useRef<RuntimeExtensionCustomComponent | null>(null);
+  const [, setExtensionWidgetRevision] = useState(0);
   const view = runtimeView;
+  composerRef.current = composer;
 
   const commandSurface = createCommandSurface(view.cwd, composer.text, composer.selectedIndex);
   const skillPreview = resolveSkillPreview(view.cwd, composer.text, composer.selectedIndex);
@@ -175,12 +238,71 @@ export function OpenTuiApp({ view: initialView, session, keyboardSource, promptH
   useEffect(() => {
     return () => {
       mountedRef.current = false;
+      if (session?.extensions?.uiBridge) {
+        session.extensions.uiBridge = undefined;
+      }
+      extensionCustomRef.current?.dispose?.();
+      extensionCustomRef.current = null;
       if (refreshTimerRef.current) {
         clearTimeout(refreshTimerRef.current);
         refreshTimerRef.current = null;
       }
+      if (clipboardPasteTimerRef.current) {
+        clearTimeout(clipboardPasteTimerRef.current);
+        clipboardPasteTimerRef.current = null;
+      }
     };
-  }, []);
+  }, [session]);
+
+  useEffect(() => {
+    if (!session?.extensions) {
+      return undefined;
+    }
+    session.extensions.uiBridge = {
+      notify(message, level = "info") {
+        setShellNotice(sanitizeExtensionUiText(`${level}: ${message}`));
+      },
+      setWidget() {
+        setExtensionWidgetRevision((current) => current + 1);
+      },
+      getEditorText() {
+        return composerRef.current.text;
+      },
+      setEditorText(value) {
+        const text = sanitizeExtensionUiText(value);
+        setComposer((current) => ({ ...current, text, cursorIndex: text.length, overlayMode: "none" }));
+      },
+      custom(factory) {
+        return new Promise((resolve) => {
+          const renderCustom = (component: RuntimeExtensionCustomComponent) => {
+            const lines = component.render(Math.max(20, contentWidth - 2)).map(sanitizeExtensionUiText);
+            setExtensionCustomLines(lines);
+          };
+          const done = (value?: unknown) => {
+            extensionCustomRef.current?.dispose?.();
+            extensionCustomRef.current = null;
+            setExtensionCustomLines(null);
+            resolve(value as never);
+          };
+          const component = factory({
+            requestRender: () => {
+              if (extensionCustomRef.current) {
+                renderCustom(extensionCustomRef.current);
+              }
+            },
+          }, {}, {}, done);
+          extensionCustomRef.current?.dispose?.();
+          extensionCustomRef.current = component;
+          renderCustom(component);
+        });
+      },
+    };
+    return () => {
+      if (session.extensions?.uiBridge) {
+        session.extensions.uiBridge = undefined;
+      }
+    };
+  }, [session]);
 
   useEffect(() => {
     if (!session) {
@@ -203,13 +325,26 @@ export function OpenTuiApp({ view: initialView, session, keyboardSource, promptH
 
   function handleKeyboardKey(key: OpenTuiKeyEvent): void {
     if (key.paste) {
+      if (clipboardPasteTimerRef.current) {
+        clearTimeout(clipboardPasteTimerRef.current);
+        clipboardPasteTimerRef.current = null;
+      }
       applyComposerEvent({ kind: "paste", value: key.sequence });
       setShellNotice(`pasted ${String(key.sequence.length)} chars`);
       return;
     }
-    if (key.ctrl && key.name === "q") {
+    if ((key.ctrl || key.meta || key.option) && key.name === "q") {
       onExit();
       return;
+    }
+    if (extensionCustomRef.current) {
+      extensionCustomRef.current.handleInput?.(formatExtensionInputKey(key));
+      return;
+    }
+    if (session?.operationControls.pendingQuestionnaire && composer.overlayMode === "none") {
+      if (handleAskKeyboardKey(key)) {
+        return;
+      }
     }
     if (key.ctrl && key.name === "t") {
       setTraceExpanded((current) => {
@@ -232,12 +367,26 @@ export function OpenTuiApp({ view: initialView, session, keyboardSource, promptH
       setShellNotice(configExpanded ? "config hidden" : "config shown");
       return;
     }
+    const extensionShortcut = session ? findExtensionShortcutForKey(session, key) : null;
+    if (extensionShortcut) {
+      const output = extensionShortcut.handler(createRuntimeExtensionArgs([]), createRuntimeExtensionContext(session!));
+      if (output && typeof (output as Promise<unknown>).then === "function") {
+        void (output as Promise<unknown>).then(() => {
+          setExtensionWidgetRevision((current) => current + 1);
+        }).catch((error) => {
+          session!.extensions?.invalidEntries.push(`shortcut ${extensionShortcut.name}: ${error instanceof Error ? error.message : String(error)}`);
+        });
+      }
+      setShellNotice(extensionShortcut.description ?? extensionShortcut.name);
+      setExtensionWidgetRevision((current) => current + 1);
+      return;
+    }
     if (key.ctrl && key.name === "r") {
       applyComposerEvent({ kind: "open-history-search" });
       return;
     }
     if (key.ctrl && key.name === "v") {
-      pasteTextFromClipboard();
+      scheduleTextPasteFromClipboard();
       return;
     }
     if (key.ctrl && key.name === "c") {
@@ -388,8 +537,24 @@ export function OpenTuiApp({ view: initialView, session, keyboardSource, promptH
 
   const paletteOverlayHeight = PALETTE_VISIBLE_ROWS + PALETTE_CHROME_ROWS;
   const cockpitRowBudget = showCockpitPanel ? compactCockpitLayout ? 6 : wideCockpitLayout ? 9 : 8 : 0;
+  const askPanel = createAskPanel(session?.operationControls.pendingQuestionnaire ?? null, askSelectedIndex, Math.min(Math.max(48, Math.floor(contentWidth * 0.72)), Math.max(32, contentWidth - 4)));
+  const extensionCustomRows = extensionCustomLines?.map((line, index) => ({ key: `extension-custom-${String(index)}`, text: line })) ?? [];
+  const btwRows = session ? formatBtwOverlayRows(session.btw, Math.max(12, contentWidth - 6)) : [];
+  const goalRows = session ? formatGoalOverlayRows(session.goal, Math.max(12, contentWidth - 6)) : [];
+  const subagentRows = session ? formatSubagentOverlayRows(session.subagents, Math.max(12, contentWidth - 6)) : [];
+  const todoRows = session ? formatTodoOverlayRows(session.todos, Math.max(12, contentWidth - 6)) : [];
+  const extensionWidgetRows = [
+    ...goalRows,
+    ...subagentRows,
+    ...btwRows,
+    ...todoRows,
+    ...extensionCustomRows,
+    ...(session?.extensions
+      ? [...session.extensions.widgets.entries()].flatMap(([id, lines]) => lines.map((line, index) => ({ key: `extension-widget-${id}-${String(index)}`, text: sanitizeExtensionUiText(line) })))
+      : []),
+  ];
   const composerPromptRows = renderComposerPromptRows(composer, contentWidth);
-  const composerReservedRows = composerPanelHeight(composerPromptRows.length, Boolean(attachmentLine));
+  const composerReservedRows = composerPanelHeight(composerPromptRows.length + extensionWidgetRows.length, Boolean(attachmentLine));
   const configPanelWidth = Math.min(Math.max(52, Math.floor(contentWidth * 0.38)), Math.max(36, contentWidth - 4));
   const configPanelLeft = Math.max(0, contentWidth - configPanelWidth - 1);
   const configPanelRows = renderConfigPanelRows(view, configPanelWidth, configSelectedIndex);
@@ -401,6 +566,10 @@ export function OpenTuiApp({ view: initialView, session, keyboardSource, promptH
   const lspProblemsPanelLeft = Math.max(0, contentWidth - lspProblemsPanelWidth - 1);
   const lspProblemsPanelTop = 2;
   const paletteTop = Math.max(4, terminalHeight - composerReservedRows - STATUSLINE_RESERVED_ROWS - paletteOverlayHeight - 1);
+  const askPanelWidth = askPanel?.width ?? paletteWidth;
+  const askPanelHeight = askPanel?.rows.length ?? 0;
+  const askPanelLeft = Math.max(0, Math.floor((contentWidth - askPanelWidth) / 2));
+  const askPanelTop = Math.max(4, terminalHeight - composerReservedRows - STATUSLINE_RESERVED_ROWS - askPanelHeight - 1);
   const traceProgressAllRows = traceExpanded
     ? renderTraceProgressRows(view.traceBlocks, contentWidth)
     : [];
@@ -459,6 +628,7 @@ export function OpenTuiApp({ view: initialView, session, keyboardSource, promptH
     width: contentWidth,
     attachmentLine,
     attachmentSupported: composer.attachment?.supported ?? false,
+    extensionRows: extensionWidgetRows,
     promptLines: composerPromptRows,
     previewLine,
     statusLine: `${String(terminalWidth)}x${String(terminalHeight)} · ${traceLabel} · ${shellNotice}`,
@@ -537,6 +707,32 @@ export function OpenTuiApp({ view: initialView, session, keyboardSource, promptH
           <text width={paletteWidth} fg="#f9e2af">Approval required</text>
           <text width={paletteWidth} fg="#f38ba8">{fitLine(`tool ${view.cockpit.approval.pendingTool}`, paletteWidth)}</text>
           <text width={paletteWidth} fg="#a6adc8">{fitLine(view.cockpit.approval.hints.join(" | "), paletteWidth)}</text>
+        </box>
+      ) : null}
+      {askPanel ? (
+        <box
+          flexDirection="column"
+          width={askPanelWidth}
+          height={askPanelHeight}
+          position="absolute"
+          top={askPanelTop}
+          left={askPanelLeft + 1}
+          zIndex={101}
+          padding={0}
+          overflow="hidden"
+          shouldFill
+          backgroundColor="#000000"
+        >
+          {askPanel.rows.map((row) => (
+            <text
+              key={row.key}
+              width={askPanelWidth}
+              fg={row.fg}
+              onMouseUp={row.optionIndex !== undefined ? (event) => handleAskOptionClick(row.optionIndex!, event) : undefined}
+            >
+              {row.text}
+            </text>
+          ))}
         </box>
       ) : null}
       {showCockpitPanel ? (
@@ -720,6 +916,11 @@ export function OpenTuiApp({ view: initialView, session, keyboardSource, promptH
         setShellNotice("config shown");
         return;
       }
+      const extensionCommand = findRuntimeExtensionCommand(session, intent.input.trim().split(/\s+/)[0] ?? "");
+      if (extensionCommand) {
+        void runOpenTuiExtensionCommand(intent.input, extensionCommand);
+        return;
+      }
       const result = runRuntimeCommand(session, intent.input);
       const autoInvokeAfterSkill = Boolean(result?.ok && result.autoInvokeAfterSkill);
       if (result && !autoInvokeAfterSkill) {
@@ -744,6 +945,34 @@ export function OpenTuiApp({ view: initialView, session, keyboardSource, promptH
       return;
     }
     void submitProviderPrompt(intent.input);
+  }
+
+  async function runOpenTuiExtensionCommand(input: string, extensionCommand: NonNullable<ReturnType<typeof findRuntimeExtensionCommand>>): Promise<void> {
+    if (!session) {
+      return;
+    }
+    const args = input.trim().split(/\s+/).slice(1);
+    try {
+      const output = await extensionCommand.handler(createRuntimeExtensionArgs(args), createRuntimeExtensionContext(session));
+      const result: RuntimeCommandResult = {
+        ok: true,
+        output: formatOpenTuiExtensionCommandOutput(output),
+        activity: `extension ${extensionCommand.name}`,
+      };
+      recordCommandOutputEvent(input, result);
+      setShellNotice(result.activity);
+      setExtensionWidgetRevision((current) => current + 1);
+      refreshRuntimeView();
+    } catch (error) {
+      const result: RuntimeCommandResult = {
+        ok: false,
+        message: error instanceof Error ? error.message : String(error),
+        activity: `command failed · ${extensionCommand.name}`,
+      };
+      recordCommandOutputEvent(input, result);
+      setShellNotice(result.activity);
+      refreshRuntimeView();
+    }
   }
 
   function attachImagePath(rawPath: string): void {
@@ -788,6 +1017,16 @@ export function OpenTuiApp({ view: initialView, session, keyboardSource, promptH
     }
     applyComposerEvent({ kind: "paste", value: text });
     setShellNotice(`pasted ${String(text.length)} chars`);
+  }
+
+  function scheduleTextPasteFromClipboard(): void {
+    if (clipboardPasteTimerRef.current) {
+      clearTimeout(clipboardPasteTimerRef.current);
+    }
+    clipboardPasteTimerRef.current = setTimeout(() => {
+      clipboardPasteTimerRef.current = null;
+      pasteTextFromClipboard();
+    }, 35);
   }
 
   function clearPendingAttachment(silent = false): void {
@@ -841,6 +1080,7 @@ export function OpenTuiApp({ view: initialView, session, keyboardSource, promptH
     refreshRuntimeView();
     setShellNotice("provider request started");
 
+    let goalContinuation: GoalContinuation | null = null;
     try {
       const autoCompact = maybeCompactConversation(session, prompt);
       if (autoCompact.compacted) {
@@ -849,15 +1089,28 @@ export function OpenTuiApp({ view: initialView, session, keyboardSource, promptH
       }
 
       const attachmentsForTurn = pendingImageAttachments;
+      beginGoalTurn(session);
       const result = await executeProviderRequest({
         session,
         prompt,
         ...(attachmentsForTurn.length > 0 ? { attachments: attachmentsForTurn } : {}),
       });
       if (result.ok) {
-        recordConversationTurn(session, "user", display.transcriptPrompt ?? prompt);
-        recordConversationTurn(session, "assistant", result.output);
+        const btwExchange = completeBtwTurn(session, result.output);
+        if (btwExchange) {
+          savePersistedRuntimeState(session);
+          recordRuntimeEvent(session, {
+            kind: "assistant",
+            status: "completed",
+            summary: "btw response captured",
+            detail: btwExchange.saved ? `saved note: ${btwExchange.question}` : btwExchange.question,
+          });
+        } else {
+          recordConversationTurn(session, "user", display.transcriptPrompt ?? prompt);
+          recordConversationTurn(session, "assistant", result.output);
+        }
         recordTurnTelemetry(session, prompt, result.output);
+        goalContinuation = completeGoalTurn(session, prompt, result.output);
         checkpointNexsightSession(session, "turn");
         const boomerangSummary = completeBoomerang(session, result.output);
         if (boomerangSummary) {
@@ -878,6 +1131,7 @@ export function OpenTuiApp({ view: initialView, session, keyboardSource, promptH
 
       setRuntimeAction(session, "error", result.message);
       cancelBoomerang(session);
+      cancelBtwTurn(session);
       recordRuntimeEvent(session, {
         kind: "provider",
         status: "failed",
@@ -898,6 +1152,7 @@ export function OpenTuiApp({ view: initialView, session, keyboardSource, promptH
       const message = error instanceof Error ? error.message : String(error);
       setRuntimeAction(session, "error", message);
       cancelBoomerang(session);
+      cancelBtwTurn(session);
       recordRuntimeEvent(session, {
         kind: "provider",
         status: "failed",
@@ -914,6 +1169,15 @@ export function OpenTuiApp({ view: initialView, session, keyboardSource, promptH
     } finally {
       providerRunningRef.current = false;
       refreshRuntimeView();
+      const nextGoalTurn = goalContinuation;
+      if (nextGoalTurn && mountedRef.current) {
+        setTimeout(() => {
+          void submitProviderPrompt(nextGoalTurn.prompt, {
+            transcriptPrompt: nextGoalTurn.transcriptPrompt,
+            promptSummary: nextGoalTurn.promptSummary,
+          });
+        }, 0);
+      }
     }
   }
 
@@ -946,6 +1210,57 @@ export function OpenTuiApp({ view: initialView, session, keyboardSource, promptH
       detail: detail.trim() || result.activity || input.trim(),
     });
     refreshRuntimeView();
+  }
+
+  function handleAskKeyboardKey(key: OpenTuiKeyEvent): boolean {
+    const request = session?.operationControls.pendingQuestionnaire ?? null;
+    const question = currentAskQuestion(request);
+    if (!request || !question) {
+      return false;
+    }
+    if (key.name === "up") {
+      setAskSelectedIndex((current) => (current - 1 + question.options.length) % question.options.length);
+      setShellNotice("ask select");
+      return true;
+    }
+    if (key.name === "down" || key.name === "tab") {
+      setAskSelectedIndex((current) => (current + 1) % question.options.length);
+      setShellNotice("ask select");
+      return true;
+    }
+    if (key.name === "enter" || key.name === "return") {
+      submitAskOption(askSelectedIndex);
+      return true;
+    }
+    if (key.name === "escape") {
+      submitPrompt("/ask cancel");
+      return true;
+    }
+    const digit = key.sequence.match(/^[1-4]$/)?.[0] ?? key.name.match(/^[1-4]$/)?.[0];
+    if (digit) {
+      submitAskOption(Number.parseInt(digit, 10) - 1);
+      return true;
+    }
+    return false;
+  }
+
+  function submitAskOption(optionIndex: number): void {
+    const request = session?.operationControls.pendingQuestionnaire ?? null;
+    const question = currentAskQuestion(request);
+    if (!request || !question) {
+      setShellNotice("ask unavailable");
+      return;
+    }
+    const clamped = Math.max(0, Math.min(question.options.length - 1, optionIndex));
+    submitPrompt(`/ask ${String(clamped + 1)}`);
+    setAskSelectedIndex(0);
+  }
+
+  function handleAskOptionClick(optionIndex: number, event: OpenTuiMouseLikeEvent): void {
+    setAskSelectedIndex(optionIndex);
+    submitAskOption(optionIndex);
+    event.stopPropagation();
+    event.preventDefault();
   }
 
   function moveConfigSelection(delta: number): void {
@@ -1460,13 +1775,27 @@ function copyNotice(text: string): string {
 }
 
 function copyTextToClipboard(text: string): boolean {
-  const clipboardCommands: ReadonlyArray<{ cmd: string; args: string[] }> = [
+  const nativeCommands: ReadonlyArray<{ cmd: string; args: string[] }> = [
     { cmd: "pbcopy", args: [] },
     { cmd: "wl-copy", args: [] },
     { cmd: "xclip", args: ["-selection", "clipboard"] },
     { cmd: "xsel", args: ["--clipboard", "--input"] },
-    { cmd: "powershell.exe", args: ["-NoProfile", "-Command", "Set-Clipboard -Value ([Console]::In.ReadToEnd())"] },
+    { cmd: "clip.exe", args: [] },
   ];
+  const windowsCommands = createWindowsClipboardCommands([
+    "[Console]::InputEncoding=[System.Text.UTF8Encoding]::new($false)",
+    "$ErrorActionPreference='SilentlyContinue'",
+    "$value = [Console]::In.ReadToEnd()",
+    "for ($i = 0; $i -lt 6; $i++) {",
+    "  try { Set-Clipboard -Value $value; exit 0 } catch {}",
+    "  try { Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Clipboard]::SetText($value, [System.Windows.Forms.TextDataFormat]::UnicodeText); exit 0 } catch {}",
+    "  Start-Sleep -Milliseconds 80",
+    "}",
+    "exit 1",
+  ].join("\n"), { sta: true });
+  const clipboardCommands = isProbablyWsl()
+    ? [...windowsCommands, ...nativeCommands]
+    : [...nativeCommands, ...windowsCommands];
 
   for (const candidate of clipboardCommands) {
     try {
@@ -1496,13 +1825,29 @@ function copyTextToClipboardOsc52(text: string): boolean {
 }
 
 function readClipboardText(): string {
-  const clipboardCommands: ReadonlyArray<{ cmd: string; args: string[] }> = [
+  const nativeCommands: ReadonlyArray<{ cmd: string; args: string[] }> = [
     { cmd: "pbpaste", args: [] },
     { cmd: "wl-paste", args: ["--no-newline"] },
     { cmd: "xclip", args: ["-selection", "clipboard", "-o"] },
     { cmd: "xsel", args: ["--clipboard", "--output"] },
-    { cmd: "powershell.exe", args: ["-NoProfile", "-Command", "Get-Clipboard -Raw"] },
   ];
+  const windowsCommands = createWindowsClipboardCommands([
+    "[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false)",
+    "$ErrorActionPreference='SilentlyContinue'",
+    "function Write-ClipboardValue($value) {",
+    "  if ($null -ne $value -and [string]$value -ne '') { [Console]::Out.Write([string]$value); exit 0 }",
+    "}",
+    "for ($i = 0; $i -lt 6; $i++) {",
+    "  try { Write-ClipboardValue (Get-Clipboard -Raw -Format Text) } catch {}",
+    "  try { Write-ClipboardValue (Get-Clipboard -Raw) } catch {}",
+    "  try { Add-Type -AssemblyName System.Windows.Forms; if ([System.Windows.Forms.Clipboard]::ContainsText()) { Write-ClipboardValue ([System.Windows.Forms.Clipboard]::GetText([System.Windows.Forms.TextDataFormat]::UnicodeText)) } } catch {}",
+    "  Start-Sleep -Milliseconds 80",
+    "}",
+    "exit 0",
+  ].join("\n"), { sta: true });
+  const clipboardCommands = isProbablyWsl()
+    ? [...windowsCommands, ...nativeCommands]
+    : [...nativeCommands, ...windowsCommands];
 
   for (const candidate of clipboardCommands) {
     try {
@@ -1510,6 +1855,7 @@ function readClipboardText(): string {
         encoding: "utf8",
         stdio: ["ignore", "pipe", "ignore"],
         maxBuffer: 256 * 1024,
+        timeout: 1500,
       });
       if (text.trim().length > 0) {
         return text.length > 24_000 ? text.slice(0, 24_000) : text;
@@ -1520,6 +1866,38 @@ function readClipboardText(): string {
   }
 
   return "";
+}
+
+function createWindowsClipboardCommands(
+  script: string,
+  options: { sta?: boolean } = {},
+): ReadonlyArray<{ cmd: string; args: string[] }> {
+  const encoded = Buffer.from(script, "utf16le").toString("base64");
+  const args = ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded];
+  const staArgs = options.sta
+    ? ["-NoLogo", "-NoProfile", "-NonInteractive", "-Sta", "-EncodedCommand", encoded]
+    : args;
+  return [
+    { cmd: "powershell.exe", args: staArgs },
+    { cmd: "pwsh.exe", args },
+    { cmd: "pwsh", args },
+    { cmd: "/mnt/c/WINDOWS/System32/WindowsPowerShell/v1.0/powershell.exe", args: staArgs },
+    { cmd: "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe", args: staArgs },
+  ];
+}
+
+function isProbablyWsl(): boolean {
+  if (process.platform !== "linux") {
+    return false;
+  }
+  if (process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP) {
+    return true;
+  }
+  try {
+    return readFileSync("/proc/version", "utf8").toLowerCase().includes("microsoft");
+  } catch {
+    return false;
+  }
 }
 
 function formatAttachmentListLabel(attachments: readonly ImageAttachment[]): string {
@@ -1543,6 +1921,19 @@ function formatAttachmentSize(value: number): string {
   return `${(kib / 1024).toFixed(1)}MB`;
 }
 
+function formatOpenTuiExtensionCommandOutput(output: unknown): string {
+  if (typeof output === "string") {
+    return output;
+  }
+  if (output === undefined || output === null) {
+    return "ok";
+  }
+  if (typeof output === "object" && "message" in output && typeof (output as { message?: unknown }).message === "string") {
+    return (output as { message: string }).message;
+  }
+  return JSON.stringify(output, null, 2);
+}
+
 function renderComposerPromptRows(composer: OpenTuiComposerState, width: number): string[] {
   const attachmentPrefix = composer.attachment?.supported ? `${composer.attachment.label} ` : "";
   if (composer.text.length === 0) {
@@ -1550,6 +1941,76 @@ function renderComposerPromptRows(composer: OpenTuiComposerState, width: number)
   }
   const rendered = renderComposerLine(composer, width, attachmentPrefix);
   return rendered.split("\n").slice(-COMPOSER_VISIBLE_PROMPT_ROWS);
+}
+
+function currentAskQuestion(
+  request: RuntimeSession["operationControls"]["pendingQuestionnaire"],
+): NonNullable<RuntimeSession["operationControls"]["pendingQuestionnaire"]>["questions"][number] | null {
+  if (!request) {
+    return null;
+  }
+  const nextIndex = request.questions.findIndex((_, index) =>
+    !request.answers.some((answer) => answer.questionIndex === index)
+  );
+  const questionIndex = nextIndex >= 0 ? nextIndex : 0;
+  return request.questions[questionIndex] ?? null;
+}
+
+function createAskPanel(
+  request: RuntimeSession["operationControls"]["pendingQuestionnaire"],
+  selectedIndex: number,
+  width: number,
+): { width: number; rows: Array<{ key: string; text: string; fg: string; optionIndex?: number }> } | null {
+  if (!request) {
+    return null;
+  }
+  const nextIndex = request.questions.findIndex((_, index) =>
+    !request.answers.some((answer) => answer.questionIndex === index)
+  );
+  const questionIndex = nextIndex >= 0 ? nextIndex : 0;
+  const question = request.questions[questionIndex];
+  if (!question) {
+    return { width, rows: [{
+      key: "ask-pending",
+      text: "ask: pending question - /ask status",
+      fg: "#f9e2af",
+    }] };
+  }
+
+  const answered = request.answers.length > 0 ? ` · answered ${String(request.answers.length)}/${String(request.questions.length)}` : "";
+  const safeSelected = Math.max(0, Math.min(question.options.length - 1, selectedIndex));
+  const rows: Array<{ key: string; text: string; fg: string; optionIndex?: number }> = [
+    {
+      key: "ask-title",
+      text: frameTop(` ask ${String(questionIndex + 1)}/${String(request.questions.length)} ${question.header}${answered} `, Math.max(12, width - 4)),
+      fg: "#f9e2af",
+    },
+    {
+      key: "ask-question",
+      text: frameBody(question.question, Math.max(12, width - 4)),
+      fg: "#ffffff",
+    },
+  ];
+  for (const [index, option] of question.options.entries()) {
+    const selected = index === safeSelected;
+    rows.push({
+      key: `ask-option-${String(index)}`,
+      text: frameBody(`${selected ? ">" : " "} ${String(index + 1)}. ${option.label} - ${option.description}`, Math.max(12, width - 4)),
+      fg: selected ? "#a6e3a1" : "#cdd6f4",
+      optionIndex: index,
+    });
+  }
+  rows.push({
+    key: "ask-help",
+    text: frameBody("Up/Down select · Enter choose · 1-4 quick · Esc cancel · type custom if needed", Math.max(12, width - 4)),
+    fg: "#a6adc8",
+  });
+  rows.push({
+    key: "ask-bottom",
+    text: frameBottom(Math.max(12, width - 4)),
+    fg: "#f9e2af",
+  });
+  return { width, rows: rows.map((row) => ({ ...row, text: fitFrameLine(row.text, width) })) };
 }
 
 function composerPanelHeight(promptRowCount: number, hasAttachment: boolean): number {
@@ -1569,6 +2030,7 @@ function renderComposerPanelRows(options: {
   width: number;
   attachmentLine: string | null;
   attachmentSupported: boolean;
+  extensionRows?: Array<{ key: string; text: string; fg?: string }>;
   promptLines: string[];
   previewLine: string;
   statusLine: string;
@@ -1582,6 +2044,13 @@ function renderComposerPanelRows(options: {
       key: "composer-attachment",
       text: frameBody(options.attachmentLine, innerWidth),
       fg: options.attachmentSupported ? "#f9e2af" : "#f38ba8",
+    });
+  }
+  for (const row of options.extensionRows ?? []) {
+    rows.push({
+      key: row.key,
+      text: frameBody(row.text, innerWidth),
+      fg: row.fg ?? "#f9e2af",
     });
   }
   rows.push(
@@ -1938,17 +2407,19 @@ function renderStatuslineRows(options: {
   attachmentLabel: string | null;
 }): Array<{ key: string; text: string; fg: string }> {
   const tokensTotal = options.statusline.lastInputTokens + options.statusline.lastOutputTokens;
-  const progressPrefix = options.progress ? `${options.progress}  ` : "";
   const memLabel = `${formatMemoryBytes(options.statusline.memoryUsedBytes)}/${formatMemoryBytes(options.statusline.memoryTotalBytes)}`;
   const gitLabel = `${options.statusline.branch}/${options.statusline.repoName}`;
-  const contextBar = formatContextUsageBar(options.statusline.contextPercent, 20);
-  const row1 = `${progressPrefix}Model: ${formatModelLabel(options.statusline.model)}  Mem: ${memLabel}  Git: ${gitLabel}  Session: ${options.statusline.sessionAge}`;
+  const contextBar = formatContextUsageBar(options.statusline.contextPercent, 12);
+  const contextLabel = `${formatContextTokenNumber(options.statusline.contextUsed)}/${formatContextTokenNumber(options.statusline.contextWindow)}`;
+  const clockLabel = formatStatuslineClock(new Date());
+  const progressPrefix = options.progress ? `${options.progress} ` : "";
+  const row1 = `${progressPrefix}${formatModelLabel(options.statusline.model)} · mem ${memLabel} · git ${gitLabel} · session ${options.statusline.sessionAge} · ${clockLabel}`;
   const attachmentPart = options.attachmentLabel ? ` · ${options.attachmentLabel}` : "";
-  const row2 = `Context: ${contextBar} ${String(options.statusline.contextPercent)}%  nexagent  Total: ${formatCompactNumber(tokensTotal)}  ↓ In: ${formatCompactNumber(options.statusline.lastInputTokens)}  ↑ Out: ${formatCompactNumber(options.statusline.lastOutputTokens)}  ${options.transcriptPosition} · ${options.traceLabel} · ${options.shellNotice}${attachmentPart}`;
+  const row2 = `ctx ${contextBar} ${contextLabel} ${String(options.statusline.contextPercent)}% · tok ${formatCompactNumber(tokensTotal)} (${formatCompactNumber(options.statusline.lastInputTokens)}↓/${formatCompactNumber(options.statusline.lastOutputTokens)}↑) · ${options.transcriptPosition} · ${options.shellNotice}${attachmentPart}`;
   return [
-    { key: "status-divider", text: chatDividerLine(options.width, "bottom"), fg: "#f9e2af" },
+    { key: "status-divider", text: chatDividerLine(options.width, "bottom"), fg: "#cba6f7" },
     { key: "status-row-1", text: fitLine(row1, options.width), fg: "#f9e2af" },
-    { key: "status-row-2", text: fitLine(row2, options.width), fg: "#a6adc8" },
+    { key: "status-row-2", text: fitLine(row2, options.width), fg: "#cdd6f4" },
   ];
 }
 
@@ -1983,6 +2454,21 @@ function formatCompactNumber(value: number): string {
     return `${(value / 1_000).toFixed(1).replace(/\.0$/, "")}k`;
   }
   return String(value);
+}
+
+function formatContextTokenNumber(value: number): string {
+  return formatCompactNumber(value);
+}
+
+function formatStatuslineClock(date: Date): string {
+  let hour = date.getHours();
+  const minute = date.getMinutes().toString().padStart(2, "0");
+  const suffix = hour >= 12 ? "PM" : "AM";
+  hour %= 12;
+  if (hour === 0) {
+    hour = 12;
+  }
+  return `${String(hour)}:${minute}${suffix}`;
 }
 
 function rowsForOverlay(

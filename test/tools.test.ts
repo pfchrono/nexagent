@@ -7,7 +7,7 @@ import test from "node:test";
 import { createDefaultProviderRegistry } from "../src/provider/registry.js";
 import { applyArchivistRetrieval, rememberArchivistFailure } from "../src/runtime/archivist.js";
 import { resolveNexsightRuntime } from "../src/runtime/nexsight.js";
-import { analyzeBlockedShellCommand } from "../src/runtime/policy.js";
+import { analyzeBlockedShellCommand, analyzeSafeGitCommand } from "../src/runtime/policy.js";
 import { classifyInternalToolRisk, executeInternalTool, executeInternalToolAsync } from "../src/runtime/tools.js";
 import type { RuntimeSession } from "../src/runtime/session.js";
 
@@ -135,12 +135,53 @@ function createSession(cwd: string): RuntimeSession {
       requireApprovalForGuarded: false,
       yoloMode: false,
       pendingApproval: null,
+      pendingQuestionnaire: null,
       lastDecision: null,
       cancelRequested: false,
       steerMessage: null,
       steerState: null,
       lastAppliedSteer: null,
       steerHistory: [],
+      lastShellBlocker: null,
+      boomerang: {
+        active: false,
+        task: null,
+        startConversationIndex: 0,
+        startEventIndex: 0,
+        lastSummary: null,
+      },
+    },
+    btw: {
+      visible: false,
+      mode: "contextual",
+      thread: [],
+      pending: null,
+      nextId: 1,
+      modelOverride: null,
+      thinkingOverride: null,
+      updatedAt: null,
+    },
+    todos: {
+      tasks: [],
+      nextId: 1,
+      updatedAt: null,
+    },
+    toolMemory: {
+      entries: [],
+      nextId: 1,
+      updatedAt: null,
+    },
+    subagents: {
+      agents: [],
+      types: [],
+      nextId: 1,
+      updatedAt: null,
+    },
+    goal: {
+      goal: null,
+      statusBarEnabled: true,
+      activeTurnStartedAt: null,
+      updatedAt: null,
     },
     conversation: [],
     compaction: {
@@ -201,6 +242,141 @@ test("executeInternalTool writes and patches file inside guarded repo roots", as
   }
 });
 
+test("todo tool creates, advances, completes, and lists visual tasks", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-todo-tool-"));
+  try {
+    const session = createSession(cwd);
+
+    const created = executeInternalTool(session, {
+      name: "todo",
+      arguments: { action: "create", subject: "Inspect repo", activeForm: "Inspecting repo" },
+    });
+    assert.equal(created.ok, true);
+    assert.match(created.output, /\[ \] todo-1 Inspecting repo/);
+
+    const active = executeInternalTool(session, {
+      name: "todo",
+      arguments: { action: "update", id: "todo-1", status: "in_progress" },
+    });
+    assert.equal(active.ok, true);
+    assert.match(active.output, /\[>\] todo-1 Inspecting repo/);
+
+    const done = executeInternalTool(session, {
+      name: "todo",
+      arguments: { action: "update", id: "todo-1", status: "completed" },
+    });
+    assert.equal(done.ok, true);
+    assert.match(done.output, /\[x\] todo-1 Inspecting repo/);
+
+    const listed = executeInternalTool(session, { name: "todo", arguments: { action: "list" } });
+    assert.equal(listed.ok, true);
+    assert.match(listed.output, /todos/);
+    assert.match(listed.output, /\[x\] todo-1 Inspecting repo/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("todo tool rejects completed regression and dependency cycles", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-todo-guard-"));
+  try {
+    const session = createSession(cwd);
+    executeInternalTool(session, { name: "todo", arguments: { action: "create", subject: "A" } });
+    executeInternalTool(session, { name: "todo", arguments: { action: "create", subject: "B", blockedBy: ["todo-1"] } });
+    executeInternalTool(session, { name: "todo", arguments: { action: "update", id: "todo-1", status: "completed" } });
+
+    const regress = executeInternalTool(session, {
+      name: "todo",
+      arguments: { action: "update", id: "todo-1", status: "in_progress" },
+    });
+    assert.equal(regress.ok, false);
+    assert.match(regress.output, /completed todo can only move to deleted/);
+
+    const cycle = executeInternalTool(session, {
+      name: "todo",
+      arguments: { action: "update", id: "todo-1", addBlockedBy: ["todo-2"] },
+    });
+    assert.equal(cycle.ok, false);
+    assert.match(cycle.output, /dependency cycle/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("goal tools expose state and only allow complete updates", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-goal-tool-"));
+  try {
+    const session = createSession(cwd);
+    session.goal.goal = {
+      version: 1,
+      id: "goal-1",
+      objective: "finish migration",
+      status: "active",
+      tokenBudget: 1000,
+      tokensUsed: 10,
+      timeUsedSeconds: 2,
+      createdAt: 1,
+      updatedAt: 1,
+    };
+
+    const current = executeInternalTool(session, { name: "get_goal", arguments: {} });
+    assert.equal(current.ok, true);
+    assert.match(current.output, /finish migration/);
+
+    const rejected = executeInternalTool(session, { name: "update_goal", arguments: { status: "paused" } });
+    assert.equal(rejected.ok, false);
+    assert.match(rejected.output, /only accepts status=complete/);
+
+    const completed = executeInternalTool(session, { name: "update_goal", arguments: { status: "complete" } });
+    assert.equal(completed.ok, true);
+    assert.equal(session.goal.goal.status, "complete");
+    assert.match(completed.output, /remainingTokens/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("subagent result and steer tools operate on tracked agents", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-subagent-tools-"));
+  try {
+    const session = createSession(cwd);
+    session.subagents.agents.push({
+      id: "agent-1",
+      type: "Explore",
+      description: "Inspect files",
+      prompt: "Inspect files",
+      status: "completed",
+      background: true,
+      inheritContext: false,
+      result: "Found package.json.",
+      error: null,
+      steerMessages: [],
+      createdAt: "2026-05-04T00:00:00.000Z",
+      startedAt: "2026-05-04T00:00:00.000Z",
+      completedAt: "2026-05-04T00:00:01.000Z",
+      inputTokens: 12,
+      outputTokens: 4,
+    });
+
+    const result = await executeInternalToolAsync(session, {
+      name: "get_subagent_result",
+      arguments: { agent_id: "agent-1" },
+    });
+    assert.equal(result.ok, true);
+    assert.match(result.output, /subagent agent-1/);
+    assert.match(result.output, /Found package\.json/);
+
+    const steer = executeInternalTool(session, {
+      name: "steer_subagent",
+      arguments: { agent_id: "agent-1", message: "focus on tests" },
+    });
+    assert.equal(steer.ok, true);
+    assert.deepEqual(session.subagents.agents[0]?.steerMessages, ["focus on tests"]);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test("executeInternalTool previews patch without writing file", async () => {
   const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-tools-preview-"));
 
@@ -236,6 +412,8 @@ test("executeInternalTool batch edits validate anchors before writing", async ()
     await mkdir(path.join(cwd, "src"));
     await writeFile(path.join(cwd, "src", "one.ts"), "alpha\n// anchor\nomega\n", "utf8");
     await writeFile(path.join(cwd, "src", "two.ts"), "first\nsecond\n", "utf8");
+    executeInternalTool(session, { name: "read_file", arguments: { path: "src/one.ts" } });
+    executeInternalTool(session, { name: "read_file", arguments: { path: "src/two.ts" } });
 
     const missingAnchor = executeInternalTool(session, {
       name: "batch_edit",
@@ -351,6 +529,16 @@ test("executeInternalTool runs nexsight execute and local index search", async (
     assert.equal(shortAliasResult.ok, true);
     assert.equal(shortAliasResult.output, "nexsight-cmd-alias");
 
+    const compressedShellResult = executeInternalTool(session, {
+      name: "nexsight_execute",
+      arguments: {
+        command: "for i in $(seq 1 220); do echo \"ok test $i\"; done; echo \"failed test important\"",
+      },
+    });
+    assert.equal(compressedShellResult.ok, true);
+    assert.match(compressedShellResult.output, /failed test important/);
+    assert.match(compressedShellResult.output, /\[nexsight lean:/);
+
     const inferredPythonResult = executeInternalTool(session, {
       name: "nexsight_execute",
       arguments: {
@@ -378,6 +566,43 @@ test("executeInternalTool runs nexsight execute and local index search", async (
     });
     assert.equal(homeResult.ok, true);
     assert.equal(homeResult.output, `${process.env.HOME ?? cwd}\n${cwd}`);
+
+    await writeFile(path.join(cwd, "api.ts"), [
+      "import fs from 'node:fs';",
+      "export interface User { id: string }",
+      "export function loadUser(id: string): User {",
+      "  return { id };",
+      "}",
+      "class LocalThing {",
+      "  run(): void {}",
+      "}",
+    ].join("\n"), "utf8");
+
+    const readMapResult = executeInternalTool(session, {
+      name: "nexsight_read",
+      arguments: { path: "api.ts", mode: "map" },
+    });
+    assert.equal(readMapResult.ok, true);
+    assert.match(readMapResult.output, /mode: map/);
+    assert.match(readMapResult.output, /export function loadUser/);
+    assert.doesNotMatch(readMapResult.output, /return \{ id \}/);
+
+    const readLinesResult = executeInternalTool(session, {
+      name: "nexsight_read",
+      arguments: { path: "api.ts", mode: "lines:3-4" },
+    });
+    assert.equal(readLinesResult.ok, true);
+    assert.match(readLinesResult.output, /3: export function loadUser/);
+    assert.match(readLinesResult.output, /4:   return/);
+
+    const gatherResult = executeInternalTool(session, {
+      name: "nexsight_gather",
+      arguments: { root: ".", pattern: "*.ts", query: "loadUser", mode: "signatures", limit: 10 },
+    });
+    assert.equal(gatherResult.ok, true);
+    assert.match(gatherResult.output, /nexsight gather/);
+    assert.match(gatherResult.output, /api\.ts/);
+    assert.match(gatherResult.output, /export function loadUser/);
 
     assert.equal(classifyInternalToolRisk({
       name: "nexsight_execute",
@@ -684,6 +909,29 @@ test("executeInternalTool runs guarded shell command inside repo cwd", async () 
   }
 });
 
+test("safe-git blocks high-risk git shell commands", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-tools-safe-git-"));
+
+  try {
+    const session = createSession(cwd);
+    const analysis = analyzeSafeGitCommand("git reset --hard HEAD");
+    assert.equal(analysis?.reason, "safe-git blocked hard reset");
+
+    const result = executeInternalTool(session, {
+      name: "shell_command",
+      arguments: {
+        command: "git push --force origin main",
+      },
+    });
+
+    assert.equal(result.ok, false);
+    assert.match(result.output, /safe-git blocked force push/);
+    assert.equal(session.operationControls.lastShellBlocker?.source, "safe-git");
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test("executeInternalTool permits absolute redirects outside protected system roots", async () => {
   const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-tools-shell-redirect-"));
 
@@ -699,6 +947,10 @@ test("executeInternalTool permits absolute redirects outside protected system ro
 
     assert.equal(result.ok, true);
     assert.equal(await readFile(target, "utf8"), "ok\n");
+    assert.equal(analyzeBlockedShellCommand("printf ok > /dev/null"), null);
+    assert.equal(analyzeBlockedShellCommand("printf ok 2> /dev/null"), null);
+    assert.equal(analyzeBlockedShellCommand("printf ok >/dev/null"), null);
+    assert.equal(analyzeBlockedShellCommand("printf ok > /dev/null; printf bad > /etc/nexagent-blocked")?.reason, "redirect writes into protected system roots");
 
     const blocked = executeInternalTool(session, {
       name: "shell_command",
@@ -1056,6 +1308,143 @@ process.stdin.on("data", (chunk) => {
   }
 });
 
+test("lsp_navigation tool returns bounded Pi Lens-style references", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-tools-lsp-navigation-"));
+
+  try {
+    await writeFile(path.join(cwd, "sample.ts"), "export function alpha() {}\nalpha();\n", "utf8");
+    const session = createSession(cwd);
+    session.lsp.enabled = true;
+
+    const result = await executeInternalToolAsync(session, {
+      name: "lsp_navigation",
+      arguments: {
+        operation: "references",
+        filePath: "sample.ts",
+        line: 1,
+        character: 17,
+      },
+    });
+
+    assert.equal(result.ok, true);
+    assert.match(result.output, /^lsp navigation$/m);
+    assert.match(result.output, /^operation: references$/m);
+    assert.match(result.output, /reference alpha sample\.ts:1:17/);
+    assert.match(result.output, /reference alpha sample\.ts:2:1/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("lsp_navigation tool uses JSON-RPC definition when server is available", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-tools-lsp-navigation-server-"));
+
+  try {
+    const serverPath = path.join(cwd, "fake-lsp-nav.mjs");
+    await writeFile(serverPath, `
+let buffer = Buffer.alloc(0);
+function send(message) {
+  const body = JSON.stringify(message);
+  process.stdout.write("Content-Length: " + Buffer.byteLength(body) + "\\r\\n\\r\\n" + body);
+}
+function handle(message) {
+  if (message.method === "initialize") {
+    send({ jsonrpc: "2.0", id: message.id, result: { capabilities: { definitionProvider: true, hoverProvider: true } } });
+    return;
+  }
+  if (message.method === "textDocument/definition") {
+    send({ jsonrpc: "2.0", id: message.id, result: { uri: "file://${cwd.replace(/\\/g, "/")}/sample.ts", range: { start: { line: 0, character: 16 }, end: { line: 0, character: 21 } } } });
+    return;
+  }
+  if (message.method === "textDocument/hover") {
+    send({ jsonrpc: "2.0", id: message.id, result: { contents: { value: "function alpha(): void" } } });
+  }
+}
+process.stdin.on("data", (chunk) => {
+  buffer = Buffer.concat([buffer, chunk]);
+  while (true) {
+    const headerEnd = buffer.indexOf("\\r\\n\\r\\n");
+    if (headerEnd < 0) break;
+    const header = buffer.slice(0, headerEnd).toString("utf8");
+    const match = /Content-Length: (\\d+)/i.exec(header);
+    if (!match) break;
+    const length = Number(match[1]);
+    const start = headerEnd + 4;
+    const end = start + length;
+    if (buffer.length < end) break;
+    handle(JSON.parse(buffer.slice(start, end).toString("utf8")));
+    buffer = buffer.slice(end);
+  }
+});
+`, "utf8");
+    await chmod(serverPath, 0o755);
+    await writeFile(path.join(cwd, "sample.ts"), "export function alpha() {}\nalpha();\n", "utf8");
+    const session = createSession(cwd);
+    session.lsp.enabled = true;
+    session.lsp.command = process.execPath;
+    session.lsp.args = [serverPath];
+
+    const result = await executeInternalToolAsync(session, {
+      name: "lsp_navigation",
+      arguments: {
+        operation: "definition",
+        filePath: "sample.ts",
+        line: 2,
+        character: 1,
+      },
+    });
+
+    assert.equal(result.ok, true);
+    assert.match(result.output, /^operation: definition$/m);
+    assert.match(result.output, /location sample\.ts sample\.ts:1:17/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("write tools enforce read guard, secrets guard, and JSON formatting", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-tools-quality-hooks-"));
+
+  try {
+    const session = createSession(cwd);
+    await writeFile(path.join(cwd, "existing.ts"), "export const value = 1;\n", "utf8");
+
+    const blocked = executeInternalTool(session, {
+      name: "apply_patch",
+      arguments: { path: "existing.ts", find: "1", replace: "2" },
+    });
+    assert.equal(blocked.ok, false);
+    assert.match(blocked.output, /read guard blocked existing\.ts/);
+
+    const read = executeInternalTool(session, { name: "read_file", arguments: { path: "existing.ts" } });
+    assert.equal(read.ok, true);
+
+    await writeFile(path.join(cwd, "existing.ts"), "export const value = 1;\n// external\n", "utf8");
+    const stale = executeInternalTool(session, {
+      name: "apply_patch",
+      arguments: { path: "existing.ts", find: "1", replace: "2" },
+    });
+    assert.equal(stale.ok, false);
+    assert.match(stale.output, /file changed since last read/);
+
+    const secret = executeInternalTool(session, {
+      name: "write_file",
+      arguments: { path: "secret.txt", content: "token=sk-12345678901234567890123456789012" },
+    });
+    assert.equal(secret.ok, false);
+    assert.match(secret.output, /secrets guard blocked write/);
+
+    const json = executeInternalTool(session, {
+      name: "write_file",
+      arguments: { path: "config.json", content: "{\"b\":2,\"a\":1}" },
+    });
+    assert.equal(json.ok, true);
+    assert.equal(await readFile(path.join(cwd, "config.json"), "utf8"), "{\n  \"b\": 2,\n  \"a\": 1\n}\n");
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test("Archivist stores and recalls failure recovery playbooks", async () => {
   const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-tools-failure-playbook-"));
 
@@ -1079,6 +1468,94 @@ test("Archivist stores and recalls failure recovery playbooks", async () => {
     assert.equal(session.archivist.retrieval.used, true);
     assert.equal(session.archivist.retrieval.sourceCategory, "failure-playbook");
     assert.match(session.archivist.retrieval.preview ?? "", /lsp_symbols failed: path_not_found/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("ask_user_question waits for pending user answer and returns envelope", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-tools-ask-user-"));
+
+  try {
+    const session = createSession(cwd);
+    const pending = executeInternalToolAsync(session, {
+      name: "ask_user_question",
+      arguments: {
+        questions: [{
+          question: "Which path should we take?",
+          header: "Path",
+          options: [
+            { label: "Fast (Recommended)", description: "Ship smallest useful change." },
+            { label: "Full port", description: "Spend more time for parity." },
+          ],
+        }],
+      },
+    });
+
+    for (let index = 0; index < 20 && !session.operationControls.pendingQuestionnaire; index += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(session.operationControls.pendingQuestionnaire?.questions[0]?.header, "Path");
+    session.operationControls.pendingQuestionnaire!.response = {
+      cancelled: false,
+      answers: [{
+        questionIndex: 0,
+        question: "Which path should we take?",
+        kind: "option",
+        answer: "Fast (Recommended)",
+      }],
+    };
+
+    const result = await pending;
+    assert.equal(result.ok, true);
+    assert.match(result.output, /User answered ask_user_question/);
+    assert.match(result.output, /Fast \(Recommended\)/);
+    assert.equal(session.operationControls.pendingQuestionnaire, null);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("ask_user_question clamps oversized option lists instead of failing", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-tools-ask-user-clamp-"));
+
+  try {
+    const session = createSession(cwd);
+    const pending = executeInternalToolAsync(session, {
+      name: "ask_user_question",
+      arguments: {
+        questions: [{
+          question: "Which gray area first?",
+          header: "Phase 73",
+          options: [
+            { label: "A", description: "One." },
+            { label: "B", description: "Two." },
+            { label: "C", description: "Three." },
+            { label: "D", description: "Four." },
+            { label: "E", description: "Five." },
+          ],
+        }],
+      },
+    });
+
+    for (let index = 0; index < 20 && !session.operationControls.pendingQuestionnaire; index += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(session.operationControls.pendingQuestionnaire?.questions[0]?.options.length, 4);
+    assert.equal(session.operationControls.pendingQuestionnaire?.questions[0]?.options[3]?.label, "D");
+    session.operationControls.pendingQuestionnaire!.response = {
+      cancelled: false,
+      answers: [{
+        questionIndex: 0,
+        question: "Which gray area first?",
+        kind: "option",
+        answer: "D",
+      }],
+    };
+
+    const result = await pending;
+    assert.equal(result.ok, true);
+    assert.match(result.output, /Which gray area first\? -> D/);
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }

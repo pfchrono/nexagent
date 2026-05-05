@@ -15,7 +15,7 @@ import {
 } from "./instrument.js";
 import { applyArchivistRetrieval, rememberArchivistFailure, rememberArchivistRecovery } from "./runtime/archivist.js";
 import { writeDebugLog } from "./runtime/debug.js";
-import { hasNexsightEvidence, hasToolEvidence, hasWriteEvidence } from "./runtime/evidence.js";
+import { hasAskEvidence, hasNexsightEvidence, hasTodoEvidence, hasToolEvidence, hasWriteEvidence } from "./runtime/evidence.js";
 import { assemblePrompt } from "./runtime/instructions.js";
 import {
   isNexsightToolCall,
@@ -23,9 +23,14 @@ import {
 } from "./runtime/nexsight-router.js";
 import { getMcpServerStatus } from "./runtime/mcp.js";
 import { toDiagnosticRuntimeEvent, type RuntimeDiagnosticInput } from "./runtime/diagnostics.js";
+import { emitRuntimeExtensionEvent } from "./runtime/extensions.js";
+import { savePersistedRuntimeState } from "./runtime/persistence.js";
+import { emitTerminalNotification, notifyThresholdMs } from "./runtime/pi-compat.js";
+import { createQuestionnaireRequest, type RuntimeQuestionnaireQuestion } from "./runtime/questionnaire.js";
 import { consumeOperatorSteer, estimateTokenCount, recordRuntimeEvent, setRuntimeAction } from "./runtime/session.js";
 import type { RuntimeApprovalRequest, RuntimeSession } from "./runtime/session.js";
 import { beginSkillRun, completeSkillRun, recordSkillToolResult } from "./runtime/skill-runner.js";
+import { recordToolMemory } from "./runtime/tool-memory.js";
 import { TurnRun, type MissingTurnEvidence } from "./runtime/turn-run.js";
 import { classifyInternalToolRisk, executeInternalToolAsync, type InternalToolCall, type InternalToolName, type InternalToolResult } from "./runtime/tools.js";
 
@@ -110,16 +115,19 @@ const INTERNAL_TOOL_TAG_NAMES = [
   "git_diff",
   "shell_command",
   "nexsight_execute",
+  "nexsight_read",
+  "nexsight_gather",
   "nexsight_index",
   "nexsight_batch",
   "nexsight_search",
   "archivist_save",
   "archivist_checkpoint",
+  "ask_user_question",
 ] as const satisfies readonly InternalToolCall["name"][];
 const INTERNAL_TOOL_TAG_PATTERN = INTERNAL_TOOL_TAG_NAMES.join("|");
 const TOOL_CALL_MARKUP_PATTERN = new RegExp(`<\\s*\\/?\\s*(?:(?:nexagent_)?tool_call|${INTERNAL_TOOL_TAG_PATTERN})\\b`, "i");
-const MAX_INTERNAL_TOOL_STEPS = 8;
-const MAX_INTERNAL_TOOL_CYCLES = 3;
+const MAX_INTERNAL_TOOL_STEPS = 100;
+const MAX_INTERNAL_TOOL_CYCLES = 1;
 const MAX_GUIDANCE_NUDGES_BEFORE_SYNTHESIS = 2;
 const CONTINUATION_NUDGE = [
   "The previous response deferred action or asked for confirmation instead of executing.",
@@ -146,7 +154,7 @@ const NEXSIGHT_TOOL_NUDGE = [
   "This task should use Nexsight because it asks for broad repo/context analysis or explicitly names Nexsight.",
   "Do not use read_file, list_dir, search_content, search_files, or shell_command for this broad inspection step.",
   "Direct tools are fine only for a known small file/path, exact file content, or a narrower follow-up after Nexsight has routed the work.",
-  "Retry with exactly one Nexsight tool call: nexsight_execute, nexsight_index, nexsight_batch, or nexsight_search.",
+  "Retry with exactly one Nexsight tool call: nexsight_gather for broad multi-file evidence, nexsight_execute for custom parsing/counting, nexsight_read for one file, or nexsight_index/batch/search for stored context.",
 ].join(" ");
 const REQUIRED_WRITE_EVIDENCE_NUDGE = [
   "The user requested a file write/update in this turn, but no write tool evidence exists yet.",
@@ -155,7 +163,7 @@ const REQUIRED_WRITE_EVIDENCE_NUDGE = [
 ].join(" ");
 const REQUIRED_NEXSIGHT_EVIDENCE_NUDGE = [
   "The user explicitly requested Nexsight in this turn, but no Nexsight tool evidence exists yet.",
-  "Use nexsight_execute, nexsight_index, nexsight_batch, or nexsight_search now.",
+  "Use nexsight_gather for broad multi-file evidence, nexsight_execute for custom parsing/counting, nexsight_read for one file, or nexsight_index/batch/search for stored context.",
   "Do not answer from narrative, generic listing, or direct file tools until Nexsight has run or a Nexsight tool reports a real blocker.",
 ].join(" ");
 const REQUIRED_ACTIVE_SKILL_EVIDENCE_NUDGE = [
@@ -163,6 +171,16 @@ const REQUIRED_ACTIVE_SKILL_EVIDENCE_NUDGE = [
   "Use the active skill instructions now with the available tools.",
   "Do not answer with only activated, started, ready, or a request to restate the target.",
   "Answer only after current-turn tool evidence exists or a real tool/approval blocker is recorded.",
+].join(" ");
+const REQUIRED_TODO_EVIDENCE_NUDGE = [
+  "This is multi-stage work and needs visible task tracking.",
+  "Use the todo tool now to create a compact checklist, mark exactly one current task in_progress, then continue with the next required tool.",
+  "Update todos after evidence or verification. If blocked, leave the blocked task visible with the concrete reason.",
+].join(" ");
+const REQUIRED_ASK_USER_EVIDENCE_NUDGE = [
+  "This discussion/spec skill needs an interactive user choice before it can proceed.",
+  "Use ask_user_question now with one grouped question and 2-4 concrete options.",
+  "Ask before spending more tool calls. Do not describe that a question is needed; create the pending UI question.",
 ].join(" ");
 const REQUIRED_CLAIM_EVIDENCE_NUDGE = [
   "The previous response claimed test or Nexsight work without matching current-turn evidence.",
@@ -186,14 +204,28 @@ export async function executeProviderRequest(
     prompt: request.prompt,
   });
   let skillRun = beginSkillRun(request.session, request.prompt);
+  const startedAt = Date.now();
   return turnRun.run(async () => {
-    const result = await executeProviderRequestImpl(request, invokers, turnRun, (call, toolResult) => {
-      skillRun = recordSkillToolResult(skillRun, call, toolResult);
-    });
-    if (result.ok) {
-      completeSkillRun(skillRun, result.output);
+    let result: ProviderResult | null = null;
+    try {
+      await emitRuntimeExtensionEvent(request.session, "agent_start", { prompt: request.prompt });
+      result = await executeProviderRequestImpl(request, invokers, turnRun, (call, toolResult) => {
+        skillRun = recordSkillToolResult(skillRun, call, toolResult);
+      });
+      if (result.ok) {
+        completeSkillRun(skillRun, result.output);
+      }
+      return result;
+    } catch (error) {
+      await emitRuntimeExtensionEvent(request.session, "agent_error", { error });
+      throw error;
+    } finally {
+      await emitRuntimeExtensionEvent(request.session, "agent_end", { result });
+      const elapsedMs = Date.now() - startedAt;
+      if (request.session.ui?.notifyEnabled === true && elapsedMs >= notifyThresholdMs(request.session)) {
+        emitTerminalNotification("nexagent turn complete", `${Math.round(elapsedMs / 1000)}s`);
+      }
     }
-    return result;
   });
 }
 
@@ -269,6 +301,10 @@ async function executeProviderRequestImpl(
     });
     await applyArchivistRetrieval(request.session, request.prompt);
     const assembled = await assemblePrompt(request);
+    const extensionMessages = await collectExtensionSystemMessages(request.session, request.prompt);
+    if (extensionMessages.length > 0) {
+      assembled.prompt = `${assembled.prompt}\n\nExtension guidance:\n${extensionMessages.map((message) => `- ${message}`).join("\n")}`;
+    }
     if (request.session.debug) {
       writeDebugLog(request.session.debug, "provider.assembled_prompt", {
         provider,
@@ -301,6 +337,8 @@ async function executeProviderRequestImpl(
     let requiredNexsightNudgeCount = 0;
     let requiredNexsightFallbackCount = 0;
     let requiredActiveSkillNudgeCount = 0;
+    let requiredTodoNudgeCount = 0;
+    let requiredAskNudgeCount = 0;
 
     toolCycles:
     for (let cycle = 0; cycle < MAX_INTERNAL_TOOL_CYCLES; cycle += 1) {
@@ -450,6 +488,40 @@ async function executeProviderRequestImpl(
           }
           return createMissingRequiredToolEvidenceFailure(request, model, transport.transport, transport.id, "active skill", output);
         }
+        if (obligations.requiresTodoEvidence && !hasTodoEvidence(request.session, turnEventStart, toolTranscript)) {
+          requiredTodoNudgeCount += 1;
+          if (step < MAX_INTERNAL_TOOL_STEPS - 1 && requiredTodoNudgeCount < MAX_GUIDANCE_NUDGES_BEFORE_SYNTHESIS) {
+            recordRuntimeEvent(request.session, {
+              kind: "control",
+              status: "queued",
+              summary: "required todo evidence nudge applied",
+              detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
+            });
+            prompt = createGuidedPrompt(assembled.prompt, toolTranscript, REQUIRED_TODO_EVIDENCE_NUDGE);
+            continue;
+          }
+          return createMissingRequiredToolEvidenceFailure(request, model, transport.transport, transport.id, "todo", output);
+        }
+        if (obligations.requiresAskEvidence
+          && !hasAskEvidence(request.session, turnEventStart, toolTranscript)
+          && !hasDiscussionDecisionEvidence(request.session, turnEventStart, output)) {
+          const fallbackAsk = maybeCreateFallbackAskQuestion(request, model, transport.transport, transport.id, output);
+          if (fallbackAsk) {
+            return fallbackAsk;
+          }
+          requiredAskNudgeCount += 1;
+          if (step < MAX_INTERNAL_TOOL_STEPS - 1 && requiredAskNudgeCount < MAX_GUIDANCE_NUDGES_BEFORE_SYNTHESIS) {
+            recordRuntimeEvent(request.session, {
+              kind: "control",
+              status: "queued",
+              summary: "required ask_user_question evidence nudge applied",
+              detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
+            });
+            prompt = createGuidedPrompt(assembled.prompt, toolTranscript, REQUIRED_ASK_USER_EVIDENCE_NUDGE);
+            continue;
+          }
+          return createMissingRequiredToolEvidenceFailure(request, model, transport.transport, transport.id, "ask user", output);
+        }
         if (claimsUnsupportedWriteCompletion(output, writeEvidenceNudgeCount) && !hasWriteEvidence(request.session, turnEventStart)) {
           writeEvidenceNudgeCount += 1;
           if (step < MAX_INTERNAL_TOOL_STEPS - 1 && writeEvidenceNudgeCount < MAX_GUIDANCE_NUDGES_BEFORE_SYNTHESIS) {
@@ -510,7 +582,7 @@ async function executeProviderRequestImpl(
           kind: "assistant",
           status: "completed",
           summary: "assistant response completed",
-          detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
+          detail: output,
         });
           recordRuntimeEvent(request.session, {
             kind: "provider",
@@ -601,7 +673,7 @@ async function executeProviderRequestImpl(
             kind: "assistant",
             status: "completed",
             summary: "assistant response completed",
-            detail: finalOutput.length > 160 ? `${finalOutput.slice(0, 157)}...` : finalOutput,
+            detail: finalOutput,
           });
           recordRuntimeEvent(request.session, {
             kind: "provider",
@@ -636,6 +708,7 @@ async function executeProviderRequestImpl(
           detail: toolCall.name,
         });
         return createToolBudgetPartialResult(
+          request.session,
           provider,
           model,
           transport.transport,
@@ -940,6 +1013,8 @@ async function executeOpenAiNativeToolLoop(
   let requiredNexsightNudgeCount = 0;
   let requiredNexsightFallbackCount = 0;
   let requiredActiveSkillNudgeCount = 0;
+  let requiredTodoNudgeCount = 0;
+  let requiredAskNudgeCount = 0;
 
   const loopResult = await turnRun.runToolLoop<ProviderResult>(1, MAX_INTERNAL_TOOL_STEPS, async ({ step, finalStep }) => {
     if (request.session.operationControls.cancelRequested) {
@@ -1075,6 +1150,40 @@ async function executeOpenAiNativeToolLoop(
         }
         return createMissingRequiredToolEvidenceFailure(request, model, transport.transport, transport.id, "active skill", output);
       }
+      if (obligations.requiresTodoEvidence && !hasTodoEvidence(request.session, turnEventStart)) {
+        requiredTodoNudgeCount += 1;
+        if (step < MAX_INTERNAL_TOOL_STEPS - 1 && requiredTodoNudgeCount < MAX_GUIDANCE_NUDGES_BEFORE_SYNTHESIS) {
+          recordRuntimeEvent(request.session, {
+            kind: "control",
+            status: "queued",
+            summary: "required todo evidence nudge applied",
+            detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
+          });
+          nativeInput = [{ role: "user", content: REQUIRED_TODO_EVIDENCE_NUDGE }];
+          return null;
+        }
+        return createMissingRequiredToolEvidenceFailure(request, model, transport.transport, transport.id, "todo", output);
+      }
+      if (obligations.requiresAskEvidence
+        && !hasAskEvidence(request.session, turnEventStart)
+        && !hasDiscussionDecisionEvidence(request.session, turnEventStart, output)) {
+        const fallbackAsk = maybeCreateFallbackAskQuestion(request, model, transport.transport, transport.id, output);
+        if (fallbackAsk) {
+          return fallbackAsk;
+        }
+        requiredAskNudgeCount += 1;
+        if (step < MAX_INTERNAL_TOOL_STEPS - 1 && requiredAskNudgeCount < MAX_GUIDANCE_NUDGES_BEFORE_SYNTHESIS) {
+          recordRuntimeEvent(request.session, {
+            kind: "control",
+            status: "queued",
+            summary: "required ask_user_question evidence nudge applied",
+            detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
+          });
+          nativeInput = [{ role: "user", content: REQUIRED_ASK_USER_EVIDENCE_NUDGE }];
+          return null;
+        }
+        return createMissingRequiredToolEvidenceFailure(request, model, transport.transport, transport.id, "ask user", output);
+      }
       if (claimsUnsupportedWriteCompletion(output, writeEvidenceNudgeCount) && !hasWriteEvidence(request.session, turnEventStart)) {
         writeEvidenceNudgeCount += 1;
         if (step < MAX_INTERNAL_TOOL_STEPS - 1 && writeEvidenceNudgeCount < MAX_GUIDANCE_NUDGES_BEFORE_SYNTHESIS) {
@@ -1117,7 +1226,7 @@ async function executeOpenAiNativeToolLoop(
         kind: "assistant",
         status: "completed",
         summary: "assistant response completed",
-        detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
+        detail: output,
       });
       return {
         ok: true,
@@ -1138,6 +1247,7 @@ async function executeOpenAiNativeToolLoop(
         detail: toolCall.name,
       });
       return createToolBudgetPartialResult(
+        request.session,
         request.session.provider,
         model,
         transport.transport,
@@ -1249,13 +1359,17 @@ function createMissingRequiredToolEvidenceFailure(
   output: string,
 ): ProviderFailure {
   const detail = output.length > 160 ? `${output.slice(0, 157)}...` : output;
-  const summary = requiredTool === "write"
+    const summary = requiredTool === "write"
     ? "required write evidence gate blocked assistant response"
     : requiredTool === "Nexsight"
       ? "required nexsight evidence gate blocked assistant response"
       : requiredTool === "active skill"
         ? "required active skill evidence gate blocked assistant response"
-        : "required test evidence gate blocked assistant response";
+        : requiredTool === "todo"
+          ? "required todo evidence gate blocked assistant response"
+          : requiredTool === "ask user"
+            ? "required ask_user_question evidence gate blocked assistant response"
+            : "required test evidence gate blocked assistant response";
   recordRuntimeEvent(request.session, {
     kind: "control",
     status: "blocked",
@@ -1294,6 +1408,85 @@ function createMissingRequiredToolEvidenceFailure(
       "Blocked assistant output:",
       output.slice(0, 1200),
     ].join("\n"),
+  };
+}
+
+function maybeCreateFallbackAskQuestion(
+  request: ProviderRequest,
+  model: string | null,
+  transport: ProviderFailure["transport"],
+  adapter: ProviderFailure["adapter"],
+  output: string,
+): ProviderSuccess | null {
+  if (request.session.operationControls.pendingQuestionnaire) {
+    return null;
+  }
+  if (!claimsInteractiveDiscussionGate(output)) {
+    return null;
+  }
+  const question = createFallbackDiscussionQuestion(output);
+  request.session.operationControls.pendingQuestionnaire = createQuestionnaireRequest([question]);
+  recordRuntimeEvent(request.session, {
+    kind: "control",
+    status: "blocked",
+    summary: "fallback ask_user_question created",
+    detail: question.question,
+  });
+  return {
+    ok: true,
+    provider: request.session.provider,
+    model,
+    transport,
+    adapter,
+    fallbackApplied: false,
+    output: [
+      "ask_user_question pending.",
+      question.question,
+      ...question.options.map((option, index) => `${String(index + 1)}. ${option.label} - ${option.description}`),
+    ].join("\n"),
+  };
+}
+
+function hasDiscussionDecisionEvidence(session: RuntimeSession, sinceIndex: number, output: string): boolean {
+  if (!hasWriteEvidence(session, sinceIndex)) {
+    return false;
+  }
+  return /\b(?:locked|captured|recorded|wrote|saved)\b[\s\S]{0,80}\b(?:decision|decisions|choice|choices|context)\b/i.test(output)
+    || /\bno more user[- ]choice\b/i.test(output)
+    || /\bdiscussion phase\b[\s\S]{0,80}\b(?:ready|complete|context-ready)\b/i.test(output);
+}
+
+function claimsInteractiveDiscussionGate(output: string): boolean {
+  return /\b(required interactive discussion gate|interactive discussion gate|needs? you to choose|choose whether|choose what to discuss|question is required)\b/i.test(output);
+}
+
+function createFallbackDiscussionQuestion(output: string): RuntimeQuestionnaireQuestion {
+  const questionLine = output
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .find((line) => /\bchoose\b/i.test(line))
+    ?? "Which direction should this discussion phase use?";
+  const question = questionLine
+    .replace(/^Next concrete step:\s*/i, "")
+    .replace(/^Blocked(?:er)?:\s*/i, "")
+    .slice(0, 240);
+  return {
+    header: "Discuss",
+    question,
+    options: [
+      {
+        label: "Use roadmap scope (Recommended)",
+        description: "Follow the milestone roadmap/title as source of truth.",
+      },
+      {
+        label: "Use phase slug",
+        description: "Follow the generated phase directory name and slug.",
+      },
+      {
+        label: "Reconcile both first",
+        description: "Inspect mismatch and create a short decision before planning.",
+      },
+    ],
   };
 }
 
@@ -1360,6 +1553,30 @@ function buildNativeInputFromPrompt(prompt: string, attachments?: ImageAttachmen
   return [{ role: "user", content }];
 }
 
+async function collectExtensionSystemMessages(session: RuntimeSession, prompt: string): Promise<string[]> {
+  const results = await emitRuntimeExtensionEvent(session, "before_agent_start", { prompt });
+  const messages: string[] = [];
+  for (const result of results) {
+    if (!result || typeof result !== "object") {
+      continue;
+    }
+    const candidate = result as { message?: unknown };
+    const message = candidate.message;
+    if (typeof message === "string") {
+      messages.push(message);
+      continue;
+    }
+    if (message && typeof message === "object" && typeof (message as { content?: unknown }).content === "string") {
+      messages.push((message as { content: string }).content);
+      continue;
+    }
+    if (typeof (result as { systemPrompt?: unknown }).systemPrompt === "string") {
+      messages.push((result as { systemPrompt: string }).systemPrompt);
+    }
+  }
+  return messages;
+}
+
 async function withAbortController<T>(
   session: RuntimeSession,
   fn: (signal: AbortSignal) => Promise<T>,
@@ -1385,6 +1602,20 @@ async function executeToolWithRuntimeActivity(session: RuntimeSession, call: Int
     summary: `tool ${call.name} started`,
     detail: `${risk}; args=${argsPreview}`,
   });
+  const extensionApprovals = await emitRuntimeExtensionEvent(session, "before_tool_execution", { tool: call.name, call });
+  if (extensionApprovals.some((value) => value === false)) {
+    recordRuntimeEvent(session, {
+      kind: "tool",
+      status: "blocked",
+      summary: `tool ${call.name} blocked by extension`,
+      detail: "extension before_tool_execution returned false",
+    });
+    return {
+      ok: false,
+      tool: call.name,
+      output: "tool execution blocked by extension",
+    };
+  }
   const approved = await maybeAwaitApproval(session, call, risk);
   if (!approved) {
     recordRuntimeEvent(session, {
@@ -1423,6 +1654,9 @@ async function executeToolWithRuntimeActivity(session: RuntimeSession, call: Int
     summary: `tool ${call.name} ${result.ok ? "completed" : "failed"}`,
     detail: `${risk}; duration=${formatToolDuration(durationMs)}; in~${inputTokens}; out~${outputTokens}${detailOutput}`,
   });
+  recordToolMemory(session.toolMemory, call, result);
+  savePersistedRuntimeState(session);
+  await emitRuntimeExtensionEvent(session, "tool_result", { tool: call.name, call, result, durationMs });
   if (!result.ok) {
     const failureClass = classifyToolFailure(result.output);
     const diagnosticClass = classifyToolDiagnostic(call, failureClass);
@@ -1583,6 +1817,9 @@ function classifyToolDiagnostic(call: InternalToolCall, failureClass: string): R
     return "tool.mcp_unavailable";
   }
   if (failureClass === "policy_blocked" || failureClass === "blocked_tool") {
+    return "tool.blocked";
+  }
+  if (failureClass === "path_not_found" || failureClass === "path_not_file" || failureClass === "malformed_tool_call") {
     return "tool.blocked";
   }
   return "tool.failed";
@@ -1956,6 +2193,29 @@ function formatToolRecoveryHint(call: InternalToolCall, result: InternalToolResu
   if (/tool policy blocked .*protected path/i.test(result.output)) {
     return "Recovery hint:\n- Do not access protected roots. Use repo-local paths or ask user for safe input path.";
   }
+  if (/not found|no such file|enoent|cannot find module|module not found/i.test(result.output)) {
+    return [
+      "Recovery hint:",
+      "- Do not retry same missing path/module blindly.",
+      "- Use search_files/list_dir/nexsight_gather to locate current path or package.",
+      "- If dependency is missing, inspect package scripts/deps before installing project-local fallback.",
+    ].join("\n");
+  }
+  if (/timed out|timeout/i.test(result.output)) {
+    return [
+      "Recovery hint:",
+      "- Retry with narrower scope, shorter timeout-safe command, or Nexsight compressed inspection.",
+      "- Prefer focused tests/build targets over full-suite repeats.",
+      "- If long-running work is necessary, report exact command and why it must run longer.",
+    ].join("\n");
+  }
+  if (/malformed|schema|arguments|required/i.test(result.output)) {
+    return [
+      "Recovery hint:",
+      "- Correct tool argument shape from the tool schema.",
+      "- Keep one valid tool call only; do not explain schema fixes in prose before retrying.",
+    ].join("\n");
+  }
   return "";
 }
 
@@ -2030,7 +2290,7 @@ function createRequiredNexsightFallbackSuccess(
     kind: "assistant",
     status: "completed",
     summary: "assistant response completed",
-    detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
+    detail: output,
   });
   recordRuntimeEvent(request.session, {
     kind: "provider",
@@ -2359,6 +2619,7 @@ async function maybeSynthesizeAfterRepeatedGuidance(
       detail: reason,
     });
     return createToolBudgetPartialResult(
+      request.session,
       request.session.provider,
       model,
       request.session.provider === "openai" ? "openai" : "codex",
@@ -2375,6 +2636,7 @@ async function maybeSynthesizeAfterRepeatedGuidance(
       detail: `${reason}; final output deferred action`,
     });
     return createToolBudgetPartialResult(
+      request.session,
       request.session.provider,
       model,
       request.session.provider === "openai" ? "openai" : "codex",
@@ -2410,7 +2672,7 @@ async function maybeSynthesizeAfterRepeatedGuidance(
     kind: "assistant",
     status: "completed",
     summary: "assistant response completed",
-    detail: finalOutput.length > 160 ? `${finalOutput.slice(0, 157)}...` : finalOutput,
+    detail: finalOutput,
   });
   recordRuntimeEvent(request.session, {
     kind: "provider",
@@ -2456,12 +2718,14 @@ function createToolBudgetFinalPrompt(basePrompt: string, toolTranscript: string[
     `The previous provider step attempted another ${pendingToolName} tool call after the bounded continuation cycle.`,
     "Do not call more tools.",
     "Return a concise final answer for the user using only the completed tool evidence.",
+    "Do not describe the runtime response/tool boundary as a blocker when the requested work completed; report completion and the next concrete workflow step instead.",
     FINAL_EDIT_SUMMARY_GUIDANCE,
     "If evidence is incomplete, say exactly what completed, what remains blocked, and the next concrete step.",
   ].join("\n");
 }
 
 function createToolBudgetPartialResult(
+  session: RuntimeSession,
   provider: string,
   model: string | null,
   transport: "codex" | "openai",
@@ -2472,6 +2736,19 @@ function createToolBudgetPartialResult(
   const transcript = toolTranscript.length > 0
     ? toolTranscript.slice(-3).join("\n\n")
     : "No completed tool transcript was available for this fallback.";
+  const output = [
+    "Tool budget exhausted before final assistant answer.",
+    reason,
+    "",
+    "Partial evidence from completed tools:",
+    transcript,
+  ].join("\n");
+  recordRuntimeEvent(session, {
+    kind: "assistant",
+    status: "completed",
+    summary: "assistant partial result completed",
+    detail: output,
+  });
   return {
     ok: true,
     provider,
@@ -2479,13 +2756,7 @@ function createToolBudgetPartialResult(
     transport,
     adapter,
     fallbackApplied: false,
-    output: [
-      "Tool budget exhausted before final assistant answer.",
-      reason,
-      "",
-      "Partial evidence from completed tools:",
-      transcript,
-    ].join("\n"),
+    output,
   };
 }
 

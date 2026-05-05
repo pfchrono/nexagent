@@ -399,6 +399,7 @@ function createSession(provider = "codex"): RuntimeSession {
       requireApprovalForGuarded: false,
       yoloMode: false,
       pendingApproval: null,
+      pendingQuestionnaire: null,
       lastDecision: null,
       cancelRequested: false,
       activeAbortController: null,
@@ -406,6 +407,7 @@ function createSession(provider = "codex"): RuntimeSession {
       steerState: null,
       lastAppliedSteer: null,
       steerHistory: [],
+      lastShellBlocker: null,
       boomerang: {
         active: false,
         task: null,
@@ -413,6 +415,41 @@ function createSession(provider = "codex"): RuntimeSession {
         startEventIndex: 0,
         lastSummary: null,
       },
+    },
+    btw: {
+      visible: false,
+      mode: "contextual",
+      thread: [],
+      pending: null,
+      nextId: 1,
+      modelOverride: null,
+      thinkingOverride: null,
+      updatedAt: null,
+    },
+    todos: {
+      tasks: [],
+      nextId: 1,
+      updatedAt: null,
+    },
+    toolMemory: {
+      entries: [],
+      nextId: 1,
+      updatedAt: null,
+    },
+    subagents: {
+      agents: [],
+      types: [
+        { name: "general-purpose", description: "General-purpose autonomous agent", prompt: "general", tools: "all", source: "default" },
+        { name: "Explore", description: "Fast read-only codebase exploration", prompt: "explore", tools: "read", source: "default" },
+      ],
+      nextId: 1,
+      updatedAt: null,
+    },
+    goal: {
+      goal: null,
+      statusBarEnabled: true,
+      activeTurnStartedAt: null,
+      updatedAt: null,
     },
     conversation: [],
     compaction: {
@@ -485,9 +522,13 @@ test("runRuntimeCommand exposes command catalog through help", async () => {
     "/provider [status|name|transport ...] [--verbose] - show or switch provider and transport mode",
     "/skill [name] [args...] - list skills or resolve and route a skill by name",
     "/boomerang <task> | /boomerang status | /boomerang cancel - run autonomous task then compact turn into handoff summary",
+    "/btw [--save] <question> | /btw:new [question] | /btw:tangent [--save] <question> | /btw:clear | /btw:inject [instructions] | /btw:summarize [instructions] - run hidden side conversation and optionally inject it back",
+    "/agents - show Claude-style subagent types, running agents, and recent results",
     "/mouse [status|mode <auto|scroll|select>] - show or set transcript mouse interaction mode",
+    "/usage - show current session usage statistics with provider/model token totals",
+    "/todos [pending|in_progress|completed|all] - show visual task checklist used by model planning",
     "/config [status] | /config [set] <logo|lsp|lsp-index> <value> - inspect or mutate persisted runtime configuration",
-    "/lsp [status|setup|mode <on|off>|symbols <path>|diagnostics <path>|check [path]] - inspect enabled local LSP code intelligence with bounded fallback",
+    "/lsp [status|setup|health|warm|mode <on|off>|symbols <path>|diagnostics <path>|check [path]|nav <operation> [path] [line] [character]] - inspect enabled local LSP code intelligence with bounded fallback",
     "/memory [status|--verbose|--maintenance|save <text>|checkpoint [reason]|session [focus]] - inspect, maintain, or persist archivist memory/checkpoints",
     "/attach <image-path> - attach local image for next prompt (http transports only)",
     "/detach - clear queued image attachment",
@@ -497,6 +538,177 @@ test("runRuntimeCommand exposes command catalog through help", async () => {
     assert.ok(outputLines.includes(line), `${line} missing`);
   }
   assert.equal(result?.activity, "help");
+});
+
+test("runRuntimeCommand queues BTW side thread and injects it", async () => {
+  const { runRuntimeCommand } = await import("../src/cli.js");
+  const { completeBtwTurn } = await import("../src/runtime/btw.js");
+  const session = createSession();
+
+  const help = runRuntimeCommand(session, "/btw --help");
+  assert.equal(help?.ok, true);
+  assert.match(help?.ok ? help.output : "", /usage: \/btw \[--save\] <question>/);
+  assert.notEqual(help?.ok ? help.autoInvokeAfterSkill : false, true);
+  assert.equal(session.btw.pending, null);
+
+  const queued = runRuntimeCommand(session, "/btw --save what did we learn?");
+  assert.equal(queued?.ok, true);
+  assert.equal(queued?.ok ? queued.autoInvokeAfterSkill : false, true);
+  assert.match(queued?.ok ? queued.invokePrompt ?? "" : "", /Side question:\nwhat did we learn\?/);
+  assert.equal(session.btw.pending?.save, true);
+
+  const captured = completeBtwTurn(session, "We learned the side thread is hidden.");
+  assert.equal(captured?.saved, true);
+  assert.equal(session.btw.thread.length, 1);
+
+  const injected = runRuntimeCommand(session, "/btw:inject use this");
+  assert.equal(injected?.ok, true);
+  assert.equal(injected?.ok ? injected.autoInvokeAfterSkill : false, true);
+  assert.match(injected?.ok ? injected.invokePrompt ?? "" : "", /Use this side conversation thread/);
+  assert.match(injected?.ok ? injected.invokePrompt ?? "" : "", /We learned the side thread is hidden/);
+  assert.equal(session.btw.thread.length, 0);
+});
+
+test("runRuntimeCommand reports subagent status", async () => {
+  const { runRuntimeCommand } = await import("../src/cli.js");
+  const session = createSession();
+  session.subagents.agents.push({
+    id: "agent-1",
+    type: "Explore",
+    description: "Inspect files",
+    prompt: "Inspect files",
+    status: "completed",
+    background: true,
+    inheritContext: false,
+    result: "Found package.json.",
+    error: null,
+    steerMessages: [],
+    createdAt: "2026-05-04T00:00:00.000Z",
+    startedAt: "2026-05-04T00:00:00.000Z",
+    completedAt: "2026-05-04T00:00:01.000Z",
+    inputTokens: 12,
+    outputTokens: 4,
+  });
+
+  const result = runRuntimeCommand(session, "/agents");
+
+  assert.equal(result?.ok, true);
+  assert.equal(result?.activity, "agents status");
+  assert.match(result?.output ?? "", /^subagents$/m);
+  assert.match(result?.output ?? "", /agent-1 completed Explore: Inspect files/);
+});
+
+test("runRuntimeCommand reports visual todos", async () => {
+  const { runRuntimeCommand } = await import("../src/cli.js");
+  const session = createSession();
+  session.todos.tasks.push({
+    id: "todo-1",
+    subject: "Inspect donor",
+    activeForm: "Inspecting donor",
+    status: "in_progress",
+    blockedBy: [],
+    createdAt: "2026-05-04T00:00:00.000Z",
+    updatedAt: "2026-05-04T00:00:00.000Z",
+  });
+
+  const result = runRuntimeCommand(session, "/todos");
+
+  assert.equal(result?.ok, true);
+  assert.equal(result?.activity, "todos");
+  assert.match(result?.output ?? "", /^todos$/m);
+  assert.match(result?.output ?? "", /\[>\] todo-1 Inspecting donor/);
+});
+
+test("runRuntimeCommand manages persistent goal lifecycle", async () => {
+  const { runRuntimeCommand } = await import("../src/cli.js");
+  const session = createSession();
+
+  const started = runRuntimeCommand(session, "/goal --tokens 1k finish migration with tests");
+  assert.equal(started?.ok, true);
+  assert.equal(started?.ok ? started.autoInvokeAfterSkill : false, true);
+  assert.match(started?.ok ? started.invokePrompt ?? "" : "", /Continue working toward the active thread goal/);
+  assert.match(started?.ok ? started.output : "", /status: active/);
+  assert.match(started?.ok ? started.output : "", /1K/);
+
+  const paused = runRuntimeCommand(session, "/goal pause");
+  assert.equal(paused?.ok, true);
+  assert.match(paused?.ok ? paused.output : "", /status: paused/);
+
+  const resumed = runRuntimeCommand(session, "/goal resume");
+  assert.equal(resumed?.ok, true);
+  assert.equal(resumed?.ok ? resumed.autoInvokeAfterSkill : false, true);
+  assert.match(resumed?.ok ? resumed.invokePrompt ?? "" : "", /finish migration with tests/);
+
+  const hidden = runRuntimeCommand(session, "/goal statusbar off");
+  assert.equal(hidden?.ok, true);
+  assert.match(hidden?.ok ? hidden.output : "", /statusbar: off/);
+
+  const cleared = runRuntimeCommand(session, "/goal clear");
+  assert.equal(cleared?.ok, true);
+  assert.match(cleared?.ok ? cleared.output : "", /goal cleared/);
+});
+
+test("runRuntimeCommand reports current session usage", async () => {
+  const { runRuntimeCommand } = await import("../src/cli.js");
+  const session = createSession();
+  session.telemetry.turnCount = 1;
+  session.conversation = [
+    { role: "user", content: "inspect usage", tokens: 2 },
+    { role: "assistant", content: "usage checked", tokens: 3 },
+  ];
+  session.events = [
+    { at: "2025-01-01T00:00:01.000Z", kind: "prompt", status: "queued", summary: "user prompt accepted", detail: "inspect usage" },
+    { at: "2025-01-01T00:00:02.000Z", kind: "assistant", status: "completed", summary: "assistant response completed", detail: "usage checked" },
+    { at: "2025-01-01T00:00:03.000Z", kind: "control", status: "completed", summary: "turn run completed", detail: "duration=1.00s; turn_in~1200; turn_out~34" },
+  ];
+
+  const result = runRuntimeCommand(session, "/usage");
+
+  assert.equal(result?.ok, true);
+  assert.equal(result?.activity, "usage");
+  assert.match(result?.output ?? "", /^usage$/m);
+  assert.match(result?.output ?? "", /current session · 3s · sessions 1 · messages 1 · tokens 1,234 · cost n\/a/);
+  assert.match(result?.output ?? "", /codex \/ gpt-5\.4/);
+  assert.match(result?.output ?? "", /100% share · 1,234 tokens/);
+  assert.match(result?.output ?? "", /in 1,200 · out 34 · cache 0 · msgs 1 · cost n\/a/);
+  assert.match(result?.output ?? "", /notes: local telemetry only; bars show token share, not provider quota/);
+});
+
+test("recordTurnTelemetry writes Pi-compatible usage JSONL consumed by /usage", async () => {
+  const { runRuntimeCommand } = await import("../src/cli.js");
+  const { recordRuntimeEvent, recordTurnTelemetry } = await import("../src/runtime/session.js");
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-usage-jsonl-"));
+  const previousPiDir = process.env.PI_CODING_AGENT_DIR;
+  try {
+    process.env.PI_CODING_AGENT_DIR = path.join(cwd, "pi-agent");
+    const session = createSession();
+    session.cwd = cwd;
+    session.repo.root = cwd;
+    session.id = "usage-session";
+    recordRuntimeEvent(session, { kind: "prompt", status: "queued", summary: "user prompt accepted", detail: "inspect usage" });
+    recordRuntimeEvent(session, { kind: "control", status: "completed", summary: "turn run completed", detail: "duration=1.00s; turn_in~123; turn_out~45" });
+    recordTurnTelemetry(session, "inspect usage", "usage checked");
+
+    const usagePath = path.join(cwd, ".nexagent", "usage", "sessions", "usage-session.jsonl");
+    const jsonl = await readFile(usagePath, "utf8");
+    const result = runRuntimeCommand(session, "/usage");
+
+    assert.match(jsonl, /"type":"session"/);
+    assert.match(jsonl, /"type":"message"/);
+    assert.match(jsonl, /"provider":"codex"/);
+    assert.match(jsonl, /"input":123/);
+    assert.match(result?.output ?? "", /all time · Pi-compatible JSONL · sessions 1 · messages 1 · tokens 168 · cost n\/a/);
+    assert.match(result?.output ?? "", /codex \/ gpt-5\.4/);
+    assert.match(result?.output ?? "", /100% share · 168 tokens/);
+    assert.match(result?.output ?? "", /in 123 · out 45 · cache 0 · msgs 1 · cost n\/a/);
+  } finally {
+    if (previousPiDir === undefined) {
+      delete process.env.PI_CODING_AGENT_DIR;
+    } else {
+      process.env.PI_CODING_AGENT_DIR = previousPiDir;
+    }
+    await rm(cwd, { recursive: true, force: true });
+  }
 });
 
 test("runRuntimeCommand queues boomerang autonomous task", async () => {
@@ -545,6 +757,20 @@ test("boomerang completion compacts turn and seeds archivist memory", async () =
         summary: "tool apply_patch completed",
         detail: "guarded; args={\"path\":\"src/parser.ts\"}; duration=0.02s",
       },
+      {
+        at: "2025-01-01T00:00:02.000Z",
+        kind: "tool",
+        status: "failed",
+        summary: "tool shell_command failed",
+        detail: "guarded; duration=0.13s; in~211; out~1718; output=shell exit 1 --- init summary --- Traceback (most recent call last): File \"<stdin>\", line 1",
+      },
+      {
+        at: "2025-01-01T00:00:03.000Z",
+        kind: "tool",
+        status: "failed",
+        summary: "tool shell_command failed",
+        detail: "guarded; duration=0.02s; in~44; out~20; output=shell policy blocked command: rm -rf /etc/test",
+      },
     );
     session.conversation.push(
       { role: "user", content: "raw boomerang prompt", tokens: 4 },
@@ -556,6 +782,9 @@ test("boomerang completion compacts turn and seeds archivist memory", async () =
     assert.match(summary ?? "", /\[BOOMERANG COMPLETE\]/);
     assert.match(summary ?? "", /Changed Files:\n- src\/parser\.ts/);
     assert.match(summary ?? "", /Relevant Reads:\n- src\/parser\.ts/);
+    assert.match(summary ?? "", /shell_command: shell exit: init summary Traceback/);
+    assert.match(summary ?? "", /shell_command: blocked by shell policy/);
+    assert.doesNotMatch(summary ?? "", /guarded; duration/);
     assert.match(summary ?? "", /Archivist: saved boomerang handoff/);
     assert.equal(session.operationControls.boomerang.active, false);
     assert.equal(session.conversation.length, 2);
@@ -644,6 +873,42 @@ test("runRuntimeCommand accepts memory status alias", async () => {
   assert.equal(alias?.activity, "memory status");
 });
 
+test("runRuntimeCommand supports memory checkpoint and session mutations", async () => {
+  const { runRuntimeCommand } = await import("../src/cli.js");
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-memory-command-"));
+
+  try {
+    const session = createSession();
+    session.cwd = cwd;
+    session.repo.root = cwd;
+    session.archivist.enabled = true;
+    session.archivist.boundary = "bounded-write";
+    session.archivist.storagePath = path.join(cwd, ".nexagent", "archivist.json");
+    session.conversation = [
+      { role: "user", content: "fix config menu", tokens: 4 },
+      { role: "assistant", content: "config menu fixed", tokens: 4 },
+    ];
+
+    const checkpoint = runRuntimeCommand(session, "/memory checkpoint commit prep");
+    assert.equal(checkpoint?.ok, true);
+    assert.equal(checkpoint?.activity, "memory checkpoint");
+    assert.match(checkpoint?.output ?? "", /^memory checkpoint saved;/);
+
+    const sessionSummary = runRuntimeCommand(session, "/memory session config menu");
+    assert.equal(sessionSummary?.ok, true);
+    assert.equal(sessionSummary?.activity, "memory session");
+    assert.match(sessionSummary?.output ?? "", /^memory session summary saved;/);
+
+    const rawStore = JSON.parse(await readFile(session.archivist.storagePath, "utf8")) as {
+      entries: Array<{ type: string; summary?: string; tags?: string[] }>;
+    };
+    assert.equal(rawStore.entries.some((entry) => entry.type === "checkpoint" && /commit prep/.test(entry.summary ?? "")), true);
+    assert.equal(rawStore.entries.some((entry) => entry.type === "session-summary" && entry.tags?.includes("focused")), true);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test("runRuntimeCommand exposes LSP symbol and diagnostic slash commands", async () => {
   const { runRuntimeCommand } = await import("../src/cli.js");
   const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-cli-lsp-"));
@@ -685,6 +950,25 @@ test("runRuntimeCommand exposes LSP symbol and diagnostic slash commands", async
     assert.match(workspace?.output ?? "", /^lsp workspace$/m);
     assert.match(workspace?.output ?? "", /^problems: 1$/m);
     assert.match(workspace?.output ?? "", /src\/sample\.ts:2 info \/\/ TODO tighten diagnostics/);
+
+    const health = runRuntimeCommand(session, "/lsp health");
+    assert.equal(health?.ok, true);
+    assert.match(health?.output ?? "", /^lsp health$/m);
+
+    const warm = runRuntimeCommand(session, "/lsp warm");
+    assert.equal(warm?.ok, true);
+    assert.match(warm?.output ?? "", /^lsp warm$/m);
+
+    const navDefinition = runRuntimeCommand(session, "/lsp nav definition src/sample.ts 1 17");
+    assert.equal(navDefinition?.ok, true);
+    assert.match(navDefinition?.output ?? "", /^lsp navigation$/m);
+    assert.match(navDefinition?.output ?? "", /^operation: definition$/m);
+    assert.match(navDefinition?.output ?? "", /function alpha src\/sample\.ts:1:1/);
+
+    const workspaceSymbol = runRuntimeCommand(session, "/lsp nav workspaceSymbol Beta");
+    assert.equal(workspaceSymbol?.ok, true);
+    assert.match(workspaceSymbol?.output ?? "", /^operation: workspaceSymbol$/m);
+    assert.match(workspaceSymbol?.output ?? "", /class Beta src\/sample\.ts:3:1/);
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }
@@ -696,13 +980,13 @@ test("runRuntimeCommand shows and sets model for active provider", async () => {
 
   assert.deepEqual(runRuntimeCommand(session, "/model"), {
     ok: true,
-    output: "provider: codex\ncurrent: gpt-5.4\neffort: medium\navailable: gpt-5.4, gpt-5.5, gpt-5.4-mini, gpt-5.3-codex, gpt-5.3-codex-spark (needs websocket/realtime Codex adapter), gpt-5.2\nefforts: low, medium, high, xhigh",
+    output: "provider: codex\ncurrent: gpt-5.4\neffort: medium\navailable: gpt-5.4, gpt-5.5, gpt-5.4-mini, gpt-5.3-codex, gpt-5.3-codex-spark, gpt-5.2\nefforts: low, medium, high, xhigh",
     activity: "model status · codex",
   });
 
   assert.deepEqual(runRuntimeCommand(session, "/model gpt-5.5 high"), {
     ok: true,
-    output: "provider: codex\ncurrent: gpt-5.5\neffort: high\navailable: gpt-5.4, gpt-5.5, gpt-5.4-mini, gpt-5.3-codex, gpt-5.3-codex-spark (needs websocket/realtime Codex adapter), gpt-5.2\nefforts: low, medium, high, xhigh",
+    output: "provider: codex\ncurrent: gpt-5.5\neffort: high\navailable: gpt-5.4, gpt-5.5, gpt-5.4-mini, gpt-5.3-codex, gpt-5.3-codex-spark, gpt-5.2\nefforts: low, medium, high, xhigh",
     activity: "model set · gpt-5.5 high",
   });
 
@@ -711,6 +995,60 @@ test("runRuntimeCommand shows and sets model for active provider", async () => {
     output: "provider: codex\nmodel: gpt-5.5\ncurrent: medium\navailable: low, medium, high, xhigh",
     activity: "effort set · medium",
   });
+});
+
+test("runRuntimeCommand exposes Pi compatibility commands", async () => {
+  const { runRuntimeCommand } = await import("../src/cli.js");
+  const session = createSession();
+
+  assert.match(runRuntimeCommand(session, "/notify on")?.output ?? "", /enabled: on/);
+  assert.match(runRuntimeCommand(session, "/notify threshold 1234")?.output ?? "", /thresholdMs: 1234/);
+  assert.match(runRuntimeCommand(session, "/emoji ★")?.output ?? "", /emoji: ★/);
+  assert.match(runRuntimeCommand(session, "/color-set 2")?.output ?? "", /index=2/);
+  assert.match(runRuntimeCommand(session, "/safegit patterns")?.output ?? "", /force push/);
+  assert.match(runRuntimeCommand(session, "/scip status")?.output ?? "", /pi-agent-scip compatibility/);
+});
+
+test("runRuntimeCommand dispatches sync extension commands", async () => {
+  const { runRuntimeCommand } = await import("../src/cli.js");
+  const { createRuntimeExtensionHost } = await import("../src/runtime/extensions.js");
+  const session = createSession();
+  const host = createRuntimeExtensionHost();
+  host.status = "configured";
+  host.commands.set("/hello-ext", {
+    name: "/hello-ext",
+    handler: (args) => `hello ${args.join(" ")}`,
+  });
+  session.extensions = host;
+
+  const result = runRuntimeCommand(session, "/hello-ext from shim");
+  assert.deepEqual(result, {
+    ok: true,
+    output: "hello from shim",
+    activity: "extension /hello-ext",
+  });
+  assert.match(runRuntimeCommand(session, "/extensions")?.output ?? "", /commands: 1/);
+});
+
+test("runRuntimeCommand maps /scip symbols to LSP summary", async () => {
+  const { runRuntimeCommand } = await import("../src/cli.js");
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-scip-"));
+
+  try {
+    await mkdir(path.join(cwd, "src"), { recursive: true });
+    await writeFile(path.join(cwd, "src", "sample.ts"), "export function alpha() {}\n", "utf8");
+    const session = createSession();
+    session.cwd = cwd;
+    session.repo.root = cwd;
+    session.lsp.enabled = true;
+
+    const symbols = runRuntimeCommand(session, "/scip symbols src/sample.ts");
+    assert.equal(symbols?.ok, true);
+    assert.match(symbols?.output ?? "", /^lsp symbols$/m);
+    assert.match(symbols?.output ?? "", /function alpha line=1/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
 });
 
 test("runRuntimeCommand exposes reload and quit commands", async () => {
@@ -1007,6 +1345,36 @@ test("runRuntimeCommand marks steer deferred while work is active", async () => 
   });
 });
 
+test("runRuntimeCommand answers pending ask_user_question", async () => {
+  const { runRuntimeCommand } = await import("../src/cli.js");
+  const session = createSession();
+  session.operationControls.pendingQuestionnaire = {
+    id: "ask_test",
+    createdAt: "2025-01-01T00:00:00.000Z",
+    answers: [],
+    response: null,
+    questions: [{
+      question: "Which mode?",
+      header: "Mode",
+      options: [
+        { label: "Fast (Recommended)", description: "Smallest useful path." },
+        { label: "Full", description: "Complete parity path." },
+      ],
+    }],
+  };
+
+  const status = runRuntimeCommand(session, "/ask status");
+  assert.equal(status?.ok, true);
+  assert.match(status?.output ?? "", /Which mode\?/);
+  assert.match(status?.output ?? "", /1\. Fast \(Recommended\)/);
+
+  const answer = runRuntimeCommand(session, "/ask 2");
+  assert.equal(answer?.ok, true);
+  assert.match(answer?.output ?? "", /User answered ask_user_question/);
+  assert.match(answer?.output ?? "", /Full/);
+  assert.equal(session.operationControls.pendingQuestionnaire.response?.cancelled, false);
+});
+
 test("runRuntimeCommand compacts conversation manually", async () => {
   const { runRuntimeCommand } = await import("../src/cli.js");
   const session = createSession();
@@ -1095,7 +1463,7 @@ test("runRuntimeCommand toggles statusline", async () => {
 
   assert.deepEqual(result, {
     ok: true,
-    output: "Statusline ON. Footer now shows codex | gpt-5.4 | cli-exec | ready | approval=off | mouse=auto/scroll | mouse:auto | in~0 out~0 | ctx [----------] 0% 272k/272k free.",
+    output: "Statusline ON. Footer now shows △ color=222 | codex | gpt-5.4 | cli-exec | ready | approval=off | mouse=auto/scroll | mouse:auto | in~0 out~0 | ctx [----------] 0% 272k/272k free.",
     activity: "statusline on",
   });
   assert.equal(session.commandModes.statusline, true);
@@ -1369,6 +1737,10 @@ test("runRuntimeCommand manages nexsight store", async () => {
     assert.match(stats?.output ?? "", /backend: sqlite-fts5/);
     assert.match(stats?.output ?? "", /\.nexagent\/nexsight\/index\.db/);
     assert.match(stats?.output ?? "", /chunks:/);
+
+    const missingIndexPath = runRuntimeCommand(session, "/nexsight index");
+    assert.equal(missingIndexPath?.ok, false);
+    assert.match(missingIndexPath?.message ?? "", /usage: \/nexsight index <path> \[pattern\]/);
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }
@@ -1901,7 +2273,7 @@ test("createRuntimeInspectPayload includes prompt v2 summaries", async () => {
   assert.match(payload.promptV2.identity, /nexagent, a local terminal-first software engineering agent/);
   assert.equal(payload.promptV2.style, "none");
   assert.match(payload.promptV2.executionContract, /Continue until task is done, verified, or genuinely blocked/);
-  assert.match(payload.promptV2.toolRouting, /Broad repo map\/count\/parse\/compare\/summarize -> nexsight_execute/);
+  assert.match(payload.promptV2.toolRouting, /nexsight_gather first/);
   assert.match(payload.promptV2.providerGuidance, /Transport: Codex CLI/);
   assert.match(payload.promptV2.repoContext, /AGENTS\.md: # Repo Guardrails/);
   assert.match(payload.promptV2.repoContext, /openspec includes changes, SPEC\.md/);
@@ -1931,7 +2303,7 @@ test("createRuntimeTuiView includes grouped instruction sources", async () => {
   assert.equal(instructionRows.get("assembly"), "v2");
   assert.match(instructionRows.get("identity") ?? "", /nexagent, a local terminal-first software engineering agent/);
   assert.match(instructionRows.get("executionContract") ?? "", /Actionable request means act in this turn/);
-  assert.match(instructionRows.get("toolRouting") ?? "", /Broad repo map\/count\/parse\/compare\/summarize/);
+  assert.match(instructionRows.get("toolRouting") ?? "", /nexsight_gather first/);
   assert.match(instructionRows.get("providerGuidance") ?? "", /Transport: Codex CLI/);
   assert.match(instructionRows.get("repoContext") ?? "", /AGENTS\.md: # Repo Guardrails/);
   assert.match(instructionRows.get("runtimeState") ?? "", /Working directory: \/repo/);

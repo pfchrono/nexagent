@@ -1,10 +1,17 @@
 import { createRuntimeState, type RuntimeBootstrap, type RuntimeState } from "./bootstrap.js";
 import { buildPromptV2, summarizePromptV2 } from "./prompt-v2.js";
+import type { RuntimeQuestionnaireRequest } from "./questionnaire.js";
 import type { PersistedTransportMode } from "./persistence.js";
 import { hasCodexAuthJsonCredentialsSync } from "../provider/codex-chatgpt-http.js";
 import { getCodexModelDefinition } from "../models.js";
 import { getTransportProviderDefinition } from "../provider/registry.js";
 import { createRuntimeDebugState, type RuntimeDebugState } from "./debug.js";
+import { emitRuntimeExtensionEventDetached, type RuntimeExtensionHost } from "./extensions.js";
+import { recordPiUsageMessage } from "./usage.js";
+import { formatTodoPromptSummary } from "./todos.js";
+import { formatToolMemoryPromptSummary } from "./tool-memory.js";
+import { formatSubagentPromptSummary } from "./subagents.js";
+import { formatGoalPromptSummary } from "./goal.js";
 
 export type RuntimeActionStatus = "ready" | "running" | "error";
 
@@ -107,6 +114,7 @@ export interface RuntimeOperationControlsState {
   requireApprovalForGuarded: boolean;
   yoloMode: boolean;
   pendingApproval: RuntimeApprovalRequest | null;
+  pendingQuestionnaire: RuntimeQuestionnaireRequest | null;
   lastDecision: "approved" | "rejected" | "canceled" | null;
   cancelRequested: boolean;
   activeAbortController: AbortController | null;
@@ -135,6 +143,7 @@ export interface RuntimeSession extends RuntimeState {
   compaction: RuntimeCompactionState;
   operationControls: RuntimeOperationControlsState;
   debug?: RuntimeDebugState;
+  extensions?: RuntimeExtensionHost;
 }
 
 export type RuntimeSessionListener = () => void;
@@ -164,7 +173,7 @@ export function createRuntimeSession(runtime: RuntimeBootstrap): RuntimeSession 
   const operationControls = createRuntimeOperationControlsState();
   operationControls.requireApprovalForGuarded = runtimeState.operationDefaults.requireApprovalForGuarded;
 
-  return {
+  const session: RuntimeSession = {
     id: createSessionId(),
     startedAt: new Date().toISOString(),
     action: createRuntimeActionState(),
@@ -176,6 +185,8 @@ export function createRuntimeSession(runtime: RuntimeBootstrap): RuntimeSession 
     debug: createRuntimeDebugState(),
     ...runtimeState,
   };
+  emitRuntimeExtensionEventDetached(session, "session_start", { sessionId: session.id });
+  return session;
 }
 
 export function createRuntimeActionState(): RuntimeActionState {
@@ -228,6 +239,7 @@ export function createRuntimeOperationControlsState(): RuntimeOperationControlsS
     requireApprovalForGuarded: false,
     yoloMode: false,
     pendingApproval: null,
+    pendingQuestionnaire: null,
     lastDecision: null,
     cancelRequested: false,
     activeAbortController: null,
@@ -265,6 +277,15 @@ export function setRuntimeAction(
 }
 
 export function deriveTurnCompletionState(session: RuntimeSession): RuntimeTurnCompletionSummary {
+  if (session.operationControls.pendingQuestionnaire) {
+    return {
+      state: "blocked",
+      objective: "awaiting user answer",
+      blocker: "pending ask_user_question",
+      unverified: true,
+    };
+  }
+
   if (session.operationControls.pendingApproval) {
     return {
       state: "blocked",
@@ -365,6 +386,7 @@ export function recordTurnTelemetry(session: RuntimeSession, input: string, outp
   session.telemetry.turnCount += 1;
   session.telemetry.lastInputTokens = turnMetrics.inputTokens || estimateTokenCount(input);
   session.telemetry.lastOutputTokens = turnMetrics.outputTokens || estimateTokenCount(output);
+  recordPiUsageMessage(session);
   notifyRuntimeSessionChanged(session);
 }
 
@@ -468,6 +490,9 @@ export function compactConversation(session: RuntimeSession, trigger: "auto" | "
     const summaryParts = [
       session.compaction.summary?.trim(),
       summarizeConversationTurns(compactedTurns),
+      formatGoalPromptSummary(session.goal) ? `Goal: ${formatGoalPromptSummary(session.goal)}` : null,
+      formatTodoPromptSummary(session.todos) ? `Todos: ${formatTodoPromptSummary(session.todos)}` : null,
+      formatToolMemoryPromptSummary(session.toolMemory) ? `Tool findings: ${formatToolMemoryPromptSummary(session.toolMemory)}` : null,
     ].filter((value): value is string => Boolean(value && value.trim().length > 0));
     session.compaction.summary = summaryParts.join(" ");
   }
@@ -543,6 +568,8 @@ export function syncRuntimeSession(session: RuntimeSession, runtime: RuntimeBoot
   const action = session.action;
   const events = session.events;
   const operationControls = session.operationControls;
+  const subagents = session.subagents;
+  const toolMemory = session.toolMemory;
 
   Object.assign(session, nextState);
   session.action = action;
@@ -552,6 +579,8 @@ export function syncRuntimeSession(session: RuntimeSession, runtime: RuntimeBoot
   session.activeSkill = activeSkill;
   session.compaction = compaction;
   session.operationControls = operationControls;
+  session.subagents = subagents;
+  session.toolMemory = toolMemory;
 
   if (selectedProvider && isConfiguredProvider(session, selectedProvider)) {
     applyProviderSelection(session, selectedProvider);
@@ -656,8 +685,12 @@ export function estimateTokenCount(value: string): number {
 export function estimateConversationTokens(session: RuntimeSession, nextUserMessage = ""): number {
   const conversationTokens = session.conversation.reduce((sum, turn) => sum + turn.tokens, 0);
   const summaryTokens = estimateTokenCount(session.compaction.summary ?? "");
+  const goalTokens = estimateTokenCount(formatGoalPromptSummary(session.goal) ?? "");
+  const todoTokens = estimateTokenCount(formatTodoPromptSummary(session.todos) ?? "");
+  const toolMemoryTokens = estimateTokenCount(formatToolMemoryPromptSummary(session.toolMemory) ?? "");
+  const subagentTokens = estimateTokenCount(formatSubagentPromptSummary(session.subagents) ?? "");
   const queuedTokens = estimateTokenCount(session.compaction.queuedUserMessage ?? nextUserMessage);
-  return conversationTokens + summaryTokens + queuedTokens;
+  return conversationTokens + summaryTokens + goalTokens + todoTokens + toolMemoryTokens + subagentTokens + queuedTokens;
 }
 
 export function getCompactionThresholdTokens(session: RuntimeSession): number {

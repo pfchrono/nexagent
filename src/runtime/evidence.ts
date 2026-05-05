@@ -14,6 +14,8 @@ export interface TurnEvidenceSummary {
   hasWriteEvidence: boolean;
   hasReadEvidence: boolean;
   hasNexsightEvidence: boolean;
+  hasTodoEvidence: boolean;
+  hasAskEvidence: boolean;
   hasTestEvidence: boolean;
   snapshots: ToolEvidenceSnapshot[];
 }
@@ -36,6 +38,8 @@ export function collectTurnEvidence(session: RuntimeSession, sinceIndex: number,
   let hasReadEvidence = false;
   let hasWriteEvidence = false;
   let hasNexsightEvidence = toolTranscript.some((entry) => /"name"\s*:\s*"nexsight_(execute|index|batch|search)"/i.test(entry));
+  let hasTodoEvidence = toolTranscript.some((entry) => /"name"\s*:\s*"todo"/i.test(entry));
+  let hasAskEvidence = toolTranscript.some((entry) => /"name"\s*:\s*"ask_user_question"/i.test(entry));
   let hasTestEvidence = toolTranscript.some((entry) => {
     const hasShell = /"name"\s*:\s*"shell_command"/i.test(entry);
     return hasShell && /\b(bun|npm|pnpm|yarn|pytest|go|cargo)\s+(run\s+)?test\b|\btsc\b|\btest\b/i.test(entry);
@@ -60,6 +64,12 @@ export function collectTurnEvidence(session: RuntimeSession, sinceIndex: number,
     if (contract.nexsight) {
       hasNexsightEvidence = true;
     }
+    if (toolName === "todo") {
+      hasTodoEvidence = true;
+    }
+    if (toolName === "ask_user_question") {
+      hasAskEvidence = true;
+    }
     if (toolName === "shell_command" && /\b(test|tsc|build)\b/i.test(event.detail ?? "")) {
       hasTestEvidence = true;
     }
@@ -74,6 +84,8 @@ export function collectTurnEvidence(session: RuntimeSession, sinceIndex: number,
     hasReadEvidence,
     hasWriteEvidence,
     hasNexsightEvidence,
+    hasTodoEvidence,
+    hasAskEvidence,
     hasTestEvidence,
     snapshots,
   };
@@ -89,6 +101,14 @@ export function hasNexsightEvidence(session: RuntimeSession, sinceIndex: number,
 
 export function hasToolEvidence(session: RuntimeSession, sinceIndex: number, toolTranscript: string[] = []): boolean {
   return collectTurnEvidence(session, sinceIndex, toolTranscript).hasAnyToolEvidence;
+}
+
+export function hasTodoEvidence(session: RuntimeSession, sinceIndex: number, toolTranscript: string[] = []): boolean {
+  return collectTurnEvidence(session, sinceIndex, toolTranscript).hasTodoEvidence;
+}
+
+export function hasAskEvidence(session: RuntimeSession, sinceIndex: number, toolTranscript: string[] = []): boolean {
+  return collectTurnEvidence(session, sinceIndex, toolTranscript).hasAskEvidence;
 }
 
 export function hasTestEvidence(session: RuntimeSession, sinceIndex: number, toolTranscript: string[] = []): boolean {

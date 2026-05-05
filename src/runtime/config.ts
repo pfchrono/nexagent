@@ -80,6 +80,10 @@ export interface LspConfig {
 
 export interface UiConfig {
   logoMode: "full" | "condensed" | "off";
+  sessionEmoji?: string;
+  sessionColorIndex?: number;
+  notifyEnabled?: boolean;
+  notifyThresholdMs?: number;
 }
 
 export interface ArchivistDiagnosticsState {
@@ -775,6 +779,10 @@ function resolveUiConfig(settings?: Partial<UiConfig>): UiConfig {
   const logoMode = settings?.logoMode;
   return {
     logoMode: logoMode === "condensed" || logoMode === "off" || logoMode === "full" ? logoMode : "full",
+    sessionEmoji: typeof settings?.sessionEmoji === "string" ? settings.sessionEmoji : undefined,
+    sessionColorIndex: typeof settings?.sessionColorIndex === "number" ? settings.sessionColorIndex : undefined,
+    notifyEnabled: settings?.notifyEnabled === true,
+    notifyThresholdMs: typeof settings?.notifyThresholdMs === "number" ? settings.notifyThresholdMs : undefined,
   };
 }
 

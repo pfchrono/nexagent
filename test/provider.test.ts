@@ -7,6 +7,7 @@ import test from "node:test";
 import { invokeCodexChatGptHttpTransport, resolveCodexAuthJson } from "../src/provider/codex-chatgpt-http.js";
 import { executeProviderRequest, type ProviderRequest } from "../src/provider.js";
 import { createDefaultProviderRegistry } from "../src/provider/registry.js";
+import { createRuntimeExtensionHost } from "../src/runtime/extensions.js";
 import { initializeRuntimeDebug } from "../src/runtime/debug.js";
 import type { RuntimeSession } from "../src/runtime/session.js";
 
@@ -132,12 +133,57 @@ function createSession(provider = "codex", model: string | null = "gpt-5.4"): Ru
       requireApprovalForGuarded: false,
       yoloMode: false,
       pendingApproval: null,
+      pendingQuestionnaire: null,
       lastDecision: null,
       cancelRequested: false,
+      activeAbortController: null,
       steerMessage: null,
       steerState: null,
       lastAppliedSteer: null,
       steerHistory: [],
+      lastShellBlocker: null,
+      boomerang: {
+        active: false,
+        task: null,
+        startConversationIndex: 0,
+        startEventIndex: 0,
+        lastSummary: null,
+      },
+    },
+    btw: {
+      visible: false,
+      mode: "contextual",
+      thread: [],
+      pending: null,
+      nextId: 1,
+      modelOverride: null,
+      thinkingOverride: null,
+      updatedAt: null,
+    },
+    todos: {
+      tasks: [],
+      nextId: 1,
+      updatedAt: null,
+    },
+    toolMemory: {
+      entries: [],
+      nextId: 1,
+      updatedAt: null,
+    },
+    subagents: {
+      agents: [],
+      types: [
+        { name: "general-purpose", description: "General-purpose autonomous agent", prompt: "general", tools: "all", source: "default" },
+        { name: "Explore", description: "Fast read-only codebase exploration", prompt: "explore", tools: "read", source: "default" },
+      ],
+      nextId: 1,
+      updatedAt: null,
+    },
+    goal: {
+      goal: null,
+      statusBarEnabled: true,
+      activeTurnStartedAt: null,
+      updatedAt: null,
     },
     conversation: [],
     compaction: {
@@ -199,6 +245,132 @@ test("executeProviderRequest returns codex output", async () => {
     output: "hello world",
   });
 });
+
+test("executeProviderRequest fires extension lifecycle and injects guidance", async () => {
+  const session = createSession();
+  const host = createRuntimeExtensionHost();
+  const seen: string[] = [];
+  host.handlers.set("agent_start", [() => {
+    seen.push("agent_start");
+  }]);
+  host.handlers.set("before_agent_start", [() => {
+    seen.push("before_agent_start");
+    return { message: { content: "use extension tool first" } };
+  }]);
+  host.handlers.set("agent_end", [() => {
+    seen.push("agent_end");
+  }]);
+  session.extensions = host;
+  let capturedPrompt = "";
+
+  const result = await executeProviderRequest(
+    {
+      session,
+      prompt: "say hi",
+    },
+    {
+      exec: async (request) => {
+        capturedPrompt = request.prompt;
+        return {
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+          output: "hello world\n",
+        };
+      },
+      http: async () => {
+        throw new Error("http should not be used");
+      },
+      codexHttp: async () => {
+        throw new Error("codex-http should not be used");
+      },
+    },
+  );
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(seen, ["agent_start", "before_agent_start", "agent_end"]);
+  assert.match(capturedPrompt, /Extension guidance:/);
+  assert.match(capturedPrompt, /use extension tool first/);
+});
+
+test("executeProviderRequest fires extension tool_result", async () => {
+  const session = createSession();
+  const host = createRuntimeExtensionHost();
+  const seen: string[] = [];
+  host.handlers.set("tool_result", [(_event) => {
+    const event = _event as { tool?: string };
+    seen.push(event.tool ?? "missing");
+  }]);
+  session.extensions = host;
+  let invocationCount = 0;
+
+  const result = await executeProviderRequest(
+    {
+      session,
+      prompt: "run pwd",
+    },
+    {
+      exec: async () => {
+        invocationCount += 1;
+        if (invocationCount > 1) {
+          return {
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            output: "done\n",
+          };
+        }
+        return {
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+          output: '<nexagent_tool_call>{"name":"shell_command","arguments":{"command":"pwd"}}</nexagent_tool_call>\n',
+        };
+      },
+      http: async () => {
+        throw new Error("http should not be used");
+      },
+      codexHttp: async () => {
+        throw new Error("codex-http should not be used");
+      },
+    },
+  );
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(seen, ["shell_command"]);
+});
+
+test("executeProviderRequest records full assistant event detail for long output", async () => {
+  const session = createSession();
+  const longOutput = `final response ${"x".repeat(240)}`;
+
+  const result = await executeProviderRequest(
+    {
+      session,
+      prompt: "summarize",
+    },
+    {
+      exec: async () => ({
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+        output: `${longOutput}\n`,
+      }),
+      http: async () => {
+        throw new Error("http should not be used");
+      },
+      codexHttp: async () => {
+        throw new Error("codex-http should not be used");
+      },
+    },
+  );
+
+  const assistantEvent = session.events.find((event) => event.kind === "assistant" && event.status === "completed");
+  assert.equal(result.ok, true);
+  assert.equal(assistantEvent?.detail, longOutput);
+  assert.doesNotMatch(assistantEvent?.detail ?? "", /\.\.\.$/);
+});
+
 
 test("executeProviderRequest writes verbose debug input and output", async () => {
   const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-debug-provider-"));
@@ -460,6 +632,97 @@ test("executeProviderRequest gives recovery hint after blocked shell tool", asyn
   assert.equal(session.events.some((event) => event.kind === "control" && event.summary.includes("tool.failed") && /policy_blocked/.test(event.detail ?? "")), false);
 });
 
+test("executeProviderRequest nudges todo for multi-stage GSD work", async () => {
+  const session = createSession();
+  const prompts: string[] = [];
+
+  const result = await executeProviderRequest(
+    {
+      session,
+      prompt: "continue GSD workflow and finish next slice",
+    },
+    {
+      exec: async (request) => {
+        prompts.push(request.prompt);
+        if (prompts.length === 1) {
+          return {
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            output: "I will continue the workflow.",
+          };
+        }
+        if (prompts.length === 2) {
+          return {
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            output: '<nexagent_tool_call>{"name":"todo","arguments":{"action":"create","subject":"Inspect current GSD state","status":"in_progress"}}</nexagent_tool_call>',
+          };
+        }
+        return {
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+          output: "Todo created; next step is inspect current state.",
+        };
+      },
+      http: async () => {
+        throw new Error("http should not be used");
+      },
+      codexHttp: async () => {
+        throw new Error("codex-http should not be used");
+      },
+    },
+  );
+
+  assert.equal(result.ok, true);
+  assert.match(prompts[1] ?? "", /needs visible task tracking/);
+  assert.equal(session.todos.tasks[0]?.status, "in_progress");
+  assert.equal(session.events.some((event) => event.summary === "required todo evidence nudge applied"), true);
+});
+
+test("executeProviderRequest gives recovery hint after missing path tool failure", async () => {
+  const session = createSession();
+  const prompts: string[] = [];
+
+  const result = await executeProviderRequest(
+    {
+      session,
+      prompt: "read missing file then recover",
+    },
+    {
+      exec: async (request) => {
+        prompts.push(request.prompt);
+        if (prompts.length === 1) {
+          return {
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            output: '<nexagent_tool_call>{"name":"read_file","arguments":{"path":"missing.ts"}}</nexagent_tool_call>',
+          };
+        }
+        return {
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+          output: "Missing path noted.",
+        };
+      },
+      http: async () => {
+        throw new Error("http should not be used");
+      },
+      codexHttp: async () => {
+        throw new Error("codex-http should not be used");
+      },
+    },
+  );
+
+  assert.equal(result.ok, true);
+  assert.match(prompts[1] ?? "", /Recovery hint:/);
+  assert.match(prompts[1] ?? "", /Use search_files\/list_dir\/nexsight_gather/);
+});
+
 test("executeProviderRequest returns partial result when tool budget is exhausted", async () => {
   const session = createSession();
   const prompts: string[] = [];
@@ -489,18 +752,12 @@ test("executeProviderRequest returns partial result when tool budget is exhauste
   );
 
   assert.equal(result.ok, true);
-  assert.equal(prompts.length, 25);
-  assert.match(prompts[7] ?? "", /Tool budget is almost exhausted/);
-  assert.match(prompts[8] ?? "", /Tool budget continuation cycle 2 started/);
-  assert.match(prompts[16] ?? "", /Tool budget continuation cycle 3 started/);
-  assert.match(prompts[24] ?? "", /Do not call more tools/);
+  assert.equal(prompts.length, 101);
+  assert.equal(prompts.some((prompt) => /Tool budget is almost exhausted/.test(prompt)), true);
+  assert.match(prompts[100] ?? "", /Do not call more tools/);
   assert.match(result.output, /Tool budget exhausted before final assistant answer/);
   assert.match(result.output, /Partial evidence from completed tools/);
   assert.match(result.output, /Tool call: \{"name":"git_status","arguments":\{\}\}/);
-  assert.equal(
-    session.events.some((event) => event.kind === "control" && event.summary === "tool budget continuation cycle started"),
-    true,
-  );
   assert.equal(
     session.events.some((event) => event.kind === "control" && event.summary === "tool budget fallback returned partial result"),
     true,
@@ -519,7 +776,7 @@ test("executeProviderRequest forces final synthesis at tool budget boundary", as
     {
       exec: async (request) => {
         prompts.push(request.prompt);
-        if (prompts.length <= 24) {
+        if (prompts.length <= 100) {
           return {
             exitCode: 0,
             stdout: "",
@@ -552,16 +809,17 @@ test("executeProviderRequest forces final synthesis at tool budget boundary", as
     fallbackApplied: false,
     output: "Final summary from completed tool evidence.",
   });
-  assert.equal(prompts.length, 25);
-  assert.match(prompts[24] ?? "", /Do not call more tools/);
-  assert.match(prompts[24] ?? "", /do not repeat the full diff/);
+  assert.equal(prompts.length, 101);
+  assert.match(prompts[100] ?? "", /Do not call more tools/);
+  assert.match(prompts[100] ?? "", /do not repeat the full diff/);
+  assert.match(prompts[100] ?? "", /Do not describe the runtime response\/tool boundary as a blocker/);
   assert.equal(
     session.events.some((event) => event.kind === "control" && event.summary === "tool budget final synthesis requested"),
     true,
   );
 });
 
-test("executeProviderRequest resets tool budget once for bounded continuation", async () => {
+test("executeProviderRequest allows larger single-cycle tool budget", async () => {
   const session = createSession();
   const prompts: string[] = [];
 
@@ -585,7 +843,7 @@ test("executeProviderRequest resets tool budget once for bounded continuation", 
           exitCode: 0,
           stdout: "",
           stderr: "",
-          output: "continued after budget reset",
+          output: "continued within larger budget",
         };
       },
       http: async () => {
@@ -604,13 +862,12 @@ test("executeProviderRequest resets tool budget once for bounded continuation", 
     transport: "codex",
     adapter: "codex-cli-exec",
     fallbackApplied: false,
-    output: "continued after budget reset",
+    output: "continued within larger budget",
   });
   assert.equal(prompts.length, 9);
-  assert.match(prompts[8] ?? "", /legally reset the per-cycle tool counter/);
   assert.equal(
     session.events.some((event) => event.kind === "control" && event.summary === "tool budget continuation cycle started"),
-    true,
+    false,
   );
 });
 
@@ -803,6 +1060,152 @@ test("executeProviderRequest accepts bare internal tool XML tags", async () => {
   }
 });
 
+test("executeProviderRequest carries bounded tool findings into future prompts", async () => {
+  const session = createSession();
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-provider-tool-memory-"));
+  session.cwd = cwd;
+  session.repo.root = cwd;
+  session.toolPolicy.allowedRoots = [cwd];
+  await writeFile(path.join(cwd, "package.json"), "{\"name\":\"tool-memory\"}\n", "utf8");
+  let secondPrompt = "";
+
+  try {
+    const first = await executeProviderRequest(
+      {
+        session,
+        prompt: "inspect package",
+      },
+      {
+        exec: async (request) => {
+          if (!request.prompt.includes("Internal tool transcript")) {
+            return {
+              exitCode: 0,
+              stdout: "",
+              stderr: "",
+              output: '<nexagent_tool_call>{"name":"list_dir","arguments":{"path":"."}}</nexagent_tool_call>',
+            };
+          }
+          return {
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            output: "done",
+          };
+        },
+        http: async () => {
+          throw new Error("http should not be used");
+        },
+        codexHttp: async () => {
+          throw new Error("codex-http should not be used");
+        },
+      },
+    );
+
+    assert.equal(first.ok, true);
+    assert.equal(session.toolMemory.entries.length, 1);
+    assert.equal(session.toolMemory.entries[0]?.tool, "list_dir");
+    assert.match(session.toolMemory.entries[0]?.summary ?? "", /package\.json/);
+
+    const second = await executeProviderRequest(
+      {
+        session,
+        prompt: "what did we inspect?",
+      },
+      {
+        exec: async (request) => {
+          secondPrompt = request.prompt;
+          return {
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            output: "used remembered tool finding",
+          };
+        },
+        http: async () => {
+          throw new Error("http should not be used");
+        },
+        codexHttp: async () => {
+          throw new Error("codex-http should not be used");
+        },
+      },
+    );
+
+    assert.equal(second.ok, true);
+    assert.match(secondPrompt, /Recent tool findings:/);
+    assert.match(secondPrompt, /list_dir ok/);
+    assert.match(secondPrompt, /package\.json/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("executeProviderRequest omits low-signal policy blocks from tool findings", async () => {
+  const session = createSession();
+  let secondPrompt = "";
+
+  const first = await executeProviderRequest(
+    {
+      session,
+      prompt: "try blocked shell",
+    },
+    {
+      exec: async (request) => {
+        if (!request.prompt.includes("Internal tool transcript")) {
+          return {
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            output: '<nexagent_tool_call>{"name":"shell_command","arguments":{"command":"rm -rf /etc/demo"}}</nexagent_tool_call>',
+          };
+        }
+        return {
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+          output: "blocked command handled",
+        };
+      },
+      http: async () => {
+        throw new Error("http should not be used");
+      },
+      codexHttp: async () => {
+        throw new Error("codex-http should not be used");
+      },
+    },
+  );
+
+  assert.equal(first.ok, true);
+  assert.equal(session.toolMemory.entries.length, 0);
+
+  const second = await executeProviderRequest(
+    {
+      session,
+      prompt: "what happened?",
+    },
+    {
+      exec: async (request) => {
+        secondPrompt = request.prompt;
+        return {
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+          output: "no stale blocked command memory",
+        };
+      },
+      http: async () => {
+        throw new Error("http should not be used");
+      },
+      codexHttp: async () => {
+        throw new Error("codex-http should not be used");
+      },
+    },
+  );
+
+  assert.equal(second.ok, true);
+  assert.doesNotMatch(secondPrompt, /Recent tool findings:/);
+  assert.doesNotMatch(secondPrompt, /rm -rf/);
+});
+
 test("executeProviderRequest records safe tool failure class diagnostics", async () => {
   const session = createSession();
   const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-provider-tool-failure-"));
@@ -844,7 +1247,7 @@ test("executeProviderRequest records safe tool failure class diagnostics", async
     );
 
     assert.equal(result.ok, true);
-    const diagnostic = session.events.find((event) => event.kind === "control" && event.summary.includes("tool.failed"));
+    const diagnostic = session.events.find((event) => event.kind === "control" && event.summary.includes("tool.blocked"));
     assert.match(diagnostic?.detail ?? "", /failure_class=path_not_file/);
     assert.match(diagnostic?.detail ?? "", /argument_count=0/);
     assert.doesNotMatch(diagnostic?.detail ?? "", new RegExp(cwd.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
@@ -1292,6 +1695,10 @@ test("executeProviderRequest returns partial evidence when final synthesis defer
       session.events.some((event) => event.kind === "control" && event.summary === "guidance loop fallback returned partial result"),
       true,
     );
+    assert.equal(
+      session.events.some((event) => event.kind === "assistant" && event.summary === "assistant partial result completed"),
+      true,
+    );
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }
@@ -1492,6 +1899,119 @@ test("executeProviderRequest requires active skill tool evidence instead of acce
     fallbackApplied: false,
     output: "done from active skill tool evidence",
   });
+});
+
+test("executeProviderRequest creates fallback ask prompt for discussion gate output", async () => {
+  const session = createSession();
+  session.activeSkill = {
+    name: "gsd-discuss-phase",
+    source: "repo",
+    path: "/repo/.codex/skills/gsd-discuss-phase/SKILL.md",
+    args: "73",
+    content: "Discuss phase before planning.",
+  };
+  const prompts: string[] = [];
+
+  const result = await executeProviderRequest(
+    {
+      session,
+      prompt: "start",
+    },
+    {
+      exec: async (request) => {
+        prompts.push(request.prompt);
+        if (prompts.length === 1) {
+          return {
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            output: '<nexagent_tool_call>{"name":"git_status","arguments":{}}</nexagent_tool_call>',
+          };
+        }
+        return {
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+          output: "Blocked at required interactive discussion gate: Phase 73 needs you to choose whether to use ROADMAP.md scope or the phase slug before planning.",
+        };
+      },
+      http: async () => {
+        throw new Error("http should not be used");
+      },
+      codexHttp: async () => {
+        throw new Error("codex-http should not be used");
+      },
+    },
+  );
+
+  assert.equal(result.ok, true);
+  assert.match(result.ok ? result.output : "", /ask_user_question pending/);
+  assert.equal(session.operationControls.pendingQuestionnaire?.questions[0]?.header, "Discuss");
+  assert.match(session.operationControls.pendingQuestionnaire?.questions[0]?.question ?? "", /Phase 73/);
+  assert.match(session.operationControls.pendingQuestionnaire?.questions[0]?.options[0]?.label ?? "", /roadmap/i);
+});
+
+test("executeProviderRequest accepts discussion decision write after ask answer", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-provider-ask-decision-"));
+
+  try {
+    const session = createSession();
+    session.cwd = cwd;
+    session.repo.root = cwd;
+    session.toolPolicy.allowedRoots = [cwd];
+    session.activeSkill = {
+      name: "gsd-discuss-phase",
+      source: "repo",
+      path: path.join(cwd, ".codex/skills/gsd-discuss-phase/SKILL.md"),
+      args: "73",
+      content: "Discuss phase before planning.",
+    };
+    const prompts: string[] = [];
+
+    const result = await executeProviderRequest(
+      {
+        session,
+        prompt: "continue from ask answer",
+      },
+      {
+        exec: async (request) => {
+          prompts.push(request.prompt);
+          if (prompts.length === 1) {
+            return {
+              exitCode: 0,
+              stdout: "",
+              stderr: "",
+              output: '<nexagent_tool_call>{"name":"write_file","arguments":{"path":"73-CONTEXT.md","content":"decisions locked"}}</nexagent_tool_call>',
+            };
+          }
+          return {
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            output: "Observed: wrote 73-CONTEXT.md with the locked Phase 73 decisions. Verified: file write succeeded. No more user-choice blocks left for this discussion phase.",
+          };
+        },
+        http: async () => {
+          throw new Error("http should not be used");
+        },
+        codexHttp: async () => {
+          throw new Error("codex-http should not be used");
+        },
+      },
+    );
+
+    assert.deepEqual(result, {
+      ok: true,
+      provider: "codex",
+      model: "gpt-5.4",
+      transport: "codex",
+      adapter: "codex-cli-exec",
+      fallbackApplied: false,
+      output: "Observed: wrote 73-CONTEXT.md with the locked Phase 73 decisions. Verified: file write succeeded. No more user-choice blocks left for this discussion phase.",
+    });
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
 });
 
 test("executeProviderRequest allows tool inventory answers that mention Nexsight tool names", async () => {
@@ -2518,7 +3038,7 @@ test("executeProviderRequest uses native tool calling on http-responses transpor
   session.providerTransport.authGate = "ready";
   session.providerTransport.openaiBaseUrl = "https://api.openai.test/v1";
 
-  const calls: ProviderRequest[] = [];
+  const calls: Array<{ request: ProviderRequest; model: string | null }> = [];
   const result = await executeProviderRequest(
     {
       session,
@@ -2687,7 +3207,7 @@ test("executeProviderRequest passes multiple image attachments to API transports
   }]);
 });
 
-test("executeProviderRequest rejects spark model on api transports using donor model truth", async () => {
+test("executeProviderRequest routes spark model through codex chatgpt responses adapter", async () => {
   const session = createSession("codex", "codexspark");
   session.providerTransport.executor = "fetch";
   session.providerTransport.adapter = "codex-chatgpt-http";
@@ -2696,6 +3216,7 @@ test("executeProviderRequest rejects spark model on api transports using donor m
   session.providerTransport.authGate = "ready";
   session.providerTransport.openaiBaseUrl = "https://chatgpt.com/backend-api/codex";
 
+  const calls: Array<{ request: ProviderRequest; model: string | null }> = [];
   const result = await executeProviderRequest(
     {
       session,
@@ -2708,23 +3229,24 @@ test("executeProviderRequest rejects spark model on api transports using donor m
       http: async () => {
         throw new Error("http should not be used");
       },
-      codexHttp: async () => {
-        throw new Error("codex-http should not be invoked for unsupported api model");
+      codexHttp: async (request, model) => {
+        calls.push({ request, model });
+        return {
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+          output: "hi\n",
+        };
       },
     },
   );
 
-  assert.deepEqual(result, {
-    ok: false,
-    provider: "codex",
-    model: "gpt-5.3-codex-spark",
-    transport: "codex",
-    adapter: "codex-chatgpt-http",
-    fallbackApplied: false,
-    code: "unsupported_model",
-    message: "model gpt-5.3-codex-spark is not available for provider codex",
-    detail: "needs websocket/realtime Codex adapter",
-  });
+  assert.equal(result.ok, true);
+  assert.equal(result.model, "gpt-5.3-codex-spark");
+  assert.equal(result.adapter, "codex-chatgpt-http");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.model, "gpt-5.3-codex-spark");
+  assert.equal(calls[0]?.request.session.providerTransport.openaiBaseUrl, "https://chatgpt.com/backend-api/codex");
 });
 
 test("resolveCodexAuthJson refreshes expired token and rewrites auth json", async () => {

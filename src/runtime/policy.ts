@@ -91,6 +91,18 @@ export function analyzeBlockedShellCommand(command: string): ShellPolicyBlockAna
   }
 
   for (const pattern of BLOCKED_SHELL_PATTERNS) {
+    if (pattern.source.includes(">\\s*\\/")) {
+      const redirectMatch = findBlockedProtectedRedirect(command);
+      if (!redirectMatch) {
+        continue;
+      }
+      return {
+        pattern,
+        matchedText: redirectMatch,
+        reason: describeBlockedShellPattern(pattern),
+        advice: adviseForBlockedShellPattern(pattern),
+      };
+    }
     const match = pattern.exec(command);
     if (!match) {
       continue;
@@ -103,6 +115,35 @@ export function analyzeBlockedShellCommand(command: string): ShellPolicyBlockAna
     };
   }
   return null;
+}
+
+const SAFE_GIT_HIGH_RISK = [
+  { pattern: /\bgit\s+push\b[\s\S]*(?:--force|-f\b|--force-with-lease)/i, reason: "safe-git blocked force push", advice: "Use plain git push after reviewing branch and remote." },
+  { pattern: /\bgit\s+reset\b[\s\S]*--hard\b/i, reason: "safe-git blocked hard reset", advice: "Use git status and git diff first; prefer git restore on explicit files." },
+  { pattern: /\bgit\s+clean\b[\s\S]*-(?:[^\s]*f|[^\s]*x)/i, reason: "safe-git blocked forced clean", advice: "Use git clean -n first, then remove explicit paths only." },
+  { pattern: /\bgit\s+stash\s+(?:drop|clear)\b/i, reason: "safe-git blocked stash deletion", advice: "List stashes and drop explicit entries only after review." },
+  { pattern: /\bgit\s+branch\b[\s\S]*(?:-D\b|--delete\s+--force)/i, reason: "safe-git blocked forced branch delete", advice: "Use git branch -d after verifying branch is merged." },
+  { pattern: /\bgit\s+reflog\s+expire\b/i, reason: "safe-git blocked reflog expiry", advice: "Keep reflog history unless user explicitly owns recovery risk." },
+] as const;
+
+export function analyzeSafeGitCommand(command: string): ShellPolicyBlockAnalysis | null {
+  for (const entry of SAFE_GIT_HIGH_RISK) {
+    const match = entry.pattern.exec(command);
+    if (!match) {
+      continue;
+    }
+    return {
+      pattern: entry.pattern,
+      matchedText: match[0] ?? null,
+      reason: entry.reason,
+      advice: entry.advice,
+    };
+  }
+  return null;
+}
+
+export function formatSafeGitPatterns(): string {
+  return SAFE_GIT_HIGH_RISK.map((entry) => `${entry.reason}: ${entry.pattern.source}`).join("\n");
 }
 
 function analyzeParsedShellCommand(command: string): ShellPolicyBlockAnalysis | null | undefined {
@@ -219,7 +260,21 @@ function isRedirectOperator(operator: string): boolean {
 }
 
 function isProtectedShellPath(value: string): boolean {
+  if (value === "/dev/null") {
+    return false;
+  }
   return /^\/(?:etc|usr|bin|sbin|var|opt|lib|boot|dev|proc|sys|run)(?:\/|$)/.test(value);
+}
+
+function findBlockedProtectedRedirect(command: string): string | null {
+  const redirectPattern = /(?:^|\s)(?:>|>>|>\||&>|2>|2>>)\s*(\/(?:etc|usr|bin|sbin|var|opt|lib|boot|dev|proc|sys|run)(?:\/[^\s;&|]*)?)/g;
+  for (const match of command.matchAll(redirectPattern)) {
+    const target = match[1] ?? "";
+    if (isProtectedShellPath(target)) {
+      return match[0].trim();
+    }
+  }
+  return null;
 }
 
 function describeBlockedShellPattern(pattern: RegExp): string {

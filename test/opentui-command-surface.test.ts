@@ -61,6 +61,14 @@ test("OpenTUI command surface lists bare skill shorthand with descriptions", () 
   assert.equal(alpine?.hint, "alpine skill (project)");
 });
 
+test("OpenTUI command surface lists trailing skill shorthand inside command args", () => {
+  const cwd = makeSkillWorkspace(["alpha", "alpine"]);
+  const surface = createCommandSurface(cwd, "/boomerang $");
+
+  assert.ok(surface.rows.some((row) => row.label === "$alpha"));
+  assert.ok(surface.rows.some((row) => row.value === "/boomerang $alpine "));
+});
+
 test("OpenTUI command surface renders folded and body-derived skill descriptions", () => {
   const cwd = mkdtempSync(path.join(tmpdir(), "nexagent-skill-description-test-"));
   try {

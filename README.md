@@ -16,7 +16,8 @@ Terminal-first AI coding harness for local operator-driven development.
 - Exposes guarded internal tools for repo reads, writes, diffs, searches, shell commands, and Archivist memory.
 - Exposes Nexsight tools for bounded code/data execution, local indexing, and context search with SQLite FTS when available.
 - Provides guarded web fetch/search and batch edit helpers for research and multi-file patch workflows.
-- Provides slash commands for status, provider/model/effort control, tools, memory, config, LSP, skill routing, boomerang autonomous task handoffs, mouse behavior, approvals, compaction, file reads/searches, diffs, and image attachments.
+- Provides slash commands for status, usage, persistent goals, Lean-style Nexsight compressed reads/search, Pi-compatible notify/emoji/color/safe-git/SCIP helpers, provider/model/effort control, tools, memory, config, LSP, skill routing, boomerang autonomous task handoffs, mouse behavior, approvals, compaction, file reads/searches, diffs, and image attachments.
+- Loads Pi-like extension modules from `.nexagent/extensions`, `.pi/extensions`, `~/.nexagent/extensions`, and `~/.pi/agent/extensions` with lifecycle events, sync slash-command registration, and tool metadata registration.
 - Hydrates stdio MCP servers at startup from `.nexagent/mcp.json` or legacy `.mcp.json`, with per-server startup timeouts and deduped server selection.
 - Supports `$skill` shorthand for skill routing.
 - Supports `!<command>` for guarded shell command transcript output.
@@ -182,7 +183,7 @@ Example:
 }
 ```
 
-`gpt-5.3-codex-spark` is visible in the catalog but disabled until the WebSocket/realtime Codex adapter is implemented.
+`gpt-5.3-codex-spark` is available through the Codex ChatGPT backend route (`codex-http` using `/responses`). `codexspark` and `chatgpt-5.3-codex-spark` normalize to the same model slug.
 
 Skills are discovered from repo roots first, then global user roots:
 
@@ -255,8 +256,24 @@ Inside TUI:
 - `/effort` — show or set reasoning effort with `low`, `medium`, `high`, or `xhigh`
 - `/tools` — internal tool policy and availability
 - `/tools nexsight` — Nexsight store/status helpers
+- `/nexsight gather <root> [pattern] [query]` — batch compact maps/signatures from many files in one tool call
+- `/nexsight read <path> [auto|full|map|signatures|outline|lines:N-M]` — Lean-style compressed file reads without raw context dumps
+- `/nexsight index <path> [pattern]`, `/nexsight search <query>`, `/nexsight stats`, `/nexsight purge`, and `/nexsight doctor` — manage local Nexsight context store
 - `/memory` — Archivist memory status, safe signal counters, and commands
 - `/memory --maintenance` — merge duplicate Archivist entries into recurrence records and refresh memory diagnostics
+- `/usage` — current session provider/model usage table with token totals and cost availability note
+- `/todos [pending|in_progress|completed|all]` — show model-managed visual task checklist; active rows also render above the prompt
+- `/goal [--tokens 50k] <objective>` — start a persistent autonomous goal with optional token budget; active goal renders above the prompt and can continue across turns
+- `/goal status`, `/goal pause`, `/goal resume`, `/goal clear`, and `/goal statusbar on|off` — inspect or manage persistent goal state
+- `/btw [--save] <question>` — run hidden side conversation through the current provider without adding it to main conversation context
+- `/btw:new [question]`, `/btw:tangent [--save] <question>`, `/btw:clear`, `/btw:inject [instructions]`, and `/btw:summarize [instructions]` — manage side thread lifecycle and handoff back to main agent
+- `/agents` — show Claude-style subagent types, active agents, recent results, and background task ids
+- `/notify [on|off|status|threshold <ms>]` and `/notify-test` — terminal bell plus OS notification when long turns complete
+- `/emoji [status|emoji]` and `/emoji-test` — deterministic or configured session emoji marker
+- `/color [status|index]`, `/color-next`, and `/color-set <index>` — deterministic or configured ANSI session color marker
+- `/safegit [status|patterns]` — high-risk git mutation guard for force push, hard reset, forced clean, stash deletion, forced branch delete, and reflog expiry
+- `/scip [status|symbols <path>|diagnostics <path>|check [path]]` — Pi SCIP compatibility aliases backed by local LSP/static analysis
+- `/extensions` — Pi-like extension lifecycle shim status, loaded sources, registered events, commands, tools, and load errors
 - `/config` — open the interactive OpenTUI config side window; `/config status` prints provider, UI, memory, LSP, and diagnostics status
 - `/config [set] logo <full|condensed|off>` — persist startup logo mode
 - `/config [set] lsp <on|off>` and `/config [set] lsp-index <on|off>` — persist LSP/code-intel toggles
@@ -264,6 +281,8 @@ Inside TUI:
 - `/lsp setup` — show configured LSP command, resolved binary path, readiness, and install hint
 - `/lsp symbols <path>` and `/lsp diagnostics <path>` — summarize local code intelligence for one project path
 - `/lsp check [path]` — bounded workspace/file diagnostics scan that updates LSP problem cache shown in `/config`
+- `/lsp health` and `/lsp warm` — inspect LSP cache/idle state and warm configured files from `.nexagent/lsp.json` or `.pi-lens/lsp.json`
+- `/lsp nav <definition|references|hover|documentSymbol|workspaceSymbol|implementation|workspaceDiagnostics> [path] [line] [character]` — Pi Lens-inspired navigation; JSON-RPC backed when a language server is available, bounded static fallback otherwise
 - `/skill` — list or route skills
 - `/boomerang <task>` — run an autonomous task, compact the turn into a handoff summary, and seed Archivist when memory is enabled
 - `/boomerang status` and `/boomerang cancel` — inspect or cancel active boomerang mode
@@ -284,14 +303,16 @@ It is meant for tasks that would otherwise dump large raw files or command outpu
 
 Current tool surface:
 
-- `nexsight_execute` — run bounded `shell`, `javascript`, or `python` snippets from the session cwd.
+- `nexsight_execute` — run bounded `shell`, `javascript`, or `python` snippets from the session cwd; shell output gets Lean-style compression for noisy logs.
+- `nexsight_gather` — batch compact maps/signatures from many files; preferred for audits and phase-doc evidence.
+- `nexsight_read` — read files with compressed modes: `auto`, `full`, `map`, `signatures`, `outline`, or `lines:N-M`.
 - `nexsight_index` — index a file or text payload into the local search store.
 - `nexsight_batch` — index a bounded set of repo text files with ignore rules.
 - `nexsight_search` — query indexed excerpts.
 
 Storage lives under `.nexagent/` for local runtime state. When `better-sqlite3` is available, Nexsight uses SQLite FTS; otherwise it falls back to a JSON chunk store.
 
-Use Nexsight for broad repo exploration, counting, parsing, filtering, summarizing, and context search. Use direct file tools for small known files or exact edits.
+Use Nexsight for broad repo exploration, counting, parsing, filtering, summarizing, compressed file reads, and context search. Use direct file tools for small known files or exact edits.
 
 ## Dogfood Guardrails
 

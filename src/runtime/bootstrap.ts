@@ -5,14 +5,21 @@ import { createDefaultProviderRegistry, getTransportProviderDefinition, type Pro
 import { buildPromptV2, summarizePromptV2, type PromptV2Summary } from "./prompt-v2.js";
 import { probeCodexAuthState, type RuntimeAuthState } from "./auth.js";
 import { loadHarnessConfig, type HarnessConfig, type HooksConfig } from "./config.js";
+import { loadRuntimeExtensions, type RuntimeExtensionHost } from "./extensions.js";
 import { loadMcpRegistrySummary, type McpRegistrySummary } from "./mcp.js";
 import { loadPersistedRuntimeState, type PersistedRuntimeState, type PersistedTransportMode } from "./persistence.js";
+import { createRuntimeTodoState, type RuntimeTodoState } from "./todos.js";
+import { createRuntimeBtwState, type RuntimeBtwState } from "./btw.js";
+import { createRuntimeToolMemoryState, type RuntimeToolMemoryState } from "./tool-memory.js";
+import { createRuntimeSubagentState, type RuntimeSubagentState } from "./subagents.js";
+import { createRuntimeGoalState, type RuntimeGoalState } from "./goal.js";
 
 export interface RuntimeBootstrap {
   config: HarnessConfig | (Omit<HarnessConfig, "lsp" | "ui"> & Partial<Pick<HarnessConfig, "lsp" | "ui">>);
   mcp: McpRegistrySummary;
   auth: RuntimeAuthState;
   persisted?: PersistedRuntimeState | null;
+  extensions?: RuntimeExtensionHost;
 }
 
 export interface RuntimeState {
@@ -38,6 +45,12 @@ export interface RuntimeState {
   lsp: HarnessConfig["lsp"];
   ui: HarnessConfig["ui"];
   auth: RuntimeAuthState;
+  btw: RuntimeBtwState;
+  todos: RuntimeTodoState;
+  toolMemory: RuntimeToolMemoryState;
+  subagents: RuntimeSubagentState;
+  goal: RuntimeGoalState;
+  extensions?: RuntimeExtensionHost;
 }
 
 export interface ProviderTransportState {
@@ -70,90 +83,197 @@ export async function bootstrapRuntime(cwd: unknown): Promise<RuntimeBootstrap> 
   const mcp = await loadMcpRegistrySummary(config.mcpConfigPath, config.enabledMcpServers, { cwd: runtimeCwd });
   const persisted = await loadPersistedRuntimeState(runtimeCwd);
   const auth = mergeRuntimeAuth(await probeCodexAuthState(), persisted);
+  const extensions = await loadRuntimeExtensions(runtimeCwd);
 
   return {
     config,
     mcp,
     auth,
     persisted,
+    extensions,
   };
 }
 
 export function createRuntimeState(runtime: RuntimeBootstrap): RuntimeState {
+  const config = normalizeRuntimeConfig(runtime.config);
+  const boot: RuntimeBootstrap = { ...runtime, config };
   const providerRouting = {
-    ...runtime.config.providerRouting,
+    ...boot.config.providerRouting,
     modelSelection: {
-      ...runtime.config.providerRouting.modelSelection,
+      ...boot.config.providerRouting.modelSelection,
       configuredModels: {
-        ...runtime.config.providerRouting.modelSelection.configuredModels,
-        ...(runtime.persisted?.providerModels ?? {}),
+        ...boot.config.providerRouting.modelSelection.configuredModels,
+        ...(boot.persisted?.providerModels ?? {}),
       },
       configuredReasoningEfforts: {
-        ...(runtime.config.providerRouting.modelSelection.configuredReasoningEfforts ?? {}),
-        ...(runtime.persisted?.providerReasoningEfforts ?? {}),
+        ...(boot.config.providerRouting.modelSelection.configuredReasoningEfforts ?? {}),
+        ...(boot.persisted?.providerReasoningEfforts ?? {}),
       },
     },
   };
-  const providerRegistry = runtime.config.providerRegistry ?? createDefaultProviderRegistry();
-  const provider = resolveActiveProvider(runtime);
-  const providerTransport = createProviderTransportState(runtime, provider);
-  const mcpRegistry = normalizeMcpRegistry(runtime.mcp);
+  const providerRegistry = boot.config.providerRegistry ?? createDefaultProviderRegistry();
+  const provider = resolveActiveProvider(boot);
+  const providerTransport = createProviderTransportState(boot, provider);
+  const mcpRegistry = normalizeMcpRegistry(boot.mcp);
   const promptV2 = buildPromptV2({
     session: {
       provider,
-      prompt: runtime.config.prompt,
+      prompt: boot.config.prompt,
       providerRouting,
       providerTransport,
-      cwd: runtime.config.cwd,
-      toolPolicy: runtime.config.toolPolicy,
+      cwd: boot.config.cwd,
+      toolPolicy: boot.config.toolPolicy,
       mcpServers: mcpRegistry.serverNames,
-      enabledMcpServers: runtime.config.enabledMcpServers,
-      imports: runtime.config.imports,
-      instructionSources: runtime.config.instructionSources,
-      archivist: runtime.config.archivist,
+      enabledMcpServers: boot.config.enabledMcpServers,
+      imports: boot.config.imports,
+      instructionSources: boot.config.instructionSources,
+      archivist: boot.config.archivist,
     },
     prompt: "",
   });
 
   return {
-    product: runtime.config.productName,
+    product: boot.config.productName,
     provider,
-    prompt: runtime.config.prompt,
+    prompt: boot.config.prompt,
     providerRegistry,
     providerRouting,
     providerTransport,
     commandModes: {
-      cavemanMode: runtime.persisted?.commandModes?.cavemanMode ?? false,
-      deadpoolMode: runtime.persisted?.commandModes?.deadpoolMode ?? false,
-      statusline: runtime.persisted?.commandModes?.statusline ?? false,
-      mouseMode: runtime.persisted?.commandModes?.mouseMode ?? "auto",
+      cavemanMode: boot.persisted?.commandModes?.cavemanMode ?? false,
+      deadpoolMode: boot.persisted?.commandModes?.deadpoolMode ?? false,
+      statusline: boot.persisted?.commandModes?.statusline ?? false,
+      mouseMode: boot.persisted?.commandModes?.mouseMode ?? "auto",
     },
     operationDefaults: {
-      requireApprovalForGuarded: runtime.persisted?.operationControls?.requireApprovalForGuarded ?? false,
+      requireApprovalForGuarded: boot.persisted?.operationControls?.requireApprovalForGuarded ?? false,
     },
-    cwd: runtime.config.cwd,
-    repo: runtime.config.repo,
-    toolPolicy: runtime.config.toolPolicy,
+    cwd: boot.config.cwd,
+    repo: boot.config.repo,
+    toolPolicy: boot.config.toolPolicy,
     mcpServers: mcpRegistry.serverNames,
-    enabledMcpServers: runtime.config.enabledMcpServers,
+    enabledMcpServers: boot.config.enabledMcpServers,
     mcpRegistry,
-    imports: runtime.config.imports,
-    instructionSources: runtime.config.instructionSources,
+    imports: boot.config.imports,
+    instructionSources: boot.config.instructionSources,
     promptV2Summary: summarizePromptV2(promptV2.sections),
     hooks: {
-      sourcePath: runtime.config.imports.claude?.path ?? runtime.config.hooks?.sourcePath ?? null,
-      status: runtime.config.hooks?.status ?? "none",
-      events: runtime.config.hooks?.events ?? [],
-      commandCount: runtime.config.hooks?.commandCount ?? 0,
-      invalidEntries: runtime.config.hooks?.invalidEntries ?? [],
+      sourcePath: boot.config.imports.claude?.path ?? boot.config.hooks?.sourcePath ?? null,
+      status: boot.config.hooks?.status ?? "none",
+      events: boot.config.hooks?.events ?? [],
+      commandCount: boot.config.hooks?.commandCount ?? 0,
+      invalidEntries: boot.config.hooks?.invalidEntries ?? [],
     },
-    archivist: runtime.config.archivist,
-    lsp: createRuntimeLspState(runtime),
+    archivist: boot.config.archivist,
+    lsp: createRuntimeLspState(boot),
     ui: {
-      ...(runtime.config.ui ?? { logoMode: "full" }),
-      logoMode: runtime.persisted?.ui?.logoMode ?? runtime.config.ui?.logoMode ?? "full",
+      ...(boot.config.ui ?? { logoMode: "full" }),
+      logoMode: boot.persisted?.ui?.logoMode ?? boot.config.ui?.logoMode ?? "full",
+      sessionEmoji: boot.persisted?.ui?.sessionEmoji ?? boot.config.ui?.sessionEmoji,
+      sessionColorIndex: boot.persisted?.ui?.sessionColorIndex ?? boot.config.ui?.sessionColorIndex,
+      notifyEnabled: boot.persisted?.ui?.notifyEnabled ?? boot.config.ui?.notifyEnabled ?? false,
+      notifyThresholdMs: boot.persisted?.ui?.notifyThresholdMs ?? boot.config.ui?.notifyThresholdMs ?? 2000,
     },
-    auth: runtime.auth,
+    auth: boot.auth,
+    btw: createRuntimeBtwState(boot.persisted?.btw),
+    todos: createRuntimeTodoState(boot.persisted?.todos),
+    toolMemory: createRuntimeToolMemoryState(boot.persisted?.toolMemory),
+    subagents: createRuntimeSubagentState(boot.persisted?.subagents, boot.config.cwd),
+    goal: createRuntimeGoalState(boot.persisted?.goal, { pauseActiveOnLoad: Boolean(boot.persisted?.goal?.goal?.status === "active") }),
+    extensions: boot.extensions,
+  };
+}
+
+function normalizeRuntimeConfig(config: RuntimeBootstrap["config"]): HarnessConfig {
+  const unsafe = config as Partial<HarnessConfig>;
+  const provider = unsafe.provider ?? "codex";
+  const providerRouting = unsafe.providerRouting ?? {
+    fallback: {
+      policy: "require-open-spec",
+      silentProviderSwitch: false,
+    },
+    modelSelection: {
+      activeProvider: provider,
+      configuredModels: {},
+      configuredReasoningEfforts: {},
+    },
+    transport: {},
+  };
+  return {
+    ...unsafe,
+    provider,
+    productName: unsafe.productName ?? "nexagent",
+    prompt: unsafe.prompt ?? { assembly: "v2" },
+    providerRouting: {
+      fallback: {
+        policy: providerRouting.fallback?.policy ?? "require-open-spec",
+        silentProviderSwitch: providerRouting.fallback?.silentProviderSwitch ?? false,
+      },
+      modelSelection: {
+        activeProvider: providerRouting.modelSelection?.activeProvider ?? provider,
+        configuredModels: providerRouting.modelSelection?.configuredModels ?? {},
+        configuredReasoningEfforts: providerRouting.modelSelection?.configuredReasoningEfforts ?? {},
+      },
+      transport: providerRouting.transport ?? {},
+    },
+    mcpConfigPath: unsafe.mcpConfigPath ?? ".nexagent/mcp.json",
+    enabledMcpServers: unsafe.enabledMcpServers ?? [],
+    imports: unsafe.imports ?? { claude: null },
+    instructionSources: unsafe.instructionSources ?? [],
+    repo: unsafe.repo ?? {
+      root: null,
+      name: "unknown",
+      vcs: "none",
+      branch: null,
+      freshness: {
+        status: "no-repo",
+        tracking: null,
+        ahead: null,
+        behind: null,
+        dirty: false,
+        needsPull: false,
+        checkedAt: null,
+      },
+    },
+    toolPolicy: unsafe.toolPolicy ?? {
+      mode: "workspace-guarded",
+      allowedRoots: [unsafe.cwd ?? process.cwd()],
+      protectedRoots: [],
+      readRoots: [unsafe.cwd ?? process.cwd()],
+      shell: "limited",
+      writes: "guarded",
+      deletes: "blocked",
+    },
+    hooks: unsafe.hooks ?? createEmptyHooksConfig(),
+    archivist: unsafe.archivist ?? {
+      enabled: false,
+      boundary: "disabled",
+      storagePath: null,
+      storageExists: false,
+      retrieval: {
+        used: false,
+        sourceCategory: null,
+        matchCount: 0,
+        preview: null,
+      },
+      writes: {
+        used: false,
+        action: null,
+        sourceCategory: null,
+        savedAt: null,
+        entryCount: 0,
+        preview: null,
+      },
+    },
+    lsp: unsafe.lsp ?? {
+      enabled: true,
+      command: "typescript-language-server",
+      args: ["--stdio"],
+      indexArchivist: false,
+    },
+    ui: unsafe.ui ?? { logoMode: "full", notifyEnabled: false, notifyThresholdMs: 2000 },
+    compaction: unsafe.compaction,
+    cwd: unsafe.cwd ?? process.cwd(),
   };
 }
 
@@ -164,6 +284,16 @@ function normalizeMcpRegistry(mcp: McpRegistrySummary): McpRegistrySummary {
     tools: mcp.tools ?? [],
     statuses: mcp.statuses ?? [],
     clients: mcp.clients ?? new Map(),
+  };
+}
+
+function createEmptyHooksConfig(): HooksConfig {
+  return {
+    sourcePath: null,
+    status: "none",
+    events: [],
+    commandCount: 0,
+    invalidEntries: [],
   };
 }
 

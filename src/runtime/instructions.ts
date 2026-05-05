@@ -1,4 +1,9 @@
 import type { RepoInstructionSource } from "./config.js";
+import type { RuntimeBtwState } from "./btw.js";
+import type { RuntimeToolMemoryState } from "./tool-memory.js";
+import type { RuntimeSubagentState } from "./subagents.js";
+import type { RuntimeTodoState } from "./todos.js";
+import type { RuntimeGoalState } from "./goal.js";
 import { buildPromptLayers, serializePromptLayers, type PromptLayers } from "./prompt-legacy.js";
 import { buildPromptV2, type PromptV2Result } from "./prompt-v2.js";
 import { buildPromptV3 } from "./prompt-v3.js";
@@ -27,6 +32,11 @@ export interface InstructionContext {
     } | null;
     compactCount: number;
   };
+  todos?: RuntimeTodoState;
+  btw?: RuntimeBtwState;
+  toolMemory?: RuntimeToolMemoryState;
+  subagents?: RuntimeSubagentState;
+  goal?: RuntimeGoalState;
   providerRouting: {
     fallback: {
       policy: string;

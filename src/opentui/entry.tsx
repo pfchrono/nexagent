@@ -2,6 +2,7 @@ import { createCliRenderer } from "@opentui/core";
 import { createRoot } from "@opentui/react";
 
 import { loadPersistedPromptHistory, savePersistedPromptHistory } from "../runtime/persistence.js";
+import { emitRuntimeExtensionEvent } from "../runtime/extensions.js";
 import { shutdownMcpRegistry } from "../runtime/mcp.js";
 import type { RuntimeSession } from "../runtime/session.js";
 import { OpenTuiApp } from "./App.js";
@@ -28,19 +29,35 @@ export async function runOpenTuiRuntime(session: RuntimeSession): Promise<void> 
         return;
       }
       settled = true;
-      process.removeListener("SIGINT", cleanup);
-      process.removeListener("SIGTERM", cleanup);
-      try {
-        keyboardSource.dispose();
-        shutdownMcpRegistry(session.mcpRegistry);
-        renderer.destroy();
-      } finally {
-        resolve();
-      }
+      process.removeListener("SIGINT", forceCleanup);
+      process.removeListener("SIGTERM", forceCleanup);
+      void (async () => {
+        try {
+          await emitRuntimeExtensionEvent(session, "session_shutdown", { reason: "exit" });
+        } catch {
+          // Shutdown must continue even if extension cleanup fails.
+        }
+        try {
+          keyboardSource.dispose();
+          shutdownMcpRegistry(session.mcpRegistry);
+          renderer.destroy();
+        } finally {
+          resolve();
+        }
+      })();
     };
 
-    process.once("SIGINT", cleanup);
-    process.once("SIGTERM", cleanup);
+    const forceCleanup = () => {
+      cleanup();
+      setTimeout(() => {
+        if (settled) {
+          process.exit(0);
+        }
+      }, 250).unref();
+    };
+
+    process.once("SIGINT", forceCleanup);
+    process.once("SIGTERM", forceCleanup);
     createRoot(renderer).render(
       <OpenTuiApp
         session={session}
@@ -48,7 +65,7 @@ export async function runOpenTuiRuntime(session: RuntimeSession): Promise<void> 
         view={createOpenTuiRuntimeView(session)}
         promptHistory={loadPersistedPromptHistory(session.cwd)}
         onPromptHistoryChange={(history) => savePersistedPromptHistory(session.cwd, history)}
-        onExit={cleanup}
+        onExit={forceCleanup}
       />,
     );
   });

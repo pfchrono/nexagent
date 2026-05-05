@@ -1,5 +1,5 @@
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import ts from "typescript";
 
@@ -18,6 +18,8 @@ export interface LspStatusResult {
   problemCount: number;
   lastTouchedPath: string | null;
   lastCheckedAt: string | null;
+  idleTimeoutMs: number;
+  warmFiles: string[];
   message: string;
 }
 
@@ -26,10 +28,37 @@ export interface LspSummaryResult {
   output: string;
 }
 
+export type LspNavigationOperation =
+  | "definition"
+  | "references"
+  | "hover"
+  | "signatureHelp"
+  | "documentSymbol"
+  | "workspaceSymbol"
+  | "codeAction"
+  | "rename"
+  | "implementation"
+  | "prepareCallHierarchy"
+  | "incomingCalls"
+  | "outgoingCalls"
+  | "workspaceDiagnostics";
+
+export interface LspNavigationInput {
+  operation: string;
+  filePath?: string;
+  line?: number;
+  character?: number;
+  endLine?: number;
+  endCharacter?: number;
+  newName?: string;
+  query?: string;
+}
+
 const LSP_MAX_SYMBOLS = 24;
 const LSP_MAX_DIAGNOSTICS = 24;
 const LSP_WORKSPACE_FILE_LIMIT = 80;
 const LSP_REQUEST_TIMEOUT_MS = 2_000;
+const LSP_IDLE_TIMEOUT_MS = 240_000;
 const TYPESCRIPT_EXTENSIONS = new Set([".ts", ".tsx", ".js", ".jsx", ".mts", ".cts"]);
 const SKIP_WORKSPACE_DIRS = new Set([".git", "node_modules", "dist", "build", ".nexagent", ".planning"]);
 
@@ -41,6 +70,7 @@ interface LspSessionCache {
 
 const lspSessionCache = new WeakMap<RuntimeSession, LspSessionCache>();
 const lspClients = new WeakMap<RuntimeSession, LspJsonRpcClient>();
+const lspClientLastUsed = new WeakMap<RuntimeSession, number>();
 
 export function getLspStatus(session: RuntimeSession): LspStatusResult {
   const enabled = session.lsp?.enabled === true;
@@ -49,6 +79,7 @@ export function getLspStatus(session: RuntimeSession): LspStatusResult {
   const available = Boolean(command && isCommandAvailable(command, session.cwd));
   const cache = lspSessionCache.get(session);
   const client = lspClients.get(session);
+  closeIdleLspClient(session);
   const running = Boolean(client && !client.closed);
   const source = !enabled
     ? "disabled"
@@ -67,6 +98,8 @@ export function getLspStatus(session: RuntimeSession): LspStatusResult {
     problemCount: cache ? Array.from(cache.files.values()).reduce((sum, entry) => sum + entry.problemCount, 0) : 0,
     lastTouchedPath: cache?.lastTouchedPath ?? null,
     lastCheckedAt: cache?.lastCheckedAt ?? null,
+    idleTimeoutMs: LSP_IDLE_TIMEOUT_MS,
+    warmFiles: readLspWarmFiles(session),
     message: enabled
       ? configured
         ? available
@@ -93,6 +126,8 @@ export function formatLspStatus(session: RuntimeSession): string {
     `problems: ${String(status.problemCount)}`,
     `lastTouched: ${status.lastTouchedPath ?? "none"}`,
     `indexArchivist: ${String(status.indexArchivist)}`,
+    `idleTimeoutMs: ${String(status.idleTimeoutMs)}`,
+    `warmFiles: ${status.warmFiles.length > 0 ? status.warmFiles.join(", ") : "none"}`,
     `message: ${status.message}`,
   ].join("\n");
 }
@@ -107,11 +142,53 @@ export function formatLspSetup(session: RuntimeSession): string {
     `resolved: ${resolved ?? "none"}`,
     `available: ${String(status.available)}`,
     `running: ${String(status.running)}`,
+    `warmFiles: ${status.warmFiles.length > 0 ? status.warmFiles.join(", ") : "none"}`,
     status.available
       ? "ready: run /lsp symbols <path>, /lsp diagnostics <path>, or /lsp check [path]"
       : "install: bun add -d typescript-language-server",
     "safety: no auto-download; workspace scan bounded to 80 TS/JS files",
   ].join("\n");
+}
+
+export function formatLspHealth(session: RuntimeSession): string {
+  const status = getLspStatus(session);
+  return [
+    "lsp health",
+    `enabled: ${String(status.enabled)}`,
+    `source: ${status.source}`,
+    `running: ${String(status.running)}`,
+    `trackedFiles: ${String(status.touchedFiles)}`,
+    `problems: ${String(status.problemCount)}`,
+    `lastChecked: ${status.lastCheckedAt ?? "none"}`,
+    `idleTimeoutMs: ${String(status.idleTimeoutMs)}`,
+    `warmFiles: ${status.warmFiles.length > 0 ? status.warmFiles.join(", ") : "none"}`,
+  ].join("\n");
+}
+
+export function warmLspWorkspaceSync(session: RuntimeSession): LspSummaryResult {
+  const status = getLspStatus(session);
+  if (!status.enabled) {
+    return { status, output: formatLspStatus(session) };
+  }
+  const warmFiles = status.warmFiles.length > 0 ? status.warmFiles : listWorkspaceFiles(session.repo.root ?? session.cwd).slice(0, 8);
+  const rows: string[] = [];
+  for (const file of warmFiles) {
+    try {
+      const targetPath = resolveSafeProjectPath(session, file);
+      touchLspFileSync(session, targetPath);
+      rows.push(`- warmed ${path.relative(session.repo.root ?? session.cwd, targetPath) || path.basename(targetPath)}`);
+    } catch (error) {
+      rows.push(`- skipped ${file}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  return {
+    status: getLspStatus(session),
+    output: [
+      "lsp warm",
+      `files: ${String(warmFiles.length)}`,
+      ...rows,
+    ].join("\n"),
+  };
 }
 
 export function touchLspFileSync(session: RuntimeSession, inputPath: string): void {
@@ -250,6 +327,305 @@ export function scanLspWorkspaceSync(session: RuntimeSession, inputPath = "."): 
       files.length >= LSP_WORKSPACE_FILE_LIMIT ? `limit: ${String(LSP_WORKSPACE_FILE_LIMIT)} files` : "",
     ].filter(Boolean).join("\n"),
   };
+}
+
+export function summarizeLspNavigationSync(session: RuntimeSession, input: LspNavigationInput): LspSummaryResult {
+  const status = getLspStatus(session);
+  if (!status.enabled) {
+    return { status, output: formatLspStatus(session) };
+  }
+  return { status, output: buildLspNavigationSummary(session, input) };
+}
+
+export async function summarizeLspNavigation(session: RuntimeSession, input: LspNavigationInput): Promise<LspSummaryResult> {
+  const status = getLspStatus(session);
+  if (!status.enabled) {
+    return { status, output: formatLspStatus(session) };
+  }
+  if (status.available) {
+    try {
+      return {
+        status,
+        output: await buildLspNavigationSummaryFromServer(session, input),
+      };
+    } catch {
+      return { status, output: buildLspNavigationSummary(session, input) };
+    }
+  }
+  return { status, output: buildLspNavigationSummary(session, input) };
+}
+
+function buildLspNavigationSummary(session: RuntimeSession, input: LspNavigationInput): string {
+  const operation = normalizeLspNavigationOperation(input.operation);
+  if (!operation) {
+    return [
+      "lsp navigation",
+      "error: invalid operation",
+      `valid: ${VALID_LSP_NAVIGATION_OPERATIONS.join(", ")}`,
+    ].join("\n");
+  }
+  if (operation === "workspaceDiagnostics") {
+    return scanLspWorkspaceSync(session, input.filePath ?? ".").output.replace(/^lsp workspace/, "lsp navigation\noperation: workspaceDiagnostics");
+  }
+  if (operation === "workspaceSymbol") {
+    return buildWorkspaceSymbolNavigation(session, input.query ?? "");
+  }
+  if (operation === "documentSymbol") {
+    if (!input.filePath) return formatLspNavigationMissing(operation, "filePath");
+    const summary = buildLspSymbolsSummary(session, input.filePath);
+    return summary.output.replace(/^lsp symbols/, "lsp navigation\noperation: documentSymbol");
+  }
+  if (!input.filePath) {
+    return formatLspNavigationMissing(operation, "filePath");
+  }
+  if (!input.line || !input.character) {
+    return formatLspNavigationMissing(operation, "line and character");
+  }
+  const targetPath = resolveSafeProjectPath(session, input.filePath);
+  const content = readBoundedTextFile(targetPath);
+  const relativePath = path.relative(session.repo.root ?? session.cwd, targetPath) || path.basename(targetPath);
+  const token = tokenAtPosition(content, input.line, input.character);
+  if (!token) {
+    return [
+      "lsp navigation",
+      `operation: ${operation}`,
+      `path: ${relativePath}`,
+      "result: no token at position",
+    ].join("\n");
+  }
+  if (operation === "definition" || operation === "implementation") {
+    const locations = findWorkspaceSymbolLocations(session, token);
+    return formatLspNavigationLocations(operation, token, locations);
+  }
+  if (operation === "references") {
+    const locations = findWorkspaceReferences(session, token);
+    return formatLspNavigationLocations(operation, token, locations);
+  }
+  if (operation === "hover") {
+    const symbols = findWorkspaceSymbolLocations(session, token);
+    const localLine = content.split(/\r?\n/)[input.line - 1]?.trim() ?? "";
+    return [
+      "lsp navigation",
+      "operation: hover",
+      `token: ${token}`,
+      `path: ${relativePath}`,
+      `line: ${String(input.line)}`,
+      symbols[0] ? `symbol: ${symbols[0].kind} ${symbols[0].name} at ${symbols[0].path}:${String(symbols[0].line)}` : "symbol: not found",
+      localLine ? `context: ${localLine.slice(0, 180)}` : "",
+    ].filter(Boolean).join("\n");
+  }
+  return [
+    "lsp navigation",
+    `operation: ${operation}`,
+    "result: unsupported by bounded shim",
+    "hint: supported now: definition, references, hover, documentSymbol, workspaceSymbol, implementation, workspaceDiagnostics",
+  ].join("\n");
+}
+
+async function buildLspNavigationSummaryFromServer(session: RuntimeSession, input: LspNavigationInput): Promise<string> {
+  const operation = normalizeLspNavigationOperation(input.operation);
+  if (!operation) {
+    return [
+      "lsp navigation",
+      "source: language-server",
+      "error: invalid operation",
+      `valid: ${VALID_LSP_NAVIGATION_OPERATIONS.join(", ")}`,
+    ].join("\n");
+  }
+  const client = await getOrStartLspClient(session);
+  if (operation === "workspaceDiagnostics") {
+    return scanLspWorkspaceSync(session, input.filePath ?? ".").output.replace(/^lsp workspace/, "lsp navigation\nsource: language-server\noperation: workspaceDiagnostics");
+  }
+  if (operation === "workspaceSymbol") {
+    const raw = await client.request("workspace/symbol", { query: input.query ?? "" });
+    return formatLspNavigationLocations(operation, input.query ?? "*", normalizeServerLocations(raw, session));
+  }
+  if (!input.filePath) return formatLspNavigationMissing(operation, "filePath");
+  const targetPath = resolveSafeProjectPath(session, input.filePath);
+  openLspDocument(client, targetPath);
+  if (operation === "documentSymbol") {
+    const raw = await client.request("textDocument/documentSymbol", {
+      textDocument: { uri: pathToFileUri(targetPath) },
+    });
+    const symbols = normalizeServerSymbols(raw, targetPath).slice(0, LSP_MAX_SYMBOLS);
+    const relativePath = path.relative(session.repo.root ?? session.cwd, targetPath) || path.basename(targetPath);
+    return [
+      "lsp navigation",
+      "source: language-server",
+      "operation: documentSymbol",
+      `path: ${relativePath}`,
+      `count: ${String(symbols.length)}`,
+      ...symbols.map((symbol) => `- ${symbol.kind} ${symbol.name} ${relativePath}:${String(symbol.line)}:1`),
+    ].join("\n");
+  }
+  if (!input.line || !input.character) return formatLspNavigationMissing(operation, "line and character");
+  const params = {
+    textDocument: { uri: pathToFileUri(targetPath) },
+    position: { line: input.line - 1, character: input.character - 1 },
+  };
+  if (operation === "definition") {
+    const raw = await client.request("textDocument/definition", params);
+    return formatLspNavigationLocations(operation, tokenAtPosition(readBoundedTextFile(targetPath), input.line, input.character) ?? "*", normalizeServerLocations(raw, session));
+  }
+  if (operation === "implementation") {
+    const raw = await client.request("textDocument/implementation", params);
+    return formatLspNavigationLocations(operation, tokenAtPosition(readBoundedTextFile(targetPath), input.line, input.character) ?? "*", normalizeServerLocations(raw, session));
+  }
+  if (operation === "references") {
+    const raw = await client.request("textDocument/references", { ...params, context: { includeDeclaration: true } });
+    return formatLspNavigationLocations(operation, tokenAtPosition(readBoundedTextFile(targetPath), input.line, input.character) ?? "*", normalizeServerLocations(raw, session));
+  }
+  if (operation === "hover") {
+    const raw = await client.request("textDocument/hover", params);
+    const token = tokenAtPosition(readBoundedTextFile(targetPath), input.line, input.character) ?? "*";
+    return [
+      "lsp navigation",
+      "source: language-server",
+      "operation: hover",
+      `token: ${token}`,
+      `hover: ${formatHoverContents(raw)}`,
+    ].join("\n");
+  }
+  return buildLspNavigationSummary(session, input);
+}
+
+function openLspDocument(client: LspJsonRpcClient, targetPath: string): void {
+  client.notify("textDocument/didOpen", {
+    textDocument: {
+      uri: pathToFileUri(targetPath),
+      languageId: languageIdForPath(targetPath),
+      version: 1,
+      text: readBoundedTextFile(targetPath),
+    },
+  });
+}
+
+const VALID_LSP_NAVIGATION_OPERATIONS = [
+  "definition",
+  "references",
+  "hover",
+  "signatureHelp",
+  "documentSymbol",
+  "workspaceSymbol",
+  "codeAction",
+  "rename",
+  "implementation",
+  "prepareCallHierarchy",
+  "incomingCalls",
+  "outgoingCalls",
+  "workspaceDiagnostics",
+] as const;
+
+function normalizeLspNavigationOperation(value: string): LspNavigationOperation | null {
+  const normalized = value.trim() as LspNavigationOperation;
+  return (VALID_LSP_NAVIGATION_OPERATIONS as readonly string[]).includes(normalized) ? normalized : null;
+}
+
+function formatLspNavigationMissing(operation: string, missing: string): string {
+  return [
+    "lsp navigation",
+    `operation: ${operation}`,
+    `error: missing ${missing}`,
+  ].join("\n");
+}
+
+function buildWorkspaceSymbolNavigation(session: RuntimeSession, query: string): string {
+  const normalizedQuery = query.trim().toLowerCase();
+  const root = session.repo.root ?? session.cwd;
+  const files = listWorkspaceFiles(root);
+  const rows: LspLocation[] = [];
+  for (const file of files) {
+    const relativePath = path.relative(root, file) || path.basename(file);
+    for (const symbol of extractSymbols(readBoundedTextFile(file), file)) {
+      if (!normalizedQuery || symbol.name.toLowerCase().includes(normalizedQuery)) {
+        rows.push({ path: relativePath, line: symbol.line, character: 1, kind: symbol.kind, name: symbol.name });
+      }
+      if (rows.length >= LSP_MAX_SYMBOLS) break;
+    }
+    if (rows.length >= LSP_MAX_SYMBOLS) break;
+  }
+  return [
+    "lsp navigation",
+    "operation: workspaceSymbol",
+    `query: ${query || "*"}`,
+    `count: ${String(rows.length)}`,
+    ...rows.map((row) => `- ${row.kind} ${row.name} ${row.path}:${String(row.line)}:${String(row.character)}`),
+  ].join("\n");
+}
+
+interface LspLocation {
+  path: string;
+  line: number;
+  character: number;
+  kind: string;
+  name: string;
+}
+
+function findWorkspaceSymbolLocations(session: RuntimeSession, token: string): LspLocation[] {
+  const root = session.repo.root ?? session.cwd;
+  const rows: LspLocation[] = [];
+  for (const file of listWorkspaceFiles(root)) {
+    const relativePath = path.relative(root, file) || path.basename(file);
+    for (const symbol of extractSymbols(readBoundedTextFile(file), file)) {
+      if (symbol.name === token) {
+        rows.push({ path: relativePath, line: symbol.line, character: 1, kind: symbol.kind, name: symbol.name });
+      }
+      if (rows.length >= LSP_MAX_SYMBOLS) return rows;
+    }
+  }
+  return rows;
+}
+
+function findWorkspaceReferences(session: RuntimeSession, token: string): LspLocation[] {
+  const root = session.repo.root ?? session.cwd;
+  const rows: LspLocation[] = [];
+  const pattern = new RegExp(`\\b${escapeRegExp(token)}\\b`, "g");
+  for (const file of listWorkspaceFiles(root)) {
+    const relativePath = path.relative(root, file) || path.basename(file);
+    const lines = readBoundedTextFile(file).split(/\r?\n/);
+    lines.forEach((line, index) => {
+      if (rows.length >= LSP_MAX_SYMBOLS) return;
+      pattern.lastIndex = 0;
+      const match = pattern.exec(line);
+      if (match) {
+        rows.push({ path: relativePath, line: index + 1, character: match.index + 1, kind: "reference", name: token });
+      }
+    });
+    if (rows.length >= LSP_MAX_SYMBOLS) break;
+  }
+  return rows;
+}
+
+function formatLspNavigationLocations(operation: string, token: string, locations: LspLocation[]): string {
+  return [
+    "lsp navigation",
+    `operation: ${operation}`,
+    `token: ${token}`,
+    `count: ${String(locations.length)}`,
+    ...locations.map((location) => `- ${location.kind} ${location.name} ${location.path}:${String(location.line)}:${String(location.character)}`),
+  ].join("\n");
+}
+
+function tokenAtPosition(content: string, line: number, character: number): string | null {
+  const lines = content.split(/\r?\n/);
+  const targetLine = lines[line - 1];
+  if (!targetLine) return null;
+  const index = Math.max(0, Math.min(targetLine.length - 1, character - 1));
+  const isWord = (value: string | undefined) => Boolean(value && /[A-Za-z0-9_$]/.test(value));
+  let left = index;
+  let right = index;
+  if (!isWord(targetLine[index]) && isWord(targetLine[index + 1])) {
+    left = index + 1;
+    right = index + 1;
+  }
+  while (left > 0 && isWord(targetLine[left - 1])) left--;
+  while (right < targetLine.length - 1 && isWord(targetLine[right + 1])) right++;
+  const token = targetLine.slice(left, right + 1).trim();
+  return token || null;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function buildLspSymbolsSummary(session: RuntimeSession, inputPath: string): {
@@ -484,6 +860,22 @@ function getLspCache(session: RuntimeSession): LspSessionCache {
   return cache;
 }
 
+function readLspWarmFiles(session: RuntimeSession): string[] {
+  const root = session.repo.root ?? session.cwd;
+  for (const configPath of [path.join(root, ".nexagent", "lsp.json"), path.join(root, ".pi-lens", "lsp.json")]) {
+    if (!existsSync(configPath)) continue;
+    try {
+      const parsed = JSON.parse(readFileSync(configPath, "utf8")) as { warmFiles?: unknown };
+      if (Array.isArray(parsed.warmFiles)) {
+        return parsed.warmFiles.filter((item): item is string => typeof item === "string").slice(0, 16);
+      }
+    } catch {
+      // Ignore invalid warm-file config.
+    }
+  }
+  return [];
+}
+
 function listWorkspaceFiles(rootPath: string): string[] {
   const stats = statSync(rootPath);
   if (stats.isFile()) {
@@ -510,8 +902,10 @@ function listWorkspaceFiles(rootPath: string): string[] {
 }
 
 async function getOrStartLspClient(session: RuntimeSession): Promise<LspJsonRpcClient> {
+  closeIdleLspClient(session);
   const existing = lspClients.get(session);
   if (existing && !existing.closed) {
+    lspClientLastUsed.set(session, Date.now());
     return existing;
   }
   if (!session.lsp?.command) {
@@ -524,6 +918,7 @@ async function getOrStartLspClient(session: RuntimeSession): Promise<LspJsonRpcC
   });
   const client = new LspJsonRpcClient(child);
   lspClients.set(session, client);
+  lspClientLastUsed.set(session, Date.now());
   try {
     await client.request("initialize", {
       processId: process.pid,
@@ -543,6 +938,16 @@ async function getOrStartLspClient(session: RuntimeSession): Promise<LspJsonRpcC
     lspClients.delete(session);
     throw error;
   }
+}
+
+function closeIdleLspClient(session: RuntimeSession): void {
+  const client = lspClients.get(session);
+  if (!client || client.closed) return;
+  const lastUsed = lspClientLastUsed.get(session) ?? Date.now();
+  if (Date.now() - lastUsed <= LSP_IDLE_TIMEOUT_MS) return;
+  client.close();
+  lspClients.delete(session);
+  lspClientLastUsed.delete(session);
 }
 
 class LspJsonRpcClient {
@@ -675,6 +1080,42 @@ function normalizeServerSymbols(raw: unknown, targetPath: string): Array<{ kind:
   };
   for (const item of raw) visit(item);
   return symbols.length > 0 ? symbols : extractSymbols(readBoundedTextFile(targetPath), targetPath);
+}
+
+function normalizeServerLocations(raw: unknown, session: RuntimeSession): LspLocation[] {
+  const root = session.repo.root ?? session.cwd;
+  const values = Array.isArray(raw) ? raw : raw ? [raw] : [];
+  const rows: LspLocation[] = [];
+  for (const item of values) {
+    if (!item || typeof item !== "object") continue;
+    const record = item as Record<string, unknown>;
+    const location = (record.location && typeof record.location === "object" ? record.location : record) as Record<string, unknown>;
+    const uri = typeof location.uri === "string" ? location.uri : "";
+    const range = location.range as Record<string, unknown> | undefined;
+    const start = range?.start as Record<string, unknown> | undefined;
+    const line = typeof start?.line === "number" ? start.line + 1 : 1;
+    const character = typeof start?.character === "number" ? start.character + 1 : 1;
+    const filePath = uri.startsWith("file://") ? decodeURIComponent(uri.replace(/^file:\/\//, "")) : uri;
+    const relativePath = filePath ? path.relative(root, filePath) || path.basename(filePath) : "unknown";
+    const name = typeof record.name === "string" ? record.name : path.basename(relativePath);
+    const kind = typeof record.kind === "number" ? serverKindName(record.kind) : "location";
+    rows.push({ path: relativePath, line, character, kind, name });
+    if (rows.length >= LSP_MAX_SYMBOLS) break;
+  }
+  return rows;
+}
+
+function formatHoverContents(raw: unknown): string {
+  if (!raw || typeof raw !== "object") return "none";
+  const contents = (raw as { contents?: unknown }).contents;
+  if (typeof contents === "string") return contents.replace(/\s+/g, " ").slice(0, 240);
+  if (Array.isArray(contents)) {
+    return contents.map((item) => typeof item === "string" ? item : typeof item === "object" && item && "value" in item ? String((item as { value?: unknown }).value ?? "") : "").join(" ").replace(/\s+/g, " ").slice(0, 240);
+  }
+  if (contents && typeof contents === "object" && "value" in contents) {
+    return String((contents as { value?: unknown }).value ?? "").replace(/\s+/g, " ").slice(0, 240);
+  }
+  return "none";
 }
 
 function serverKindName(kind: number): string {

@@ -271,6 +271,42 @@ test("OpenTUI renderer key source dedupes raw fallback when both streams report 
   source.dispose();
 });
 
+test("OpenTUI renderer key source keeps raw paste fallback after renderer keys", () => {
+  const keyInput = new EventEmitter();
+  const rawInput = new EventEmitter();
+  const source = createOpenTuiKeyboardSource({
+    on(event, handler) {
+      keyInput.on(event, handler);
+    },
+    off(event, handler) {
+      keyInput.off(event, handler);
+    },
+  }, {
+    on(event, handler) {
+      rawInput.on(event, handler);
+    },
+    off(event, handler) {
+      rawInput.off(event, handler);
+    },
+  });
+  const captured: string[] = [];
+
+  const unsubscribe = source.subscribe((event) => captured.push(event.sequence));
+  keyInput.emit("keypress", {
+    name: "v",
+    ctrl: true,
+    meta: false,
+    shift: false,
+    option: false,
+    sequence: "\x16",
+  });
+  rawInput.emit("data", "\x1b[200~pasted from terminal\x1b[201~");
+
+  assert.deepEqual(captured, ["\x16", "pasted from terminal"]);
+  unsubscribe();
+  source.dispose();
+});
+
 test("OpenTUI raw keyboard parser keeps Enter and Tab as special keys", () => {
   assert.deepEqual(parseRawKeyboardInput("\r\n\t").map((event) => [event.name, event.ctrl]), [
     ["return", false],

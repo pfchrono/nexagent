@@ -3,6 +3,11 @@ import path from "node:path";
 
 import type { RuntimeAuthState } from "./auth.js";
 import type { RuntimeSession } from "./session.js";
+import { createRuntimeBtwState, type RuntimeBtwState } from "./btw.js";
+import { createRuntimeToolMemoryState, type RuntimeToolMemoryState } from "./tool-memory.js";
+import { createRuntimeSubagentState, type RuntimeSubagentState } from "./subagents.js";
+import { createRuntimeTodoState, type RuntimeTodoState } from "./todos.js";
+import { createRuntimeGoalState, type RuntimeGoalState } from "./goal.js";
 
 export type PersistedTransportMode = "cli-exec" | "http-responses" | "codex-http";
 
@@ -16,6 +21,11 @@ export interface PersistedRuntimeState {
   lsp?: PersistedLspState;
   ui?: PersistedUiState;
   auth?: RuntimeAuthState;
+  btw?: RuntimeBtwState;
+  todos?: RuntimeTodoState;
+  toolMemory?: RuntimeToolMemoryState;
+  subagents?: RuntimeSubagentState;
+  goal?: RuntimeGoalState;
   savedAt: string;
 }
 
@@ -37,6 +47,10 @@ export interface PersistedLspState {
 
 export interface PersistedUiState {
   logoMode?: "full" | "condensed" | "off";
+  sessionEmoji?: string;
+  sessionColorIndex?: number;
+  notifyEnabled?: boolean;
+  notifyThresholdMs?: number;
 }
 
 export interface SavePersistedRuntimeStateOptions {
@@ -86,8 +100,17 @@ export function savePersistedRuntimeState(session: RuntimeSession, options: Save
       },
       ui: {
         logoMode: session.ui?.logoMode ?? "full",
+        sessionEmoji: session.ui?.sessionEmoji,
+        sessionColorIndex: session.ui?.sessionColorIndex,
+        notifyEnabled: session.ui?.notifyEnabled === true,
+        notifyThresholdMs: session.ui?.notifyThresholdMs,
       },
       auth: session.auth,
+      btw: createRuntimeBtwState(session.btw),
+      todos: createRuntimeTodoState(session.todos),
+      toolMemory: createRuntimeToolMemoryState(session.toolMemory),
+      subagents: createRuntimeSubagentState(session.subagents, session.cwd),
+      goal: createRuntimeGoalState(session.goal),
       savedAt: new Date().toISOString(),
     };
     const targetPath = path.join(session.cwd, SESSION_STATE_FILE);
@@ -150,6 +173,11 @@ function normalizePersistedRuntimeState(value: unknown): PersistedRuntimeState |
     lsp: normalizeLspState(candidate.lsp),
     ui: normalizeUiState(candidate.ui),
     auth: normalizePersistedAuth(candidate.auth),
+    btw: createRuntimeBtwState(candidate.btw as Partial<RuntimeBtwState> | null),
+    todos: createRuntimeTodoState(candidate.todos as Partial<RuntimeTodoState> | null),
+    toolMemory: createRuntimeToolMemoryState(candidate.toolMemory as Partial<RuntimeToolMemoryState> | null),
+    subagents: createRuntimeSubagentState(candidate.subagents as Partial<RuntimeSubagentState> | null),
+    goal: createRuntimeGoalState(candidate.goal as Partial<RuntimeGoalState> | null),
     savedAt: typeof candidate.savedAt === "string" ? candidate.savedAt : new Date(0).toISOString(),
   };
 }
@@ -173,6 +201,10 @@ function normalizeUiState(value: unknown): PersistedUiState | undefined {
   const logoMode = state.logoMode;
   return {
     logoMode: logoMode === "condensed" || logoMode === "off" || logoMode === "full" ? logoMode : undefined,
+    sessionEmoji: typeof state.sessionEmoji === "string" && state.sessionEmoji.trim().length > 0 ? state.sessionEmoji : undefined,
+    sessionColorIndex: typeof state.sessionColorIndex === "number" && Number.isFinite(state.sessionColorIndex) ? state.sessionColorIndex : undefined,
+    notifyEnabled: state.notifyEnabled === true,
+    notifyThresholdMs: typeof state.notifyThresholdMs === "number" && Number.isFinite(state.notifyThresholdMs) ? state.notifyThresholdMs : undefined,
   };
 }
 

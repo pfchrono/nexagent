@@ -44,7 +44,7 @@ export const DIAGNOSTIC_CLASS_METADATA: Record<DiagnosticClass, { severity: Diag
   "provider.malformed_tool_call": { severity: "warning", summary: "provider emitted malformed tool call" },
   "provider.missing_evidence": { severity: "error", summary: "provider response blocked by missing evidence" },
   "tool.blocked": { severity: "warning", summary: "tool execution blocked" },
-  "tool.failed": { severity: "error", summary: "tool execution failed" },
+  "tool.failed": { severity: "warning", summary: "tool execution failed" },
   "tool.mcp_unavailable": { severity: "warning", summary: "MCP tool unavailable" },
   "command.failed": { severity: "warning", summary: "runtime command failed" },
   "startup.bootstrap": { severity: "error", summary: "startup bootstrap failure" },

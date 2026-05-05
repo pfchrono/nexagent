@@ -5,7 +5,7 @@ import type { RuntimeSession } from "./session.js";
 import { recordRuntimeEvent, setRuntimeAction } from "./session.js";
 
 export type TurnRunState = "initializing" | "provider_loop" | "finalizing" | "completed" | "blocked";
-export type MissingTurnEvidence = "write" | "Nexsight" | "active skill" | "test";
+export type MissingTurnEvidence = "write" | "Nexsight" | "active skill" | "todo" | "ask user" | "test";
 
 export interface TurnRunContext {
   session: RuntimeSession;
@@ -76,6 +76,12 @@ export class TurnRun {
     }
     if (this.obligations.requiresActiveSkillEvidence && !evidence.hasAnyToolEvidence) {
       return "active skill";
+    }
+    if (this.obligations.requiresTodoEvidence && !evidence.hasTodoEvidence) {
+      return "todo";
+    }
+    if (this.obligations.requiresAskEvidence && !evidence.hasAskEvidence && !hasDiscussionDecisionEvidence(output, evidence)) {
+      return "ask user";
     }
     if (claimsNexsightWork(output) && !evidence.hasNexsightEvidence) {
       return "Nexsight";
@@ -166,6 +172,15 @@ export class TurnRun {
     });
     return result;
   }
+}
+
+function hasDiscussionDecisionEvidence(output: string, evidence: TurnEvidenceSummary): boolean {
+  if (!evidence.hasWriteEvidence) {
+    return false;
+  }
+  return /\b(?:locked|captured|recorded|wrote|saved)\b[\s\S]{0,80}\b(?:decision|decisions|choice|choices|context)\b/i.test(output)
+    || /\bno more user[- ]choice\b/i.test(output)
+    || /\bdiscussion phase\b[\s\S]{0,80}\b(?:ready|complete|context-ready)\b/i.test(output);
 }
 
 function claimsNexsightWork(output: string): boolean {

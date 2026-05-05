@@ -1,4 +1,8 @@
 import type { InstructionContext } from "./instructions.js";
+import { formatToolMemoryPromptSummary } from "./tool-memory.js";
+import { formatTodoPromptSummary } from "./todos.js";
+import { formatSubagentPromptSummary } from "./subagents.js";
+import { formatGoalPromptSummary } from "./goal.js";
 
 export const NEXAGENT_PROMPT_DYNAMIC_BOUNDARY = "__NEXAGENT_PROMPT_DYNAMIC_BOUNDARY__";
 
@@ -154,7 +158,10 @@ function buildCoreSections(): PromptV2Section[] {
         "If user names a flow or goal without an exact file/script/test target, inspect repo state, choose the nearest representative target, and state the choice with evidence.",
         "A missing user-selected target is not a blocker when repo evidence can identify scripts, tests, docs, or files to exercise.",
         "Failed tool result means diagnose and vary path, query, command, or tool before stopping.",
+        "Failure recovery ladder: parse exact error, classify blocker, try one smaller/safe equivalent, try one alternate tool/path, preserve useful state in todo/Archivist when work will continue, then hard-stop only if no safe path remains.",
+        "Hard-stop format when blocked: state exact blocker, evidence already gathered, recovery attempts tried, why no further safe action can continue, and what user access/input/dependency would unblock it.",
         "If a needed tool is unavailable, search repo-local scripts, node_modules/.bin, local user bins, MCP/tool registries, or current docs; install project-local dependencies only when safe; ask user only for root/admin/system installs.",
+        "Multi-stage work rule: for GSD workflows, phases, milestones, next-slice work, full-loop requests, or any goal with three or more meaningful steps, use the todo tool near the start, keep one task in_progress, and update it after evidence or verification.",
         "Final answer needs completed current-turn evidence or a named blocker, but keep it human-readable and compact.",
         "Default final style: one short sentence for what changed, one short verification line if checks ran, one blocker line only if blocked.",
         "Avoid long observed/verified/completed-evidence ledgers in chat unless user explicitly asks for audit detail or the artifact itself requires it.",
@@ -169,10 +176,12 @@ function buildCoreSections(): PromptV2Section[] {
       source: "core",
       content: [
         "Use dedicated internal tools before generic shell when available.",
-        "Broad repo map/count/parse/compare/summarize -> nexsight_execute, nexsight_batch, nexsight_index, nexsight_search.",
-        "Use Nexsight like context-mode: run bounded code that prints distilled findings, index/search when useful, then answer from processed stdout/excerpts instead of dumping raw envelopes.",
+        "Broad repo map/audit/phase-doc evidence -> nexsight_gather first; broad count/parse/compare/summarize -> nexsight_execute; store/retrieve -> nexsight_batch, nexsight_index, nexsight_search.",
+        "Use Nexsight like context-mode: batch gather before repeated reads, run bounded code that prints distilled findings, index/search when useful, then answer from processed stdout/excerpts instead of dumping raw envelopes.",
+        "Nexsight batching rule: if you are about to call nexsight_read or nexsight_execute more than twice for related files, stop and use one nexsight_gather or one nexsight_execute script that reads all targets and prints a table.",
         "Nexsight execute rule: pass executable code or command plus reason when useful; do not pass only a natural-language task.",
         "Nexsight result handling: parse stdout/stderr/envelopes, extract useful payload, cite source labels or paths, and run a narrower follow-up query when output is broad, noisy, or missing.",
+        "GSD full-loop routing: todo for visible stages, Nexsight gather for phase/artifact evidence, direct read_file only for exact edit context, apply_patch/batch_edit for artifact changes, shell_command for focused verification.",
         "Exact small file read for editing or exact content -> read_file.",
         "Exact symbol/text search -> search_content, search_files, or nexsight_search.",
         "Precise edits -> apply_patch after reading target context.",
@@ -393,6 +402,22 @@ function buildConversationSections(session: InstructionContext): PromptV2Section
   const content: string[] = [];
   if (session.compaction?.summary?.trim()) {
     content.push(`Compaction summary: ${session.compaction.summary.trim()}`);
+  }
+  const goalSummary = formatGoalPromptSummary(session.goal);
+  if (goalSummary) {
+    content.push(`Goal: ${goalSummary}`);
+  }
+  const todoSummary = formatTodoPromptSummary(session.todos);
+  if (todoSummary) {
+    content.push(`Todos: ${todoSummary}`);
+  }
+  const toolMemory = formatToolMemoryPromptSummary(session.toolMemory);
+  if (toolMemory) {
+    content.push(`Recent tool findings: ${toolMemory}`);
+  }
+  const subagentSummary = formatSubagentPromptSummary(session.subagents);
+  if (subagentSummary) {
+    content.push(`Subagents: ${subagentSummary}`);
   }
   if (session.archivist?.enabled) {
     content.push(`Archivist: enabled; retrieval matches=${String(session.archivist.retrieval.matchCount)}`);

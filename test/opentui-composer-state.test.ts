@@ -188,3 +188,11 @@ test("OpenTUI composer keeps model and effort pickers open while typing args", (
   assert.equal(effortSpace.state.overlayMode, "command");
   assert.equal(effortPartial.state.overlayMode, "command");
 });
+
+test("OpenTUI composer opens skill overlay for trailing skill tokens in command args", () => {
+  const bareSkillToken = handleOpenTuiComposerEvent(createOpenTuiComposerState(), { kind: "character", value: "/boomerang $" });
+  const partialSkillToken = handleOpenTuiComposerEvent(createOpenTuiComposerState(), { kind: "character", value: "/boomerang $dom" });
+
+  assert.equal(bareSkillToken.state.overlayMode, "skill");
+  assert.equal(partialSkillToken.state.overlayMode, "skill");
+});

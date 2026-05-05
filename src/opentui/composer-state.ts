@@ -323,7 +323,7 @@ function overlayForText(text: string, current: ComposerOverlayMode): ComposerOve
   if (current === "history-search") {
     return "history-search";
   }
-  if (trimmed.startsWith("$") || trimmed.startsWith("/skill")) {
+  if (trimmed.startsWith("$") || trimmed.startsWith("/skill") || hasTrailingSkillToken(text)) {
     return "skill";
   }
   if (isArgumentCommandPaletteText(trimmed)) {
@@ -344,4 +344,8 @@ function isArgumentCommandPaletteText(trimmed: string): boolean {
 
 function hasTrailingPathCompletionToken(text: string): boolean {
   return /(?:^|\s)(~\/[^\s]*|~|\.{1,2}\/[^\s]*|\/[^\s]*|[^\s]*\/[^\s]*)$/.test(text);
+}
+
+function hasTrailingSkillToken(text: string): boolean {
+  return /(?:^|\s)\$[^\s]*$/.test(text);
 }

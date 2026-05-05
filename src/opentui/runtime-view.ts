@@ -555,6 +555,17 @@ function formatMemoryDiagnostics(session: RuntimeSession): string {
 
 function createCockpitWarnings(session: RuntimeSession): OpenTuiCockpitWarningRow[] {
   const warnings: OpenTuiCockpitWarningRow[] = [];
+  if (session.operationControls.pendingQuestionnaire) {
+    const nextQuestion = session.operationControls.pendingQuestionnaire.questions.find((_, index) =>
+      !session.operationControls.pendingQuestionnaire?.answers.some((answer) => answer.questionIndex === index)
+    ) ?? session.operationControls.pendingQuestionnaire.questions[0];
+    warnings.push({
+      severity: "blocking",
+      type: "ask",
+      message: nextQuestion ? `question: ${nextQuestion.header} - ${nextQuestion.question}` : "question pending",
+      action: "/ask <option#|text> or /ask status",
+    });
+  }
   if (session.operationControls.pendingApproval) {
     warnings.push({
       severity: "blocking",
