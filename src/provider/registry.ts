@@ -23,6 +23,8 @@ export interface ProviderDefinition {
   id: string;
   name: string;
   baseUrl: string | null;
+  requestTimeoutMs: number | null;
+  maxRetries: number | null;
   authSource: ProviderAuthSource;
   wireApi: ProviderWireApi;
   defaultTransportMode: ProviderTransportMode;
@@ -56,6 +58,8 @@ export function createDefaultProviderRegistry(): ProviderRegistry {
         id: "codex",
         name: "Codex",
         baseUrl: DEFAULT_CODEX_BASE_URL,
+        requestTimeoutMs: null,
+        maxRetries: null,
         authSource: "codex-auth-json",
         wireApi: "responses",
         defaultTransportMode: "codex-http",
@@ -78,6 +82,8 @@ export function createDefaultProviderRegistry(): ProviderRegistry {
         id: "openai",
         name: "OpenAI",
         baseUrl: DEFAULT_OPENAI_BASE_URL,
+        requestTimeoutMs: null,
+        maxRetries: null,
         authSource: "openai-api-key",
         wireApi: "responses",
         defaultTransportMode: "http-responses",
@@ -128,6 +134,8 @@ export function getTransportProviderDefinition(
     id: "codex-cli",
     name: "Codex CLI",
     baseUrl: null,
+    requestTimeoutMs: null,
+    maxRetries: null,
     authSource: "codex-login",
     wireApi: "cli-exec",
     defaultTransportMode: "cli-exec",
@@ -220,6 +228,12 @@ function parseProviderDefinition(
     "name",
     "baseUrl",
     "base_url",
+    "requestTimeoutMs",
+    "request_timeout_ms",
+    "timeoutMs",
+    "timeout_ms",
+    "maxRetries",
+    "max_retries",
     "authSource",
     "auth_source",
     "wireApi",
@@ -238,6 +252,8 @@ function parseProviderDefinition(
   const provider: Partial<ProviderDefinition> = {};
   assignOptionalString(record.name, "name", provider, warnings, id);
   assignOptionalString(record.baseUrl ?? record.base_url, "baseUrl", provider, warnings, id);
+  assignOptionalPositiveInteger(record.requestTimeoutMs ?? record.request_timeout_ms ?? record.timeoutMs ?? record.timeout_ms, "requestTimeoutMs", provider, warnings, id);
+  assignOptionalNonNegativeInteger(record.maxRetries ?? record.max_retries, "maxRetries", provider, warnings, id);
   assignOptionalAuthSource(record.authSource ?? record.auth_source, provider, warnings, id);
   assignOptionalWireApi(record.wireApi ?? record.wire_api, provider, warnings, id);
   assignOptionalBoolean(record.supportsWebsockets ?? record.supports_websockets, "supportsWebsockets", provider, warnings, id);
@@ -315,6 +331,40 @@ function assignOptionalBoolean(
   }
   if (typeof value !== "boolean") {
     warnings.push(`modelProviders.${providerId}.${field}: expected boolean`);
+    return;
+  }
+  provider[field] = value;
+}
+
+function assignOptionalPositiveInteger(
+  value: unknown,
+  field: "requestTimeoutMs",
+  provider: Partial<ProviderDefinition>,
+  warnings: string[],
+  providerId: string,
+): void {
+  if (value === undefined) {
+    return;
+  }
+  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
+    warnings.push(`modelProviders.${providerId}.${field}: expected positive integer`);
+    return;
+  }
+  provider[field] = value;
+}
+
+function assignOptionalNonNegativeInteger(
+  value: unknown,
+  field: "maxRetries",
+  provider: Partial<ProviderDefinition>,
+  warnings: string[],
+  providerId: string,
+): void {
+  if (value === undefined) {
+    return;
+  }
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+    warnings.push(`modelProviders.${providerId}.${field}: expected non-negative integer`);
     return;
   }
   provider[field] = value;
@@ -423,6 +473,8 @@ function createFallbackProvider(id: string): ProviderDefinition {
     id,
     name: id,
     baseUrl: null,
+    requestTimeoutMs: null,
+    maxRetries: null,
     authSource: "openai-api-key",
     wireApi: "responses",
     defaultTransportMode: "http-responses",

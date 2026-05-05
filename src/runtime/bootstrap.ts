@@ -61,6 +61,8 @@ export interface ProviderTransportState {
   authGate: "ready" | "missing";
   activeProvider: string;
   openaiBaseUrl: string | null;
+  requestTimeoutMs?: number | null;
+  maxRetries?: number | null;
   silentFallback: false;
 }
 
@@ -338,6 +340,10 @@ function createProviderTransportState(runtime: RuntimeBootstrap, activeProvider:
       authGate: hasCodexAuthJsonCredentialsSync() ? "ready" : "missing",
       activeProvider,
       openaiBaseUrl: runtime.config.providerRouting.transport.openaiBaseUrl ?? definition?.baseUrl ?? "https://chatgpt.com/backend-api/codex",
+      ...(definition?.requestTimeoutMs !== null && definition?.requestTimeoutMs !== undefined
+        ? { requestTimeoutMs: definition.requestTimeoutMs }
+        : {}),
+      ...(definition?.maxRetries !== null && definition?.maxRetries !== undefined ? { maxRetries: definition.maxRetries } : {}),
       silentFallback: false,
     };
   }
@@ -352,6 +358,10 @@ function createProviderTransportState(runtime: RuntimeBootstrap, activeProvider:
       authGate: process.env.OPENAI_API_KEY?.trim() ? "ready" : "missing",
       activeProvider,
       openaiBaseUrl: runtime.config.providerRouting.transport.openaiBaseUrl ?? definition?.baseUrl ?? "https://api.openai.com/v1",
+      ...(definition?.requestTimeoutMs !== null && definition?.requestTimeoutMs !== undefined
+        ? { requestTimeoutMs: definition.requestTimeoutMs }
+        : {}),
+      ...(definition?.maxRetries !== null && definition?.maxRetries !== undefined ? { maxRetries: definition.maxRetries } : {}),
       silentFallback: false,
     };
   }

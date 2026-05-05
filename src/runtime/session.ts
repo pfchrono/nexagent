@@ -539,6 +539,7 @@ export function applyTransportMode(session: RuntimeSession, mode: PersistedTrans
     session.providerTransport.authSource = definition?.authSource ?? "codex-auth-json";
     session.providerTransport.authGate = hasCodexAuthJsonCredentialsSync() ? "ready" : "missing";
     session.providerTransport.openaiBaseUrl = session.providerRouting.transport.openaiBaseUrl ?? definition?.baseUrl ?? "https://chatgpt.com/backend-api/codex";
+    applyProviderTransportControls(session, definition);
     return;
   }
 
@@ -548,6 +549,7 @@ export function applyTransportMode(session: RuntimeSession, mode: PersistedTrans
     session.providerTransport.authSource = definition?.authSource ?? "openai-api-key";
     session.providerTransport.authGate = process.env.OPENAI_API_KEY?.trim() ? "ready" : "missing";
     session.providerTransport.openaiBaseUrl = session.providerRouting.transport.openaiBaseUrl ?? definition?.baseUrl ?? "https://api.openai.com/v1";
+    applyProviderTransportControls(session, definition);
     return;
   }
 
@@ -555,6 +557,21 @@ export function applyTransportMode(session: RuntimeSession, mode: PersistedTrans
   session.providerTransport.adapter = definition?.adapter ?? "codex-cli-exec";
   session.providerTransport.authSource = definition?.authSource ?? "codex-login";
   session.providerTransport.authGate = session.auth.loggedIn ? "ready" : "missing";
+  applyProviderTransportControls(session, definition);
+}
+
+function applyProviderTransportControls(session: RuntimeSession, definition: ReturnType<typeof getTransportProviderDefinition>): void {
+  if (definition?.requestTimeoutMs !== null && definition?.requestTimeoutMs !== undefined) {
+    session.providerTransport.requestTimeoutMs = definition.requestTimeoutMs;
+  } else {
+    delete session.providerTransport.requestTimeoutMs;
+  }
+
+  if (definition?.maxRetries !== null && definition?.maxRetries !== undefined) {
+    session.providerTransport.maxRetries = definition.maxRetries;
+  } else {
+    delete session.providerTransport.maxRetries;
+  }
 }
 
 export function syncRuntimeSession(session: RuntimeSession, runtime: RuntimeBootstrap): void {

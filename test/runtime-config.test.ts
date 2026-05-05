@@ -310,6 +310,8 @@ test("loadHarnessConfig merges global and repo provider registry JSON", async ()
         modelProviders: {
           codex: {
             baseUrl: "https://global.codex.test/backend-api/codex",
+            requestTimeoutMs: 45000,
+            maxRetries: 1,
             models: ["gpt-5.4", "gpt-5.3-codex-spark"],
           },
           local: {
@@ -330,6 +332,8 @@ test("loadHarnessConfig merges global and repo provider registry JSON", async ()
         modelProviders: {
           local: {
             baseUrl: "http://localhost:5678/v1",
+            timeout_ms: 30000,
+            max_retries: 3,
             models: ["repo-model"],
             capabilities: {
               nativeTools: true,
@@ -339,6 +343,8 @@ test("loadHarnessConfig merges global and repo provider registry JSON", async ()
           },
           bad: {
             wireApi: "banana",
+            requestTimeoutMs: 0,
+            maxRetries: -1,
           },
         },
       }),
@@ -349,9 +355,13 @@ test("loadHarnessConfig merges global and repo provider registry JSON", async ()
     const registry = config.providerRegistry;
 
     assert.equal(registry?.providers.codex.baseUrl, "https://global.codex.test/backend-api/codex");
+    assert.equal(registry?.providers.codex.requestTimeoutMs, 45000);
+    assert.equal(registry?.providers.codex.maxRetries, 1);
     assert.deepEqual(registry?.providers.codex.modelIds, ["gpt-5.4", "gpt-5.3-codex-spark"]);
     assert.equal(registry?.providers.local.name, "Local");
     assert.equal(registry?.providers.local.baseUrl, "http://localhost:5678/v1");
+    assert.equal(registry?.providers.local.requestTimeoutMs, 30000);
+    assert.equal(registry?.providers.local.maxRetries, 3);
     assert.deepEqual(registry?.providers.local.modelIds, ["repo-model"]);
     assert.equal(registry?.providers.local.capabilities.nativeTools, true);
     assert.equal(registry?.providers.local.capabilities.providerRecovery, true);
@@ -360,6 +370,8 @@ test("loadHarnessConfig merges global and repo provider registry JSON", async ()
     assert.equal(registry?.providers.bad.disabledReason, "invalid wireApi");
     assert.ok(registry?.warnings.includes("modelProviders.local: unknown field extraField"));
     assert.ok(registry?.warnings.includes("modelProviders.bad.wireApi: expected cli-exec, responses, or responses_websocket"));
+    assert.ok(registry?.warnings.includes("modelProviders.bad.requestTimeoutMs: expected positive integer"));
+    assert.ok(registry?.warnings.includes("modelProviders.bad.maxRetries: expected non-negative integer"));
   } finally {
     await rm(cwd, { recursive: true, force: true });
     await rm(nexagentHome, { recursive: true, force: true });
