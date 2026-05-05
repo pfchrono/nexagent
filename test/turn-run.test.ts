@@ -145,6 +145,21 @@ test("turn run owns final evidence checks for claimed tests and Nexsight work", 
   );
 });
 
+test("turn run allows blocker reports without todo evidence", () => {
+  const session = createSession();
+  const run = new TurnRun({ session, prompt: "continue GSD workflow and finish next slice" });
+
+  assert.equal(run.getObligations().requiresTodoEvidence, true);
+  assert.equal(
+    run.evaluateFinalEvidence(0, [], "Blocked: state is inconsistent and python -m gsd is unavailable."),
+    null,
+  );
+  assert.equal(
+    run.evaluateFinalEvidence(0, [], "Phase complete and ready for next slice."),
+    "todo",
+  );
+});
+
 test("turn run accepts patch-preview smoke evidence from edit and read tools", () => {
   const session = createSession();
   session.events.push(

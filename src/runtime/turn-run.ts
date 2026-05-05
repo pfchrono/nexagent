@@ -96,7 +96,7 @@ export class TurnRun {
     if (this.obligations.requiresActiveSkillEvidence && !evidence.hasAnyToolEvidence) {
       return "active skill";
     }
-    if (this.obligations.requiresTodoEvidence && !evidence.hasTodoEvidence) {
+    if (this.obligations.requiresTodoEvidence && !evidence.hasTodoEvidence && !isBlockedOutcome(output)) {
       return "todo";
     }
     if (this.obligations.requiresAskEvidence && !evidence.hasAskEvidence && !hasDiscussionDecisionEvidence(output, evidence)) {
@@ -210,6 +210,10 @@ function claimsNexsightWork(output: string): boolean {
         && /\b(completed|returned|found|shows?|reported|produced|confirmed)\b/i.test(segment);
       return claimsDirectUse || claimsNexsightResult;
     });
+}
+
+function isBlockedOutcome(output: string): boolean {
+  return /(?:^|\n)\s*(?:blocked|blocker|cannot continue|can't continue|unable to continue|hard-stop|hard stop|no safe path|manual action required)\b/i.test(output);
 }
 
 function collectTurnRunTokenMetrics(session: RuntimeSession): { inputTokens: number; outputTokens: number } {

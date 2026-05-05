@@ -857,6 +857,35 @@ test("executeProviderRequest nudges todo for multi-stage GSD work", async () => 
   assert.equal(session.events.some((event) => event.summary === "tool todo completed"), true);
 });
 
+test("executeProviderRequest allows blocker report without todo evidence", async () => {
+  const session = createSession();
+
+  const result = await executeProviderRequest(
+    {
+      session,
+      prompt: "continue GSD workflow and finish next slice",
+    },
+    {
+      exec: async () => ({
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+        output: "Blocked: STATE.md is inconsistent and python -m gsd is unavailable.",
+      }),
+      http: async () => {
+        throw new Error("http should not be used");
+      },
+      codexHttp: async () => {
+        throw new Error("codex-http should not be used");
+      },
+    },
+  );
+
+  assert.equal(result.ok, true);
+  assert.match(result.output, /Blocked: STATE\.md is inconsistent/);
+  assert.equal(session.events.some((event) => event.summary === "required todo evidence gate blocked assistant response"), false);
+});
+
 test("executeProviderRequest gives recovery hint after missing path tool failure", async () => {
   const session = createSession();
   const prompts: string[] = [];
