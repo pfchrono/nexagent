@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import type { RuntimeSession } from "../runtime/session.js";
+import { resolveProviderExecutionPolicy } from "./execution-policy.js";
 
 export interface CodexExecInvocation {
   exitCode: number;
@@ -54,15 +55,17 @@ export async function invokeCodexExecTransport(request: { session: RuntimeSessio
   }
 
   try {
-    const { exitCode, stdout, stderr } = await spawnAndCollect(
-      CODEX_EXEC_ADAPTER.command,
+    const policy = resolveProviderExecutionPolicy(request.session);
+    const { exitCode, stdout, stderr } = await spawnWithProviderExecutionPolicy({
+      command: CODEX_EXEC_ADAPTER.command,
       args,
-      request.prompt,
-      request.session.cwd,
-      createProviderEnv(request.session),
-      getCodexExecTimeoutMs(),
-      request.abortSignal,
-    );
+      input: request.prompt,
+      cwd: request.session.cwd,
+      env: createProviderEnv(request.session),
+      timeoutMs: policy.requestTimeoutMs ?? getCodexExecTimeoutMs(),
+      maxRetries: policy.maxRetries,
+      abortSignal: request.abortSignal,
+    });
     const output = await readOutputFile(outputPath);
     return { exitCode, stdout, stderr, output };
   } finally {
@@ -93,6 +96,38 @@ async function readOutputFile(outputPath: string): Promise<string> {
     }
     throw error;
   }
+}
+
+async function spawnWithProviderExecutionPolicy(input: {
+  command: string;
+  args: string[];
+  input: string;
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+  timeoutMs: number;
+  maxRetries: number;
+  abortSignal?: AbortSignal;
+}): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  let attempt = 0;
+  for (;;) {
+    const result = await spawnAndCollect(
+      input.command,
+      input.args,
+      input.input,
+      input.cwd,
+      input.env,
+      input.timeoutMs,
+      input.abortSignal,
+    );
+    if (input.abortSignal?.aborted || !isRetryableExecResult(result) || attempt >= input.maxRetries) {
+      return result;
+    }
+    attempt += 1;
+  }
+}
+
+function isRetryableExecResult(result: { exitCode: number; stderr: string }): boolean {
+  return result.exitCode === 124 && result.stderr.includes("timed out");
 }
 
 async function spawnAndCollect(

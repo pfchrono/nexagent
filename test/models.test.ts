@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   CODEX_MODEL_CATALOG,
   getCodexThinkingLevelMetadata,
+  normalizeCodexModel,
   normalizeCodexThinkingLevel,
 } from "../src/models.js";
 
@@ -28,5 +29,7 @@ test("thinking-level helpers normalize aliases and resolve model metadata", () =
 
   assert.equal(getCodexThinkingLevelMetadata("gpt-5.4")?.defaultThinkingLevel, "medium");
   assert.equal(getCodexThinkingLevelMetadata("codexspark")?.defaultThinkingLevel, "high");
+  assert.equal(normalizeCodexModel("gtp-5.3-codex-spark"), "gpt-5.3-codex-spark");
+  assert.equal(getCodexThinkingLevelMetadata("gtp-5.3-codex-spark")?.defaultThinkingLevel, "high");
   assert.equal(getCodexThinkingLevelMetadata("missing"), null);
 });

@@ -336,6 +336,7 @@ test("internal strict tool schemas expose compatibility aliases", () => {
   assert.ok("filePath" in propertiesFor("lsp_symbols"));
   assert.ok("file_path" in propertiesFor("lsp_diagnostics"));
   assert.ok("items" in propertiesFor("todo"));
+  assert.ok("tasks" in propertiesFor("todo"));
   assert.ok("operations" in propertiesFor("batch_edit"));
   assert.ok("query" in propertiesFor("search_content"));
   assert.ok("query" in propertiesFor("search_files"));
@@ -480,6 +481,32 @@ test("todo items alias accepts model-provided ids", async () => {
     assert.equal(session.todos.tasks[1]?.id, "todo-9");
     assert.equal(session.todos.nextId, 10);
     assert.match(result.output, /\[>\] todo-9 Run next step blockedBy:todo-4/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("todo tasks alias replaces visible list", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-todo-tasks-list-"));
+
+  try {
+    const session = createSession(cwd);
+    const result = executeInternalTool(session, {
+      name: "todo",
+      arguments: {
+        tasks: [
+          { content: "Inspect repo", status: "completed" },
+          { content: "Run focused tests", status: "in_progress" },
+          { content: "Write findings", status: "pending" },
+        ],
+      },
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(session.todos.tasks.length, 3);
+    assert.match(result.output, /\[>\] todo-2 Run focused tests/);
+    assert.match(result.output, /\[ \] todo-3 Write findings/);
+    assert.match(result.output, /\[x\] todo-1 Inspect repo/);
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }
@@ -1043,6 +1070,7 @@ test("compatibility aliases prevent common strict-schema tool stalls", async () 
     assert.equal(validateInternalToolArguments({ name: "nexsight_gather", arguments: { path: "src", max_files: 2, max_chars_per_file: 500 } }), null);
     assert.equal(validateInternalToolArguments({ name: "nexsight_batch", arguments: { path: "src", max_files: 2 } }), null);
     assert.equal(validateInternalToolArguments({ name: "mcp_call", arguments: { server: "s", tool: "t", args: { value: true } } }), null);
+    assert.equal(validateInternalToolArguments({ name: "todo", arguments: { tasks: [{ content: "Track work", status: "in_progress" }] } }), null);
     assert.equal(validateInternalToolArguments({ name: "get_subagent_result", arguments: { id: "agent-1" } }), null);
     assert.equal(validateInternalToolArguments({ name: "steer_subagent", arguments: { id: "agent-1", message: "focus" } }), null);
     assert.equal(validateInternalToolArguments({ name: "lsp_symbols", arguments: { filePath: "src/sample.ts" } }), null);

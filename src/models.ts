@@ -133,7 +133,11 @@ export function normalizeCodexModel(model: string | null): string | null {
   }
 
   const normalized = model.trim().toLowerCase();
-  if (normalized === "codexspark" || normalized === "chatgpt-5.3-codex-spark") {
+  if (
+    normalized === "codexspark" ||
+    normalized === "chatgpt-5.3-codex-spark" ||
+    normalized === "gtp-5.3-codex-spark"
+  ) {
     return "gpt-5.3-codex-spark";
   }
   if (normalized === "codexplan") {

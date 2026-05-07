@@ -76,8 +76,11 @@ test("turn run records provider and tool loop ownership events", async () => {
   const run = new TurnRun({ session, prompt: "inspect repo" });
 
   await run.run(async () => {
+    const startIndex = run.onProviderTurnStarted({ provider: "codex", transportMode: "cli-exec" });
     run.onProviderStep(1, { inputTokens: 10, outputTokens: 4, durationMs: 40 });
     run.onToolStep("read_file");
+    run.onProviderTurnCompleted({ provider: "codex", transportMode: "cli-exec" }, 4);
+    assert.equal(startIndex, 1);
     return {
       ok: true,
       provider: "codex",
@@ -97,6 +100,29 @@ test("turn run records provider and tool loop ownership events", async () => {
   assert.ok(completed);
   assert.match(completed.detail ?? "", /turn_in~10; turn_out~4/);
   assert.match(run.getTransitions()[0]?.reason ?? "", /owned provider\/tool loop/);
+});
+
+test("turn run owns provider lifecycle event details", () => {
+  const session = createSession();
+  const run = new TurnRun({ session, prompt: "inspect repo" });
+
+  const startIndex = run.onProviderTurnStarted({ provider: "codex", transportMode: "codex-http" });
+  run.onProviderTurnCompleted(
+    { provider: "codex", transportMode: "codex-http" },
+    42,
+    { active_skill_partial: true },
+  );
+  run.onProviderTurnFailed({ provider: "codex", transportMode: "codex-http" }, "transport exploded");
+
+  assert.equal(startIndex, 0);
+  assert.deepEqual(
+    session.events.map((event) => [event.kind, event.status, event.summary, event.detail]),
+    [
+      ["provider", "started", "codex turn started", "transport=codex-http"],
+      ["provider", "completed", "codex turn completed", "transport=codex-http; output_chars=42; active_skill_partial=true"],
+      ["provider", "failed", "codex turn failed", "transport exploded"],
+    ],
+  );
 });
 
 test("turn run exposes derived obligations", () => {
@@ -125,6 +151,59 @@ test("turn run requires ask evidence for active discussion skill", () => {
 
   assert.equal(run.getObligations().requiresAskEvidence, true);
   assert.equal(run.evaluateFinalEvidence(0, [], "Need to choose a direction."), "ask user");
+});
+
+test("turn run rejects incomplete improve-codebase-architecture candidate output", () => {
+  const session = createSession();
+  session.activeSkill = {
+    name: "improve-codebase-architecture",
+    source: "global",
+    path: "/skills/improve-codebase-architecture/SKILL.md",
+    args: "",
+    content: "Present candidates.",
+  };
+  session.events.push({
+    at: new Date().toISOString(),
+    kind: "tool",
+    status: "completed",
+    summary: "tool nexsight_gather completed",
+    detail: "files=24",
+  });
+  const run = new TurnRun({ session, prompt: "Execute active skill improve-codebase-architecture now." });
+
+  assert.equal(
+    run.evaluateFinalEvidence(0, [], "1. Provider seam\n2. Tool seam\n\nWhich of these would you like to explore?"),
+    "active skill output",
+  );
+  assert.equal(
+    run.evaluateFinalEvidence(0, [], [
+      "1. Provider seam",
+      "**Files** - src/provider.ts",
+      "**Problem** - scattered policy.",
+      "**Solution** - deeper module.",
+      "**Benefits** - locality and leverage.",
+      "2. Runtime seam\n**Files** - src/runtime/turn-run.ts\n**Problem** - mixed state.\n**Solution** - policy module.\n**Benefits** - locality.",
+      "3. Tool seam\n**Files** - src/runtime/tools.ts\n**Problem** - argument normalization spread.\n**Solution** - adapter module.\n**Benefits** - leverage.",
+      "4. Prompt seam\n**Files** - src/runtime/prompt-v2.ts\n**Problem** - composition drift.\n**Solution** - prompt contract module.\n**Benefits** - locality.",
+      "5. OpenTUI seam\n**Files** - src/opentui/App.tsx\n**Problem** - input and rendering coupled.\n**Solution** - shell module.\n**Benefits** - test leverage.",
+      "Which of these would you like to explore?",
+    ].join("\n")),
+    null,
+  );
+  assert.equal(
+    run.evaluateFinalEvidence(0, [], [
+      "1) `src/provider.ts` - Provider Orchestrator Module",
+      "**Problem:** policy and execution are coupled.",
+      "**Solution:** extract a provider policy module.",
+      "**Benefits:** locality and leverage.",
+      "2) `src/runtime/turn-run.ts` - Turn Module\n**Problem:** completion checks drift.\n**Solution:** keep contract checks behind turn seam.\n**Benefits:** focused tests.",
+      "3) `src/runtime/tools.ts` - Tool Adapter Module\n**Problem:** aliases leak.\n**Solution:** normalize behind adapter.\n**Benefits:** leverage.",
+      "4) `src/runtime/prompt-v2.ts` - Prompt Contract Module\n**Problem:** rules spread.\n**Solution:** central contract builder.\n**Benefits:** locality.",
+      "5) `src/opentui/App.tsx` - Shell Module\n**Problem:** UI concerns couple.\n**Solution:** split shell seam.\n**Benefits:** test leverage.",
+      "Which candidate should we explore?",
+    ].join("\n")),
+    null,
+  );
 });
 
 test("turn run owns final evidence checks for claimed tests and Nexsight work", () => {

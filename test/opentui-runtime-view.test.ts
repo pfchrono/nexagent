@@ -115,7 +115,11 @@ test("createOpenTuiRuntimeView maps runtime session without mutation", () => {
       metadata: "codex/gpt-5.4 · cli-exec · repo · main · cfg:full",
     },
     statusline: {
+      provider: "codex",
       model: "gpt-5.4",
+      effort: "medium",
+      transportMode: "cli-exec",
+      approval: "open",
       branch: "main",
       repoName: "repo",
       sessionAge: "0s",
@@ -126,6 +130,10 @@ test("createOpenTuiRuntimeView maps runtime session without mutation", () => {
       contextPercent: 0,
       lastInputTokens: 0,
       lastOutputTokens: 0,
+      currentTurnToolCount: 0,
+      currentTurnFailureCount: 0,
+      activeTool: null,
+      warningCount: 0,
     },
   });
   assert.ok(view.statusline.memoryTotalBytes > 0);
@@ -375,6 +383,30 @@ test("createOpenTuiRuntimeView orders chat by prompt, tools, and assistant event
   assert.match(view.transcriptBlocks[2]?.detailLines.join("\n") ?? "", /output=src\/opentui\/App\.tsx/);
   assert.equal(view.statusline.lastInputTokens, 3);
   assert.equal(view.statusline.lastOutputTokens, 9);
+  assert.equal(view.statusline.currentTurnToolCount, 2);
+  assert.equal(view.statusline.currentTurnFailureCount, 0);
+  assert.equal(view.statusline.activeTool, null);
+});
+
+test("createOpenTuiRuntimeView exposes active tool and warning counts for statusline", () => {
+  const session = createSession();
+  session.operationControls.pendingApproval = {
+    tool: "shell_command",
+    args: { cmd: "bun test" },
+    requestedAt: "2025-01-01T00:00:02.000Z",
+  };
+  session.events = [
+    { at: "2025-01-01T00:00:01.000Z", kind: "prompt", status: "queued", summary: "user prompt accepted", detail: "test" },
+    { at: "2025-01-01T00:00:02.000Z", kind: "tool", status: "started", summary: "tool shell_command started", detail: "cmd=bun test" },
+    { at: "2025-01-01T00:00:03.000Z", kind: "provider", status: "blocked", summary: "approval pending", detail: "waiting on shell_command" },
+  ];
+
+  const view = createOpenTuiRuntimeView(session);
+
+  assert.equal(view.statusline.currentTurnToolCount, 1);
+  assert.equal(view.statusline.currentTurnFailureCount, 1);
+  assert.equal(view.statusline.activeTool, "shell_command");
+  assert.equal(view.statusline.warningCount, 2);
 });
 
 test("createOpenTuiRuntimeView groups repeated collapsed tool trace blocks", () => {

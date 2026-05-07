@@ -37,6 +37,7 @@ export interface RuntimeTodoToolArgs {
   includeDeleted?: boolean;
   items?: RuntimeTodoItem[];
   todos?: RuntimeTodoItem[];
+  tasks?: RuntimeTodoItem[];
 }
 
 interface RuntimeTodoItem {
@@ -77,7 +78,13 @@ export function createRuntimeTodoState(value?: Partial<RuntimeTodoState> | null)
 }
 
 export function executeTodoTool(session: RuntimeSession, args: Record<string, unknown>): { ok: boolean; tool: "todo"; output: string } {
-  const listAlias = Array.isArray(args.items) ? args.items : Array.isArray(args.todos) ? args.todos : null;
+  const listAlias = Array.isArray(args.items)
+    ? args.items
+    : Array.isArray(args.todos)
+      ? args.todos
+      : Array.isArray(args.tasks)
+        ? args.tasks
+        : null;
   if (listAlias && args.action === undefined) {
     const result = replaceTodosFromItems(session.todos, listAlias);
     if (!result.ok) {

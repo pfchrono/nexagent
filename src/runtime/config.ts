@@ -4,6 +4,24 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 import { mergeProviderRegistryConfigs, type ProviderConfigInput, type ProviderRegistry } from "../provider/registry.js";
+import {
+  CLAUDE_LOCAL_SETTINGS_FILE,
+  CLAUDE_SETTINGS_FILE,
+  CODEX_CONFIG_FILE,
+  DEFAULT_CLAUDE_IMPORT_PATHS,
+  DEFAULT_MCP_CONFIG_FILE,
+  DEFAULT_PRODUCT_NAME,
+  DEFAULT_PROVIDER,
+  LEGACY_MCP_CONFIG_FILE,
+  NEXAGENT_CONFIG_BASENAME,
+  NEXAGENT_CONFIG_FILE,
+  NEXAGENT_LOCAL_SETTINGS_BASENAME,
+  NEXAGENT_LOCAL_SETTINGS_FILE,
+  NEXAGENT_SETTINGS_BASENAME,
+  NEXAGENT_SETTINGS_FILE,
+  REPO_INSTRUCTION_SOURCE_CANDIDATES,
+  normalizeRuntimeCwd,
+} from "./config-paths.js";
 import { parseJsonConfig } from "./jsonc.js";
 import { readMcpConfigFile, writeMcpConfigFile } from "./mcp.js";
 import { resolveNexagentHome, resolvePathFromBase } from "./paths.js";
@@ -233,31 +251,8 @@ interface ResolvedConfigSource {
   compaction?: Partial<CompactionConfig>;
 }
 
-const DEFAULT_PRODUCT_NAME = "nexagent";
-const DEFAULT_PROVIDER = "codex";
-const NEXAGENT_SETTINGS_DIR = ".nexagent";
-const DEFAULT_MCP_CONFIG_FILE = path.join(NEXAGENT_SETTINGS_DIR, "mcp.json");
-const LEGACY_MCP_CONFIG_FILE = ".mcp.json";
-const CODEX_CONFIG_FILE = ".codex/config.toml";
-const NEXAGENT_CONFIG_BASENAME = "config.json";
-const NEXAGENT_SETTINGS_BASENAME = "settings.json";
-const NEXAGENT_LOCAL_SETTINGS_BASENAME = "settings.local.json";
-const NEXAGENT_SETTINGS_FILE = path.join(NEXAGENT_SETTINGS_DIR, NEXAGENT_SETTINGS_BASENAME);
-const NEXAGENT_CONFIG_FILE = path.join(NEXAGENT_SETTINGS_DIR, NEXAGENT_CONFIG_BASENAME);
-const NEXAGENT_LOCAL_SETTINGS_FILE = path.join(NEXAGENT_SETTINGS_DIR, NEXAGENT_LOCAL_SETTINGS_BASENAME);
-const CLAUDE_SETTINGS_FILE = path.join(".claude", "settings.json");
-const CLAUDE_LOCAL_SETTINGS_FILE = path.join(".claude", "settings.local.json");
-const DEFAULT_CLAUDE_IMPORT_PATHS = [CLAUDE_LOCAL_SETTINGS_FILE, CLAUDE_SETTINGS_FILE];
 const SUMMARY_PREVIEW_LIMIT = 80;
 const DETAIL_PREVIEW_LINES = 4;
-const REPO_INSTRUCTION_SOURCE_CANDIDATES = [
-  { kind: "AGENTS.md", relativePath: "AGENTS.md" },
-  { kind: "CLAUDE.md", relativePath: "CLAUDE.md" },
-  { kind: ".claude", relativePath: ".claude" },
-  { kind: ".nexagent/mcp.json", relativePath: DEFAULT_MCP_CONFIG_FILE },
-  { kind: ".mcp.json", relativePath: ".mcp.json" },
-  { kind: "openspec", relativePath: "openspec" },
-] as const;
 
 export async function loadHarnessConfig(cwd: string): Promise<HarnessConfig>;
 export async function loadHarnessConfig(cwd: unknown): Promise<HarnessConfig>;
@@ -325,13 +320,6 @@ export async function loadHarnessConfig(cwd: unknown): Promise<HarnessConfig> {
     ui: resolveUiConfig(mergedConfig.ui),
     compaction: resolveCompactionConfig(mergedConfig.compaction),
   };
-}
-
-function normalizeRuntimeCwd(cwd: unknown): string {
-  if (typeof cwd === "string" && cwd.trim()) {
-    return path.resolve(cwd);
-  }
-  return process.cwd();
 }
 
 async function loadImportedClaudeSettings(

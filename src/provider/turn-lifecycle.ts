@@ -5,13 +5,54 @@ import { savePersistedRuntimeState } from "../runtime/persistence.js";
 import { beginSkillRun, completeSkillRun, recordSkillToolResult } from "../runtime/skill-runner.js";
 import { styleAssistantOutput } from "../runtime/style.js";
 import { clearRuntimeTodos, pruneFinishedTurnTodos } from "../runtime/todos.js";
-import { TurnRun } from "../runtime/turn-run.js";
+import { TurnRun, type ProviderTurnDetailFlags, type ProviderTurnLifecycle } from "../runtime/turn-run.js";
 import type { InternalToolCall, InternalToolResult } from "../runtime/tools.js";
 
 export type ProviderTurnExecutor = (
   turnRun: TurnRun,
   onToolResult: (call: InternalToolCall, result: InternalToolResult) => void,
 ) => Promise<ProviderResult>;
+
+export interface ProviderExecutionLifecycle {
+  eventStart: number;
+  completed(outputChars: number, flags?: ProviderTurnDetailFlags): void;
+  failed(detail: string): void;
+}
+
+export async function runProviderExecutionLifecycle<T>(
+  turnRun: TurnRun,
+  lifecycle: ProviderTurnLifecycle,
+  executor: (events: ProviderExecutionLifecycle) => Promise<T>,
+): Promise<T> {
+  const eventStart = turnRun.onProviderTurnStarted(lifecycle);
+  const events: ProviderExecutionLifecycle = {
+    eventStart,
+    completed: (outputChars, flags) => turnRun.onProviderTurnCompleted(lifecycle, outputChars, flags),
+    failed: (detail) => turnRun.onProviderTurnFailed(lifecycle, detail),
+  };
+  return executor(events);
+}
+
+export function recordProviderExecutionCompleted(
+  request: ProviderRequest,
+  outputChars: number,
+  flags?: ProviderTurnDetailFlags,
+): void {
+  const turnRun = new TurnRun({ session: request.session, prompt: request.prompt });
+  turnRun.onProviderTurnCompleted(createProviderTurnLifecycle(request), outputChars, flags);
+}
+
+export function recordProviderExecutionFailed(request: ProviderRequest, detail: string): void {
+  const turnRun = new TurnRun({ session: request.session, prompt: request.prompt });
+  turnRun.onProviderTurnFailed(createProviderTurnLifecycle(request), detail);
+}
+
+function createProviderTurnLifecycle(request: ProviderRequest): ProviderTurnLifecycle {
+  return {
+    provider: request.session.provider,
+    transportMode: request.session.providerTransport.mode,
+  };
+}
 
 export async function runProviderTurn(
   request: ProviderRequest,

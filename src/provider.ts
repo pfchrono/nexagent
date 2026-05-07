@@ -1,4 +1,5 @@
 import { invokeCodexChatGptHttpTransport } from "./provider/codex-chatgpt-http.js";
+import { existsSync } from "node:fs";
 import { invokeCodexHttpTransport } from "./provider/codex-http.js";
 import { invokeCodexExecTransport } from "./provider/codex-exec.js";
 import {
@@ -18,7 +19,12 @@ import {
   formatToolTranscriptSection,
   truncateToolOutput,
 } from "./provider/transcript.js";
-import { runProviderTurn } from "./provider/turn-lifecycle.js";
+import {
+  recordProviderExecutionCompleted,
+  recordProviderExecutionFailed,
+  runProviderExecutionLifecycle,
+  runProviderTurn,
+} from "./provider/turn-lifecycle.js";
 import {
   createRequiredNexsightFallbackPrompt,
   createRequiredNexsightFallbackSuccess,
@@ -27,6 +33,7 @@ import {
   runRequiredNexsightPreflight,
 } from "./provider/nexsight-required.js";
 import {
+  MAX_ACTIVE_SKILL_OUTPUT_NUDGES,
   MAX_GUIDANCE_NUDGES_BEFORE_SYNTHESIS,
   PROVIDER_NUDGES,
   getRequiredEvidenceNudge,
@@ -42,6 +49,14 @@ import {
   formatToolDuration,
 } from "./provider/tool-results.js";
 import {
+  classifyToolCallMarkup,
+  containsToolCallMarkup,
+  extractModelIntent,
+  parseInternalToolCall,
+  parseNativeToolCall,
+  stripModelIntent,
+} from "./provider/model-output.js";
+import {
   captureSentryDiagnostic,
   logSentryError,
   logSentryInfo,
@@ -53,7 +68,7 @@ import {
 } from "./instrument.js";
 import { applyArchivistRetrieval, rememberArchivistFailure, rememberArchivistRecovery } from "./runtime/archivist.js";
 import { writeDebugLog } from "./runtime/debug.js";
-import { hasWriteEvidence } from "./runtime/evidence.js";
+import { hasToolEvidence, hasWriteEvidence } from "./runtime/evidence.js";
 import { assemblePrompt } from "./runtime/instructions.js";
 import {
   isNexsightToolCall,
@@ -135,34 +150,6 @@ export interface CodexInvokers {
   codexHttp: CodexInvoker;
 }
 
-const JSON_BODY_TOOL_CALL_PATTERN = /<(?:nexagent_)?tool_call>([\s\S]+?)<\/(?:nexagent_)?tool_call>/i;
-const MODEL_INTENT_PATTERN = /<nexagent_intent>([\s\S]*?)<\/nexagent_intent>/i;
-const INTERNAL_TOOL_TAG_NAMES = [
-  "read_file",
-  "write_file",
-  "apply_patch",
-  "batch_edit",
-  "preview_patch",
-  "list_dir",
-  "search_content",
-  "search_files",
-  "web_fetch",
-  "web_search",
-  "git_status",
-  "git_diff",
-  "shell_command",
-  "nexsight_execute",
-  "nexsight_read",
-  "nexsight_gather",
-  "nexsight_index",
-  "nexsight_batch",
-  "nexsight_search",
-  "archivist_save",
-  "archivist_checkpoint",
-  "ask_user_question",
-] as const satisfies readonly InternalToolCall["name"][];
-const INTERNAL_TOOL_TAG_PATTERN = INTERNAL_TOOL_TAG_NAMES.join("|");
-const TOOL_CALL_MARKUP_PATTERN = new RegExp(`<\\s*\\/?\\s*(?:(?:nexagent_)?tool_call|${INTERNAL_TOOL_TAG_PATTERN})\\b`, "i");
 const MAX_INTERNAL_TOOL_STEPS = 100;
 const MAX_INTERNAL_TOOL_CYCLES = 1;
 const FINAL_EDIT_SUMMARY_GUIDANCE = "If completed edit tool output already rendered an Edited-file block or bounded diff preview, do not repeat the full diff in the final answer; summarize changed paths, line counts, verification, and any remaining blocker only.";
@@ -226,15 +213,12 @@ async function executeProviderRequestImpl(
       "nexagent.transport": request.session.providerTransport.mode,
       "nexagent.adapter": transport.id,
     },
-    async (agentSpan) => {
+    async (agentSpan) => runProviderExecutionLifecycle(
+      turnRun,
+      { provider, transportMode: request.session.providerTransport.mode },
+      async (providerLifecycle) => {
   try {
-    const turnEventStart = request.session.events.length;
-    recordRuntimeEvent(request.session, {
-      kind: "provider",
-      status: "started",
-      summary: `${provider} turn started`,
-      detail: `transport=${request.session.providerTransport.mode}`,
-    });
+    const turnEventStart = providerLifecycle.eventStart;
     await applyArchivistRetrieval(request.session, request.prompt);
     const assembled = await assemblePrompt(request);
     assembled.prompt = `${assembled.prompt}\n\nTurn-start intent protocol:\n- Before your first tool call or final answer, emit exactly one short model-authored intent line as <nexagent_intent>...</nexagent_intent>.\n- Keep it under 120 characters, specific to this turn, and do not use canned \"Attempting\" phrasing.\n- After that intent tag, continue normally.`;
@@ -265,11 +249,28 @@ async function executeProviderRequestImpl(
       const preflight = await runRequiredNexsightPreflight(request, request.prompt, executeToolWithRuntimeActivity);
       toolTranscript.push(formatInternalToolExchange(0, preflight.call, preflight.result));
     }
-    let prompt = obligations.requiresNexsightEvidence && toolTranscript.length > 0
-      ? createRequiredNexsightPreflightPrompt(assembled.prompt, toolTranscript)
+    if (obligations.requiresActiveSkillEvidence) {
+      const preflightCalls = createActiveSkillPreflightCalls(request.session);
+      let queuedStatsCommand = false;
+      for (const call of preflightCalls) {
+        const result = await executeToolWithRuntimeActivity(request.session, call);
+        toolTranscript.push(formatInternalToolExchange(toolTranscript.length, call, result));
+        if (!queuedStatsCommand && call.name === "read_file" && /\bgsd-sdk\s+query\s+stats\.json\b/.test(result.output)) {
+          queuedStatsCommand = true;
+          const statsCall: InternalToolCall = { name: "shell_command", arguments: { command: "gsd-sdk query stats.json", timeoutMs: 30_000 } };
+          const statsResult = await executeToolWithRuntimeActivity(request.session, statsCall);
+          toolTranscript.push(formatInternalToolExchange(toolTranscript.length, statsCall, statsResult));
+        }
+      }
+    }
+    let prompt = toolTranscript.length > 0
+      ? obligations.requiresNexsightEvidence
+        ? createRequiredNexsightPreflightPrompt(assembled.prompt, toolTranscript)
+        : createActiveSkillPreflightPrompt(assembled.prompt, toolTranscript)
       : assembled.prompt;
     let guidanceNudgeCount = 0;
     let writeEvidenceNudgeCount = 0;
+    let emptyOutputEvidenceNudgeCount = 0;
     const requiredEvidenceNudgeCounts: RequiredEvidenceNudgeState = {};
     let requiredNexsightFallbackCount = 0;
 
@@ -323,6 +324,27 @@ async function executeProviderRequestImpl(
       }
       const output = stripModelIntent(invocation.output).trimEnd();
       if (output.length === 0) {
+        if (intent && step < MAX_INTERNAL_TOOL_STEPS - 1) {
+          recordRuntimeEvent(request.session, {
+            kind: "control",
+            status: "queued",
+            summary: "intent-only response nudge applied",
+            detail: intent,
+          });
+          prompt = createIntentOnlyContinuationPrompt(prompt, intent);
+          continue;
+        }
+        if ((toolTranscript.length > 0 || hasToolEvidence(request.session, turnEventStart, toolTranscript)) && emptyOutputEvidenceNudgeCount < 1 && step < MAX_INTERNAL_TOOL_STEPS - 1) {
+          emptyOutputEvidenceNudgeCount += 1;
+          recordRuntimeEvent(request.session, {
+            kind: "control",
+            status: "queued",
+            summary: "empty output evidence synthesis requested",
+            detail: `tool_entries=${String(toolTranscript.length)}`,
+          });
+          prompt = createEmptyOutputEvidencePrompt(assembled.prompt, toolTranscript);
+          continue;
+        }
         return createEmptyOutputFailure(provider, model, transport.id);
       }
       const toolCall = parseInternalToolCall(output);
@@ -416,6 +438,29 @@ async function executeProviderRequestImpl(
         }
         const missingClaimEvidence = turnRun.evaluateFinalEvidence(turnEventStart, toolTranscript, output);
         if (missingClaimEvidence) {
+          if (missingClaimEvidence === "test" && !promptRequiresTestEvidence(request.prompt)) {
+            return createUnsupportedTestClaimCorrection(request, model, transport.transport, transport.id, output);
+          }
+          if (missingClaimEvidence === "active skill output") {
+            const recovery = await createRequiredEvidenceRecovery({
+              request,
+              model,
+              transport: transport.transport,
+              adapter: transport.id,
+              missing: missingClaimEvidence,
+              output,
+              basePrompt: assembled.prompt,
+              toolTranscript,
+              step,
+              nudgeCounts: requiredEvidenceNudgeCounts,
+              runNexsightFallback: false,
+            });
+            if (recovery.kind === "retry") {
+              prompt = recovery.prompt;
+              continue;
+            }
+            return recovery.result;
+          }
           guidanceNudgeCount += 1;
           if (step < MAX_INTERNAL_TOOL_STEPS - 1 && guidanceNudgeCount < MAX_GUIDANCE_NUDGES_BEFORE_SYNTHESIS) {
             recordRuntimeEvent(request.session, {
@@ -463,12 +508,7 @@ async function executeProviderRequestImpl(
           summary: "assistant response completed",
           detail: styledOutput,
         });
-        recordRuntimeEvent(request.session, {
-          kind: "provider",
-          status: "completed",
-          summary: `${provider} turn completed`,
-          detail: `transport=${request.session.providerTransport.mode}; output_chars=${String(styledOutput.length)}`,
-        });
+        providerLifecycle.completed(styledOutput.length);
         setSentrySpanAttributes(agentSpan, {
           "gen_ai.response.output_chars": styledOutput.length,
           "nexagent.turn.status": "completed",
@@ -559,12 +599,7 @@ async function executeProviderRequestImpl(
             summary: "assistant response completed",
             detail: styledOutput,
           });
-          recordRuntimeEvent(request.session, {
-            kind: "provider",
-            status: "completed",
-            summary: `${provider} turn completed`,
-            detail: `transport=${request.session.providerTransport.mode}; output_chars=${String(styledOutput.length)}`,
-          });
+          providerLifecycle.completed(styledOutput.length);
           setSentrySpanAttributes(agentSpan, {
             "gen_ai.response.output_chars": styledOutput.length,
             "nexagent.turn.status": "completed",
@@ -667,12 +702,7 @@ async function executeProviderRequestImpl(
       request.session.operationControls.cancelRequested = false;
       return createOperationFailure(request, model, transport.id, "operation canceled by operator");
     }
-    recordRuntimeEvent(request.session, {
-      kind: "provider",
-      status: "failed",
-      summary: `${provider} turn failed`,
-      detail,
-    });
+    providerLifecycle.failed(detail);
     setSentrySpanAttributes(agentSpan, {
       "nexagent.turn.status": "failed",
       "nexagent.error": detail,
@@ -695,7 +725,8 @@ async function executeProviderRequestImpl(
       detail,
     };
   }
-    },
+      },
+    ),
   );
 }
 
@@ -967,6 +998,19 @@ async function executeOpenAiNativeToolLoop(
       }
       const missingClaimEvidence = turnRun.evaluateFinalEvidence(turnEventStart, toolTranscript, output);
       if (missingClaimEvidence) {
+        if (missingClaimEvidence === "test" && !promptRequiresTestEvidence(request.prompt)) {
+          return createUnsupportedTestClaimCorrection(request, model, transport.transport, transport.id, output);
+        }
+        if (missingClaimEvidence === "active skill output") {
+          const nudge = getRequiredEvidenceNudge(missingClaimEvidence);
+          const nudgeCount = incrementRequiredEvidenceNudge(requiredEvidenceNudgeCounts, missingClaimEvidence);
+          if (step < MAX_INTERNAL_TOOL_STEPS - 1 && nudgeCount < MAX_ACTIVE_SKILL_OUTPUT_NUDGES) {
+            recordRequiredEvidenceNudge(request.session, nudge.summary, output);
+            nativeInput = [{ role: "user", content: nudge.content }];
+            return null;
+          }
+          return createMissingRequiredToolEvidenceFailure(request, model, transport.transport, transport.id, nudge.label, output);
+        }
         if (step < MAX_INTERNAL_TOOL_STEPS - 1) {
           recordRuntimeEvent(request.session, {
             kind: "control",
@@ -1083,12 +1127,7 @@ function createMissingWriteEvidenceFailure(
     summary: "write evidence gate blocked assistant response",
     detail,
   });
-  recordRuntimeEvent(request.session, {
-    kind: "provider",
-    status: "failed",
-    summary: `${request.session.provider} turn failed`,
-    detail: "assistant claimed file mutation without write evidence",
-  });
+  recordProviderExecutionFailed(request, "assistant claimed file mutation without write evidence");
   recordRuntimeDiagnostic(request.session, {
     class: "provider.missing_evidence",
     attributes: {
@@ -1133,23 +1172,20 @@ function createMissingRequiredToolEvidenceFailure(
       ? "required nexsight evidence gate blocked assistant response"
       : requiredTool === "active skill"
         ? "required active skill evidence gate blocked assistant response"
-        : requiredTool === "todo"
-          ? "required todo evidence gate blocked assistant response"
-          : requiredTool === "ask user"
-            ? "required ask_user_question evidence gate blocked assistant response"
-            : "required test evidence gate blocked assistant response";
+        : requiredTool === "active skill output"
+          ? "required active skill output gate blocked assistant response"
+          : requiredTool === "todo"
+            ? "required todo evidence gate blocked assistant response"
+            : requiredTool === "ask user"
+              ? "required ask_user_question evidence gate blocked assistant response"
+              : "required test evidence gate blocked assistant response";
   recordRuntimeEvent(request.session, {
     kind: "control",
     status: "blocked",
     summary,
     detail,
   });
-  recordRuntimeEvent(request.session, {
-    kind: "provider",
-    status: "failed",
-    summary: `${request.session.provider} turn failed`,
-    detail: `assistant completed without required ${requiredTool} evidence`,
-  });
+  recordProviderExecutionFailed(request, `assistant completed without required ${requiredTool} evidence`);
   recordRuntimeDiagnostic(request.session, {
     class: "provider.missing_evidence",
     attributes: {
@@ -1269,6 +1305,15 @@ function createMissingRequiredEvidenceFailureIfAny(
   output: string,
 ): ProviderFailure | null {
   const missing = turnRun.evaluateFinalEvidence(turnEventStart, toolTranscript, output);
+  if (missing === "active skill output") {
+    recordRuntimeEvent(request.session, {
+      kind: "control",
+      status: "completed",
+      summary: "active skill output accepted as partial",
+      detail: "final synthesis produced incomplete active-skill output; preserving assistant output instead of converting useful partial work into a provider failure",
+    });
+    return null;
+  }
   return missing ? createMissingRequiredToolEvidenceFailure(request, model, transport, adapter, missing, output) : null;
 }
 
@@ -1287,7 +1332,10 @@ async function createRequiredEvidenceRecovery(options: {
 }): Promise<RequiredEvidenceRecovery> {
   const nudge = getRequiredEvidenceNudge(options.missing);
   const nudgeCount = incrementRequiredEvidenceNudge(options.nudgeCounts, options.missing);
-  if (options.step < MAX_INTERNAL_TOOL_STEPS - 1 && nudgeCount < MAX_GUIDANCE_NUDGES_BEFORE_SYNTHESIS) {
+  const maxNudges = options.missing === "active skill output"
+    ? MAX_ACTIVE_SKILL_OUTPUT_NUDGES
+    : MAX_GUIDANCE_NUDGES_BEFORE_SYNTHESIS;
+  if (options.step < MAX_INTERNAL_TOOL_STEPS - 1 && nudgeCount < maxNudges) {
     recordRequiredEvidenceNudge(options.request.session, nudge.summary, options.output);
     return {
       kind: "retry",
@@ -1316,6 +1364,18 @@ async function createRequiredEvidenceRecovery(options: {
       usedFallback: true,
     };
   }
+  if (options.missing === "active skill output") {
+    return {
+      kind: "fallback-success",
+      result: createPartialActiveSkillOutputSuccess(
+        options.request,
+        options.model,
+        options.transport,
+        options.adapter,
+        options.output,
+      ),
+    };
+  }
 
   return {
     kind: "blocked",
@@ -1327,6 +1387,38 @@ async function createRequiredEvidenceRecovery(options: {
       nudge.label,
       options.output,
     ),
+  };
+}
+
+function createPartialActiveSkillOutputSuccess(
+  request: ProviderRequest,
+  model: string | null,
+  transport: ProviderFailure["transport"],
+  adapter: ProviderFailure["adapter"],
+  output: string,
+): ProviderSuccess {
+  const styledOutput = styleAssistantOutput(request.session, output);
+  recordRuntimeEvent(request.session, {
+    kind: "control",
+    status: "completed",
+    summary: "active skill output accepted as partial",
+    detail: "active skill output stayed incomplete after repair nudges; preserving useful candidate output instead of failing the turn",
+  });
+  recordRuntimeEvent(request.session, {
+    kind: "assistant",
+    status: "completed",
+    summary: "assistant response completed",
+    detail: styledOutput,
+  });
+  recordProviderExecutionCompleted(request, styledOutput.length, { active_skill_partial: true });
+  return {
+    ok: true,
+    provider: request.session.provider,
+    model,
+    transport,
+    adapter,
+    fallbackApplied: false,
+    output: styledOutput,
   };
 }
 
@@ -1623,31 +1715,6 @@ function createOperationFailure(
   };
 }
 
-function parseInternalToolCall(output: string): InternalToolCall | null {
-  const match = output.match(JSON_BODY_TOOL_CALL_PATTERN);
-  if (match) {
-    const parsed = parseToolCallJson(match[1] ?? "");
-    if (parsed && typeof parsed.name === "string") {
-      return parsed;
-    }
-  }
-
-  return parseAttributeStyleToolCall(output) ?? parseBareInternalToolTag(output);
-}
-
-function extractModelIntent(output: string): string | null {
-  const match = output.match(MODEL_INTENT_PATTERN);
-  const intent = match?.[1]?.replace(/\s+/g, " ").trim();
-  if (!intent) {
-    return null;
-  }
-  return intent.length > 140 ? `${intent.slice(0, 137)}...` : intent;
-}
-
-function stripModelIntent(output: string): string {
-  return output.replace(MODEL_INTENT_PATTERN, "").trimStart();
-}
-
 function recordModelIntent(session: RuntimeSession, intent: string): void {
   const lastPromptIndex = [...session.events].map((event) => event.kind).lastIndexOf("prompt");
   const events = lastPromptIndex >= 0 ? session.events.slice(lastPromptIndex) : session.events;
@@ -1662,228 +1729,41 @@ function recordModelIntent(session: RuntimeSession, intent: string): void {
   });
 }
 
-function parseToolCallJson(value: string): InternalToolCall | null {
-  const trimmed = value.trim();
-  for (const candidate of [trimmed, escapeControlCharsInJsonStrings(trimmed)]) {
-    try {
-      const parsed = JSON.parse(candidate) as InternalToolCall;
-      if (!parsed || typeof parsed !== "object") {
-        return null;
-      }
-      return parsed;
-    } catch {
-      // Try repaired candidate next.
-    }
-  }
-  return null;
-}
-
-function escapeControlCharsInJsonStrings(value: string): string {
-  let output = "";
-  let inString = false;
-  let escaped = false;
-
-  for (const char of value) {
-    if (escaped) {
-      output += char;
-      escaped = false;
-      continue;
-    }
-    if (char === "\\") {
-      output += char;
-      escaped = true;
-      continue;
-    }
-    if (char === '"') {
-      output += char;
-      inString = !inString;
-      continue;
-    }
-    if (inString && char === "\n") {
-      output += "\\n";
-      continue;
-    }
-    if (inString && char === "\r") {
-      output += "\\r";
-      continue;
-    }
-    if (inString && char === "\t") {
-      output += "\\t";
-      continue;
-    }
-    output += char;
-  }
-
-  return output;
-}
-
-function containsToolCallMarkup(output: string): boolean {
-  return TOOL_CALL_MARKUP_PATTERN.test(output);
-}
-
-function classifyToolCallMarkup(output: string): Record<string, string | number | boolean> {
-  const toolCallMatches = output.match(/<\s*(?:nexagent_)?tool_call\b/gi) ?? [];
-  const firstBlock = output.match(/<\s*(nexagent_)?tool_call\b([^>]*)>([\s\S]*?)<\/\s*(?:nexagent_)?tool_call\s*>/i);
-  const attributes = firstBlock?.[2] ?? "";
-  const body = firstBlock?.[3]?.trim() ?? "";
-  const generic = firstBlock ? !firstBlock[1] : /<\s*tool_call\b/i.test(output);
-  const hasNameAttribute = Boolean(readXmlAttribute(attributes, "name"));
-  const hasArgumentsAttribute = Boolean(readXmlAttribute(attributes, "arguments"));
-  const bodyLooksJson = body.startsWith("{") || body.startsWith("[");
-  const bodyHasName = /"name"\s*:/.test(body);
-  const hasArgumentChildren = /<\s*arg\b/i.test(body);
-  const parsedJson = bodyLooksJson ? parseToolCallJson(body) : null;
-  const parseFailure = parsedJson && typeof parsedJson.name === "string"
-    ? "none"
-    : bodyLooksJson
-      ? bodyHasName ? "json_body_invalid" : "json_body_missing_name"
-      : hasNameAttribute
-        ? "attribute_body_invalid"
-        : "missing_tool_name";
-
+function createUnsupportedTestClaimCorrection(
+  request: ProviderRequest,
+  model: string | null,
+  transport: ProviderFailure["transport"],
+  adapter: ProviderFailure["adapter"],
+  output: string,
+): ProviderSuccess {
+  const correctedOutput = styleAssistantOutput(request.session, `${output.trim()}\n\nTests not run in this turn.`);
+  recordRuntimeEvent(request.session, {
+    kind: "control",
+    status: "completed",
+    summary: "unsupported test claim corrected",
+    detail: "assistant claimed test evidence without current-turn test tool evidence; harness converted claim to an explicit unverified note",
+  });
+  recordRuntimeEvent(request.session, {
+    kind: "assistant",
+    status: "completed",
+    summary: "assistant response completed",
+    detail: correctedOutput,
+  });
+  recordProviderExecutionCompleted(request, correctedOutput.length, { unsupported_test_claim_corrected: true });
   return {
-    markup_family: generic ? "generic_tool_call" : "nexagent_tool_call",
-    block_count: toolCallMatches.length,
-    adjacent_blocks: toolCallMatches.length > 1,
-    has_name_attribute: hasNameAttribute,
-    has_arguments_attribute: hasArgumentsAttribute,
-    has_argument_children: hasArgumentChildren,
-    body_kind: bodyLooksJson ? "json" : body.length > 0 ? "text" : "empty",
-    body_has_name: bodyHasName,
-    parse_failure: parseFailure,
+    ok: true,
+    provider: request.session.provider,
+    model,
+    transport,
+    adapter,
+    fallbackApplied: false,
+    output: correctedOutput,
   };
 }
 
-function parseAttributeStyleToolCall(output: string): InternalToolCall | null {
-  const match = output.match(/<(?:nexagent_)?tool_call\b([^>]*)>([\s\S]*?)<\/(?:nexagent_)?tool_call>/i);
-  if (!match) {
-    return null;
-  }
-
-  const attributes = match[1] ?? "";
-  const body = match[2] ?? "";
-  const name = readXmlAttribute(attributes, "name");
-  if (!name) {
-    return null;
-  }
-
-  const childArguments = parseArgumentChildren(body);
-  const rawArguments = readXmlAttribute(attributes, "arguments") ?? extractJsonAfterToken(output, "arguments");
-  const parsedArguments = rawArguments ? parseToolArguments(rawArguments) : childArguments ?? {};
-  if (!parsedArguments) {
-    return null;
-  }
-
-  return {
-    name: name as InternalToolCall["name"],
-    arguments: parsedArguments,
-  };
-}
-
-function parseBareInternalToolTag(output: string): InternalToolCall | null {
-  const paired = output.match(new RegExp(`<(${INTERNAL_TOOL_TAG_PATTERN})\\b([^>]*)>([\\s\\S]*?)<\\/\\1>`, "i"));
-  const selfClosing = output.match(new RegExp(`<(${INTERNAL_TOOL_TAG_PATTERN})\\b([^>]*)\\/>`, "i"));
-  const match = paired ?? selfClosing;
-  if (!match) {
-    return null;
-  }
-  const name = match[1] as InternalToolCall["name"] | undefined;
-  if (!name) {
-    return null;
-  }
-  const attributes = parseXmlAttributes(match[2] ?? "");
-  const body = (match[3] ?? "").trim();
-  if (body.length > 0 && attributes.content === undefined && attributes.code === undefined) {
-    attributes.content = decodeXmlAttribute(body);
-  }
-  return {
-    name,
-    arguments: attributes,
-  };
-}
-
-function parseArgumentChildren(body: string): Record<string, unknown> | null {
-  const args: Record<string, unknown> = {};
-  const pattern = /<(?:argument|arg)\b([^>]*)>([\s\S]*?)<\/(?:argument|arg)>/gi;
-  let matched = false;
-  for (const match of body.matchAll(pattern)) {
-    const name = readXmlAttribute(match[1] ?? "", "name");
-    if (!name) {
-      continue;
-    }
-    matched = true;
-    args[name] = decodeXmlAttribute((match[2] ?? "").trim());
-  }
-  return matched ? args : null;
-}
-
-function parseXmlAttributes(attributes: string): Record<string, unknown> {
-  const parsed: Record<string, unknown> = {};
-  const pattern = /\b([A-Za-z_][\w-]*)\s*=\s*(?:"([^"]*)"|'([^']*)')/g;
-  for (const match of attributes.matchAll(pattern)) {
-    const key = match[1];
-    if (!key || key === "name") {
-      continue;
-    }
-    parsed[key] = decodeXmlAttribute(match[2] ?? match[3] ?? "");
-  }
-  return parsed;
-}
-
-function readXmlAttribute(attributes: string, name: string): string | null {
-  const match = attributes.match(new RegExp(`\\b${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`, "i"));
-  const value = match?.[1] ?? match?.[2] ?? null;
-  return value ? decodeXmlAttribute(value) : null;
-}
-
-function decodeXmlAttribute(value: string): string {
-  return value
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&apos;/g, "'")
-    .replace(/&amp;/g, "&");
-}
-
-function extractJsonAfterToken(value: string, token: string): string | null {
-  const tokenIndex = value.toLowerCase().indexOf(token.toLowerCase());
-  if (tokenIndex < 0) {
-    return null;
-  }
-  const objectStart = value.indexOf("{", tokenIndex);
-  if (objectStart < 0) {
-    return null;
-  }
-
-  let depth = 0;
-  let inString = false;
-  let escaped = false;
-  for (let index = objectStart; index < value.length; index += 1) {
-    const char = value[index];
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-    if (char === "\\") {
-      escaped = true;
-      continue;
-    }
-    if (char === '"') {
-      inString = !inString;
-      continue;
-    }
-    if (inString) {
-      continue;
-    }
-    if (char === "{") {
-      depth += 1;
-    } else if (char === "}") {
-      depth -= 1;
-      if (depth === 0) {
-        return value.slice(objectStart, index + 1);
-      }
-    }
-  }
-  return null;
+function promptRequiresTestEvidence(prompt: string): boolean {
+  return /\b(run|execute|perform|verify|validate|check)\b[\s\S]{0,80}\b(tests?|test suite|build|tsc|typecheck|lint)\b/i.test(prompt)
+    || /\b(tests?|test suite|build|tsc|typecheck|lint)\b[\s\S]{0,80}\b(pass|green|verified|validate|check)\b/i.test(prompt);
 }
 
 function createToolBudgetContinuationPrompt(basePrompt: string, toolTranscript: string[], pendingToolName: string, cycleNumber: number): string {
@@ -1897,6 +1777,72 @@ function createToolBudgetContinuationPrompt(basePrompt: string, toolTranscript: 
     "The harness legally reset the per-cycle tool counter for one bounded continuation cycle.",
     "Continue from the existing evidence. Prefer answering now; use tools only for the smallest missing fact.",
   ].join("\n");
+}
+
+function createIntentOnlyContinuationPrompt(basePrompt: string, intent: string): string {
+  return [
+    basePrompt,
+    "",
+    "The previous provider step emitted only a model intent and no assistant answer or tool call.",
+    `Intent: ${intent}`,
+    "Continue now with the required assistant response or a valid nexagent tool call.",
+    "Do not emit only another intent.",
+  ].join("\n");
+}
+
+function createEmptyOutputEvidencePrompt(basePrompt: string, toolTranscript: string[]): string {
+  return [
+    basePrompt,
+    "",
+    formatToolTranscriptSection(toolTranscript, 6),
+    "",
+    "The previous provider step returned empty assistant text after completed tool evidence.",
+    "Do not call more tools unless a required artifact, write, or verification is still missing.",
+    "Return a concise final answer using completed tool evidence.",
+    "If the task is not complete, state what evidence was gathered and the next concrete step.",
+    FINAL_EDIT_SUMMARY_GUIDANCE,
+  ].join("\n");
+}
+
+function createActiveSkillPreflightPrompt(basePrompt: string, toolTranscript: string[]): string {
+  return [
+    basePrompt,
+    "",
+    "Active skill preflight evidence:",
+    formatToolTranscriptSection(toolTranscript, 6),
+    "",
+    "Use this harness-provided evidence before claiming tool output is unavailable.",
+    "Run more valid nexagent tool calls only when this preflight evidence is insufficient.",
+  ].join("\n");
+}
+
+function createActiveSkillPreflightCalls(session: RuntimeSession): InternalToolCall[] {
+  const skillContent = session.activeSkill?.content ?? "";
+  const calls: InternalToolCall[] = [];
+  for (const targetPath of extractAbsoluteAtReferences(skillContent).slice(0, 3)) {
+    calls.push({ name: "read_file", arguments: { path: targetPath } });
+  }
+  if (/\bgsd-sdk\s+query\s+stats\.json\b/.test(skillContent)) {
+    calls.push({ name: "shell_command", arguments: { command: "gsd-sdk query stats.json", timeoutMs: 30_000 } });
+  }
+  if (calls.length === 0 && session.repo.root && existsSync(session.repo.root)) {
+    calls.push({ name: "nexsight_gather", arguments: { root: ".", pattern: "*.ts", mode: "signatures", limit: 24, maxCharsPerFile: 12_000 } });
+  }
+  return calls;
+}
+
+function extractAbsoluteAtReferences(content: string): string[] {
+  const refs = new Set<string>();
+  for (const match of content.matchAll(/@((?:\/|~\/)[^\s<>)\]},"']+)/g)) {
+    const rawPath = match[1]?.replace(/[.,;:]+$/, "");
+    if (!rawPath) {
+      continue;
+    }
+    refs.add(rawPath.startsWith("~/")
+      ? `${process.env.HOME ?? ""}/${rawPath.slice(2)}`
+      : rawPath);
+  }
+  return [...refs];
 }
 
 async function maybeSynthesizeAfterRepeatedGuidance(
@@ -2008,12 +1954,7 @@ async function maybeSynthesizeAfterRepeatedGuidance(
     summary: "assistant response completed",
     detail: styledOutput,
   });
-  recordRuntimeEvent(request.session, {
-    kind: "provider",
-    status: "completed",
-    summary: `${request.session.provider} turn completed`,
-    detail: `transport=${request.session.providerTransport.mode}; output_chars=${String(styledOutput.length)}`,
-  });
+  recordProviderExecutionCompleted(request, styledOutput.length);
   return {
     ok: true,
     provider: request.session.provider,
@@ -2096,12 +2037,12 @@ function isNonActionableDeferral(output: string): boolean {
     return false;
   }
 
-  if (JSON_BODY_TOOL_CALL_PATTERN.test(text) || TOOL_CALL_MARKUP_PATTERN.test(text) || /^(done|complete|completed|fixed|updated|implemented)\b/i.test(text)) {
+  if (containsToolCallMarkup(text) || /^(done|complete|completed|fixed|updated|implemented)\b/i.test(text)) {
     return false;
   }
 
   const lower = text.toLowerCase();
-  const activationOnly = /^(started|starting|activated|all set|ready|on it|running now)[.!]?\s*$/i.test(text)
+  const activationOnly = /^(started|starting|activated|all set|ready|on it|running now|i'm in|i am in)[.!]?\s*$/i.test(text)
     || /^(started|starting now|activated|all set|ready)\b/i.test(text);
   const asksForUserToContinue = [
     "if you want, i can",
@@ -2142,11 +2083,32 @@ function isNonActionableDeferral(output: string): boolean {
     "i need to apply",
     "i need to edit",
     "i need to run",
+    "can't actually execute workspace tools",
+    "cannot actually execute workspace tools",
+    "couldn't actually execute workspace tools",
+    "could not actually execute workspace tools",
     "i haven't",
     "i have not",
     "i didn't",
     "i did not",
     "i don't have tool execution",
+    "all tool calls are currently failing",
+    "tool calls are currently failing",
+    "can't get any tool responses",
+    "cannot get any tool responses",
+    "couldn't get any tool responses",
+    "could not get any tool responses",
+    "repository tools are not returning output",
+    "repository tools aren't returning output",
+    "no file system read/index trace",
+    "tool-path issue",
+    "no tool responses",
+    "no tool response",
+    "received no visible output",
+    "no visible output to inspect",
+    "tool output is visible",
+    "tools are unavailable",
+    "tool access",
     "no file-change evidence",
   ].some((phrase) => lower.includes(phrase));
   const selfCorrectionOnly = [
@@ -2248,54 +2210,4 @@ function claimsUnsupportedWriteCompletion(output: string, priorWriteEvidenceNudg
   ].some((phrase) => lower.includes(phrase));
 
   return fileMention && verificationClaim && !correctionOrBlocker;
-}
-
-function parseNativeToolCall(payload: unknown): { responseId: string | undefined; callId: string; name: InternalToolCall["name"]; arguments: Record<string, unknown> } | null {
-  if (!payload || typeof payload !== "object") {
-    return null;
-  }
-
-  const record = payload as Record<string, unknown>;
-  const responseId = typeof record.id === "string" ? record.id : undefined;
-  const output = Array.isArray(record.output) ? record.output : [];
-
-  for (const item of output) {
-    if (!item || typeof item !== "object") {
-      continue;
-    }
-
-    const candidate = item as Record<string, unknown>;
-    if (candidate.type !== "function_call" || typeof candidate.name !== "string" || typeof candidate.call_id !== "string") {
-      continue;
-    }
-
-    const parsedArguments = parseToolArguments(candidate.arguments);
-    if (!parsedArguments) {
-      return null;
-    }
-
-    return {
-      responseId,
-      callId: candidate.call_id,
-      name: candidate.name as InternalToolCall["name"],
-      arguments: parsedArguments,
-    };
-  }
-
-  return null;
-}
-
-function parseToolArguments(value: unknown): Record<string, unknown> | null {
-  if (value && typeof value === "object" && !Array.isArray(value)) {
-    return value as Record<string, unknown>;
-  }
-  if (typeof value !== "string") {
-    return {};
-  }
-  try {
-    const parsed = JSON.parse(value) as unknown;
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
-  } catch {
-    return null;
-  }
 }

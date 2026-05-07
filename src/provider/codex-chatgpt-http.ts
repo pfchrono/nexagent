@@ -3,7 +3,9 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 
+import { getCodexModelDefinition, normalizeCodexModel, type CodexReasoningEffort } from "../models.js";
 import type { RuntimeSession } from "../runtime/session.js";
+import { fetchWithProviderExecutionPolicy, resolveProviderExecutionPolicy } from "./execution-policy.js";
 
 export interface CodexChatGptHttpInvocation {
   exitCode: number;
@@ -67,31 +69,27 @@ export async function invokeCodexChatGptHttpTransport(
   }
 
   const baseUrl = (request.session.providerTransport.openaiBaseUrl ?? DEFAULT_CODEX_BACKEND_BASE_URL).replace(/\/+$/, "");
-  const response = await io.fetchImpl(`${baseUrl}/responses`, {
-    method: "POST",
-    signal: request.abortSignal,
-    headers: {
-      "Content-Type": "application/json",
-      Accept: "text/event-stream",
-      Authorization: `Bearer ${auth.accessToken}`,
-      "chatgpt-account-id": auth.accountId,
-      originator: "pi",
-      "OpenAI-Beta": "responses=experimental",
+  const resolvedModel = normalizeCodexModel(model) ?? "gpt-5.4";
+  const reasoningEffort = resolveCodexChatGptReasoningEffort(request.session, resolvedModel);
+  const requestBody = createCodexChatGptRequestBody(request, resolvedModel, reasoningEffort);
+  const response = await fetchWithProviderExecutionPolicy(
+    `${baseUrl}/responses`,
+    {
+      method: "POST",
+      signal: request.abortSignal,
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "text/event-stream",
+        Authorization: `Bearer ${auth.accessToken}`,
+        "chatgpt-account-id": auth.accountId,
+        originator: "pi",
+        "OpenAI-Beta": "responses=experimental",
+      },
+      body: JSON.stringify(requestBody),
     },
-    body: JSON.stringify({
-      model: model ?? "gpt-5.4",
-      ...(request.session.providerRouting.modelSelection.configuredReasoningEfforts?.[request.session.providerTransport.activeProvider]
-        ? { reasoning: { effort: request.session.providerRouting.modelSelection.configuredReasoningEfforts[request.session.providerTransport.activeProvider] } }
-        : {}),
-      ...(request.nativeInput !== undefined
-        ? { input: request.nativeInput }
-        : { input: [{ role: "user", content: request.prompt }] }),
-      instructions: request.instructions ?? request.prompt,
-      ...(request.previousResponseId ? { previous_response_id: request.previousResponseId } : {}),
-      stream: true,
-      store: false,
-    }),
-  });
+    resolveProviderExecutionPolicy(request.session),
+    io.fetchImpl,
+  );
 
   const bodyText = await response.text();
   if (!response.ok) {
@@ -103,12 +101,124 @@ export async function invokeCodexChatGptHttpTransport(
     };
   }
 
+  const output = extractResponseText(bodyText);
+  if (output.trim().length > 0 || request.abortSignal?.aborted) {
+    return {
+      exitCode: 0,
+      stdout: "",
+      stderr: "",
+      output,
+    };
+  }
+
+  const retryOutput = await retryCodexChatGptEmptyText({
+    baseUrl,
+    auth: {
+      accessToken: auth.accessToken,
+      accountId: auth.accountId,
+    },
+    request,
+    requestBody,
+    io,
+  });
+  if (retryOutput.trim().length > 0) {
+    return {
+      exitCode: 0,
+      stdout: "",
+      stderr: "",
+      output: retryOutput,
+    };
+  }
+
   return {
-    exitCode: 0,
+    exitCode: 1,
     stdout: "",
-    stderr: "",
-    output: extractResponseText(bodyText),
+    stderr: `codex-http returned empty assistant text\n${summarizeCodexChatGptResponseShape(bodyText)}`.trim(),
+    output: "",
   };
+}
+
+function resolveCodexChatGptReasoningEffort(session: RuntimeSession, model: string): CodexReasoningEffort {
+  const configured = session.providerRouting.modelSelection.configuredReasoningEfforts?.[session.providerTransport.activeProvider];
+  const defaultEffort = getCodexModelDefinition(model)?.defaultReasoningEffort ?? "medium";
+  if (model === "gpt-5.3-codex-spark" && (configured === "low" || configured === "medium")) {
+    return "high";
+  }
+  return (configured as CodexReasoningEffort | undefined) ?? defaultEffort;
+}
+
+function createCodexChatGptRequestBody(
+  request: {
+    session: RuntimeSession;
+    prompt: string;
+    instructions?: string;
+    nativeInput?: unknown;
+    previousResponseId?: string;
+  },
+  resolvedModel: string,
+  reasoningEffort: CodexReasoningEffort,
+): Record<string, unknown> {
+  return {
+    model: resolvedModel,
+    reasoning: { effort: reasoningEffort },
+    ...(request.nativeInput !== undefined
+      ? { input: request.nativeInput }
+      : { input: [{ role: "user", content: request.prompt }] }),
+    instructions: request.instructions ?? request.prompt,
+    tools: [],
+    tool_choice: "auto",
+    parallel_tool_calls: false,
+    include: ["reasoning.encrypted_content"],
+    prompt_cache_key: request.session.id,
+    client_metadata: {
+      "x-codex-installation-id": request.session.id,
+    },
+    ...(request.previousResponseId ? { previous_response_id: request.previousResponseId } : {}),
+    stream: true,
+    store: false,
+  };
+}
+
+async function retryCodexChatGptEmptyText(options: {
+  baseUrl: string;
+  auth: { accessToken: string; accountId: string };
+  request: {
+    session: RuntimeSession;
+    abortSignal?: AbortSignal;
+  };
+  requestBody: Record<string, unknown>;
+  io: CodexAuthIo;
+}): Promise<string> {
+  if (options.request.abortSignal?.aborted) {
+    return "";
+  }
+
+  const response = await fetchWithProviderExecutionPolicy(
+    `${options.baseUrl}/responses`,
+    {
+      method: "POST",
+      signal: options.request.abortSignal,
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "text/event-stream",
+        Authorization: `Bearer ${options.auth.accessToken}`,
+        "chatgpt-account-id": options.auth.accountId,
+        originator: "pi",
+        "OpenAI-Beta": "responses=experimental",
+      },
+      body: JSON.stringify({
+        ...options.requestBody,
+        instructions: `${String(options.requestBody.instructions ?? "")}\n\nReturn a non-empty assistant message. If blocked, answer with a concise blocker sentence.`,
+        previous_response_id: undefined,
+      }),
+    },
+    resolveProviderExecutionPolicy(options.request.session),
+    options.io.fetchImpl,
+  );
+  if (!response.ok) {
+    return "";
+  }
+  return extractResponseText(await response.text());
 }
 
 export async function hasCodexAuthJsonCredentials(): Promise<boolean> {
@@ -293,28 +403,49 @@ function extractResponseText(bodyText: string): string {
   }
 
   try {
-    const payload = JSON.parse(bodyText) as Record<string, unknown>;
-    if (typeof payload.output_text === "string") {
-      return payload.output_text;
-    }
-
-    const output = Array.isArray(payload.output) ? payload.output : [];
-    const chunks: string[] = [];
-    for (const item of output) {
-      if (!item || typeof item !== "object") continue;
-      const content = Array.isArray((item as Record<string, unknown>).content)
-        ? ((item as Record<string, unknown>).content as unknown[])
-        : [];
-      for (const part of content) {
-        if (!part || typeof part !== "object") continue;
-        const text = (part as Record<string, unknown>).text;
-        if (typeof text === "string") chunks.push(text);
-      }
-    }
-    return chunks.join("");
+    return extractResponsePayloadText(JSON.parse(bodyText) as Record<string, unknown>);
   } catch {
     return bodyText;
   }
+}
+
+function summarizeCodexChatGptResponseShape(bodyText: string): string {
+  if (!bodyText.includes("event:")) {
+    return `body=${bodyText.trim().slice(0, 240) || "empty"}`;
+  }
+
+  const rows: string[] = [];
+  for (const block of bodyText.split(/\n\n+/)) {
+    const eventName = block.match(/^event:\s*([^\n]+)$/m)?.[1]?.trim();
+    const dataLine = block.match(/^data:\s*(.+)$/m)?.[1];
+    if (!eventName || !dataLine) {
+      continue;
+    }
+    try {
+      const payload = JSON.parse(dataLine) as Record<string, unknown>;
+      const effectiveEventName = typeof payload.type === "string" ? payload.type : eventName;
+      const details = summarizeCodexChatGptPayload(payload);
+      rows.push(details ? `${effectiveEventName} ${details}` : effectiveEventName);
+    } catch {
+      rows.push(eventName);
+    }
+  }
+
+  return rows.length > 0 ? `events=${rows.slice(0, 16).join(" | ")}` : "events=none";
+}
+
+function summarizeCodexChatGptPayload(payload: Record<string, unknown>): string {
+  const response = isRecord(payload.response) ? payload.response : null;
+  const item = isRecord(payload.item) ? payload.item : null;
+  const part = isRecord(payload.part) ? payload.part : null;
+  const bits = [
+    response && typeof response.status === "string" ? `status:${response.status}` : null,
+    item && typeof item.type === "string" ? `item:${item.type}` : null,
+    part && typeof part.type === "string" ? `part:${part.type}` : null,
+    typeof payload.delta === "string" ? `delta:${String(payload.delta.length)}` : null,
+    typeof payload.text === "string" ? `text:${String(payload.text.length)}` : null,
+  ].filter((bit): bit is string => Boolean(bit));
+  return bits.length > 0 ? `[${bits.join(",")}]` : "";
 }
 
 function extractStreamedResponseText(bodyText: string): string | null {
@@ -323,6 +454,7 @@ function extractStreamedResponseText(bodyText: string): string | null {
   }
 
   const chunks: string[] = [];
+  let finalText = "";
   for (const block of bodyText.split(/\n\n+/)) {
     const eventMatch = block.match(/^event:\s*([^\n]+)$/m);
     if (!eventMatch) {
@@ -337,15 +469,26 @@ function extractStreamedResponseText(bodyText: string): string | null {
 
     try {
       const payload = JSON.parse(dataLine) as Record<string, unknown>;
-      if (eventName === "response.output_text.delta") {
+      const effectiveEventName = typeof payload.type === "string" ? payload.type : eventName;
+      if (effectiveEventName === "response.output_text.delta") {
         const delta = payload.delta;
         if (typeof delta === "string") {
           chunks.push(delta);
         }
-      } else if (eventName === "response.output_text.done" && chunks.length === 0) {
+      } else if (effectiveEventName === "response.output_text.done" && chunks.length === 0) {
         const text = payload.text;
         if (typeof text === "string") {
           chunks.push(text);
+        }
+      } else if (
+        effectiveEventName === "response.output_item.done"
+        || effectiveEventName === "response.content_part.done"
+        || effectiveEventName === "response.completed"
+        || effectiveEventName === "response.done"
+      ) {
+        const text = extractResponsePayloadText(payload);
+        if (text) {
+          finalText = text;
         }
       }
     } catch {
@@ -353,5 +496,74 @@ function extractStreamedResponseText(bodyText: string): string | null {
     }
   }
 
-  return chunks.length > 0 ? chunks.join("") : "";
+  return chunks.length > 0 ? chunks.join("") : finalText;
+}
+
+function extractResponsePayloadText(payload: Record<string, unknown>): string {
+  if (typeof payload.output_text === "string") {
+    return payload.output_text;
+  }
+
+  const directItem = isRecord(payload.item) ? extractResponseItemText(payload.item) : "";
+  if (directItem) {
+    return directItem;
+  }
+
+  const directPart = isRecord(payload.part) ? extractResponseContentPartText(payload.part) : "";
+  if (directPart) {
+    return directPart;
+  }
+
+  const response = isRecord(payload.response) ? payload.response : payload;
+  const output = Array.isArray(response.output) ? response.output : [];
+  const chunks: string[] = [];
+  for (const item of output) {
+    if (!isRecord(item)) {
+      continue;
+    }
+    const text = extractResponseItemText(item);
+    if (text) {
+      chunks.push(text);
+    }
+  }
+  return chunks.join("");
+}
+
+function extractResponseItemText(item: Record<string, unknown>): string {
+  if (typeof item.text === "string") {
+    return item.text;
+  }
+  if (typeof item.content === "string") {
+    return item.content;
+  }
+
+  const content = Array.isArray(item.content) ? item.content : [];
+  const chunks: string[] = [];
+  for (const part of content) {
+    if (!isRecord(part)) {
+      continue;
+    }
+    const text = extractResponseContentPartText(part);
+    if (text) {
+      chunks.push(text);
+    }
+  }
+  return chunks.join("");
+}
+
+function extractResponseContentPartText(part: Record<string, unknown>): string {
+  if (typeof part.text === "string") {
+    return part.text;
+  }
+  if (typeof part.output_text === "string") {
+    return part.output_text;
+  }
+  if (typeof part.content === "string") {
+    return part.content;
+  }
+  return "";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

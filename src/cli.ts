@@ -74,8 +74,10 @@ import {
   syncRuntimeSession,
   type RuntimeSession,
 } from "./runtime/session.js";
+import { LAUNCH_SWITCHES, formatLaunchHelp, parseCommand, resolvePrompt, type CliCommand } from "./cli/launch.js";
 
 export { autocompletePromptBuffer, describePromptHint } from "./cli/autocomplete.js";
+export { LAUNCH_SWITCHES, formatLaunchHelp, parseCommand, resolvePrompt } from "./cli/launch.js";
 export type { PromptCompletionResult, PromptCompletionSuggestion } from "./cli/autocomplete.js";
 
 const SPINNER_FRAMES = ["-", "\\", "|", "/"] as const;
@@ -414,6 +416,30 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (command.kind === "grpc") {
+    const runtime = await bootstrapRuntime(process.cwd());
+    const session = createRuntimeSession(runtime);
+    configureSessionDebug(session, command.debug);
+    if (command.yolo) {
+      applyYoloMode(session);
+    }
+    const { startNexagentGrpcServer } = await import("./grpc/server.js");
+    let resolveStopped!: () => void;
+    const stopped = new Promise<void>((resolve) => {
+      resolveStopped = resolve;
+    });
+    const handle = await startNexagentGrpcServer({
+      session,
+      host: command.host,
+      port: command.port,
+      onStop: resolveStopped,
+    });
+    process.stdout.write(`nexagent grpc listening ${handle.address}\n`);
+    await waitForGrpcShutdown(handle.stop, stopped);
+    process.exit(0);
+    return;
+  }
+
   if (!process.stdout.isTTY || !process.stdin.isTTY) {
     const runtime = await bootstrapRuntime(process.cwd());
     const session = createRuntimeSession(runtime);
@@ -461,38 +487,28 @@ async function main(): Promise<void> {
   }
 }
 
-interface RunCommand {
-  kind: "run";
-  prompt: string | null;
-  yolo: boolean;
-  debug: RuntimeDebugOptions;
+async function waitForGrpcShutdown(stop: () => Promise<void>, stopped: Promise<void>): Promise<void> {
+  let resolveSignal!: () => void;
+  const signal = new Promise<void>((resolve) => {
+    resolveSignal = resolve;
+  });
+  let stopping = false;
+  const shutdown = () => {
+    if (stopping) {
+      return;
+    }
+    stopping = true;
+    void stop().finally(() => resolveSignal());
+  };
+  process.once("SIGINT", shutdown);
+  process.once("SIGTERM", shutdown);
+  try {
+    await Promise.race([stopped, signal]);
+  } finally {
+    process.removeListener("SIGINT", shutdown);
+    process.removeListener("SIGTERM", shutdown);
+  }
 }
-
-interface InspectCommand {
-  kind: "inspect";
-  yolo: boolean;
-  debug: RuntimeDebugOptions;
-}
-
-interface HelpCommand {
-  kind: "help";
-}
-
-type CliCommand = RunCommand | InspectCommand | HelpCommand;
-
-export const LAUNCH_SWITCHES = [
-  { flag: "--help", alias: "-h", description: "show this help and exit" },
-  { flag: "--yolo", description: "bypass guarded approval prompts while preserving destructive-command blocks" },
-  { flag: "--debug", description: "write diagnostic log to /tmp/nexagent-debug-<timestamp>.log" },
-  { flag: "--debugfile", description: "write diagnostic log to a .log path under home or /tmp" },
-  { flag: "--verbose", description: "include internal core input/output in debug logs" },
-] as const;
-
-type LaunchSwitch = {
-  flag: string;
-  alias?: string;
-  description: string;
-};
 
 export interface RuntimeTuiView {
   title: string;
@@ -509,28 +525,6 @@ export interface RuntimeTuiView {
 
 export type RuntimeGuiView = RuntimeTuiView;
 
-export function parseCommand(argv: string[]): CliCommand {
-  if (argv.includes("--help") || argv.includes("-h") || argv[0] === "help") {
-    return { kind: "help" };
-  }
-  const yolo = argv.includes("--yolo");
-  const debug = parseDebugOptions(argv);
-  const normalizedArgv = stripLaunchSwitches(argv);
-
-  if (normalizedArgv[0] !== "run") {
-    return { kind: "inspect", yolo, debug };
-  }
-
-  const prompt = normalizedArgv.slice(1).join(" ").trim();
-  const command: RunCommand = {
-    kind: "run",
-    prompt: prompt.length > 0 ? prompt : null,
-    yolo,
-    debug,
-  };
-  return command;
-}
-
 function configureSessionDebug(session: RuntimeSession, options: RuntimeDebugOptions): void {
   session.debug = initializeRuntimeDebug(options);
   writeDebugLog(session.debug, "session.start", {
@@ -543,80 +537,6 @@ function configureSessionDebug(session: RuntimeSession, options: RuntimeDebugOpt
   if (session.debug.logPath) {
     process.stderr.write(`debug log: ${session.debug.logPath}\n`);
   }
-}
-
-function parseDebugOptions(argv: string[]): RuntimeDebugOptions {
-  const debugFileIndex = argv.indexOf("--debugfile");
-  const debugFile = debugFileIndex >= 0 ? argv[debugFileIndex + 1] ?? null : null;
-  if (debugFileIndex >= 0 && !debugFile) {
-    throw new Error("usage: --debugfile <path.log>");
-  }
-  return {
-    enabled: argv.includes("--debug"),
-    verbose: argv.includes("--verbose"),
-    debugFile,
-  };
-}
-
-function stripLaunchSwitches(argv: string[]): string[] {
-  const normalized: string[] = [];
-  for (let index = 0; index < argv.length; index += 1) {
-    const arg = argv[index];
-    if (arg === "--yolo" || arg === "--opentui" || arg === "--debug" || arg === "--verbose") {
-      continue;
-    }
-    if (arg === "--debugfile") {
-      index += 1;
-      continue;
-    }
-    normalized.push(arg);
-  }
-  return normalized;
-}
-
-export function formatLaunchHelp(): string {
-  return [
-    "nexagent",
-    "",
-    "Usage:",
-    "  nexagent [--yolo]",
-    "  nexagent run [--yolo] <prompt>",
-    "  nexagent --help",
-    "",
-    "Launch switches:",
-    ...LAUNCH_SWITCHES.map((entry) => formatLaunchSwitchHelp(entry)),
-    "",
-    "Commands:",
-    "  run          execute one prompt from arguments and/or piped stdin",
-    "  help         show this help and exit",
-    "",
-    "In-session slash commands:",
-    formatCommandCatalog(),
-  ].join("\n");
-}
-
-function formatLaunchSwitchHelp(entry: LaunchSwitch): string {
-  const label = entry.alias ? `${entry.flag}, ${entry.alias}` : entry.flag;
-  return `  ${label.padEnd(12, " ")} ${entry.description}`;
-}
-
-export function resolvePrompt(prompt: string | null, pipedInput: string | null): string {
-  const normalizedPrompt = prompt?.trim() ?? "";
-  const normalizedInput = pipedInput?.trim() ?? "";
-
-  if (normalizedPrompt.length > 0 && normalizedInput.length > 0) {
-    return `${normalizedPrompt}\n\n${normalizedInput}`;
-  }
-
-  if (normalizedPrompt.length > 0) {
-    return normalizedPrompt;
-  }
-
-  if (normalizedInput.length > 0) {
-    return normalizedInput;
-  }
-
-  throw new Error('usage: nexagent run "prompt" or pipe stdin');
 }
 
 export function formatPromptEventDetail(prompt: string): string {

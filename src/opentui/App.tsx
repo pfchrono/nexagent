@@ -57,6 +57,13 @@ import {
   type OpenTuiTranscriptState,
   type TranscriptMetrics,
 } from "./transcript-state.js";
+import {
+  limitTraceProgressRows,
+  markActiveTraceProgressRow,
+  readTraceProgressMetric,
+  renderTraceProgressRows,
+  type TraceProgressRow,
+} from "./trace-progress.js";
 
 const SKILL_PREVIEW_PREFIX = "skill:";
 const COMPOSER_CURSOR = "|";
@@ -662,7 +669,7 @@ export function OpenTuiApp({ view: initialView, session, keyboardSource, promptH
       {renderLogoRows(view, spinnerTick, contentWidth).map((row) => (
         <text key={row.key} width={contentWidth} fg={row.fg}>{row.text}</text>
       ))}
-      <text width={contentWidth} fg="#a6adc8">{`provider ${view.providerLabel.split("/")[0]} | ${view.sessionLabel}`}</text>
+      <text width={contentWidth} fg="#a6adc8">{renderHeaderStatusLine(view, contentWidth)}</text>
       {configExpanded ? (
         <box
           flexDirection="column"
@@ -1481,15 +1488,6 @@ interface TranscriptRenderRow {
   canToggle: boolean;
 }
 
-interface TraceProgressRow {
-  key: string;
-  text: string;
-  fg: string;
-  toggleKey: string;
-  canToggle: boolean;
-  detailLines: string[];
-}
-
 interface ConfigPanelRow {
   key: string;
   text: string;
@@ -1521,7 +1519,7 @@ function flattenTranscriptBlocks(blocks: OpenTuiTranscriptBlock[], state: OpenTu
         canToggle: detailAvailable,
       })];
     }
-    const frameTitle = `${transcriptBlockDisplayLabel(block)}${detailAvailable ? (expanded ? " [-]" : " [+]") : ""}`;
+    const frameTitle = `${transcriptBlockDisplayLabel(block)}${formatTranscriptBlockBadge(block)}${detailAvailable ? (expanded ? " [-]" : " [+]") : ""}`;
     const fg = transcriptBlockAccent(block.kind);
     const bodyFg = transcriptBlockBodyColor(block.kind);
     const innerWidth = Math.max(12, width - 6);
@@ -1557,136 +1555,6 @@ function flattenTranscriptBlocks(blocks: OpenTuiTranscriptBlock[], state: OpenTu
       }),
     ];
   });
-}
-
-function renderTraceProgressRows(blocks: OpenTuiTranscriptBlock[], width: number): TraceProgressRow[] {
-  return renderTraceProgressEventRows(blocks.flatMap((block) => block.detailLines), width);
-}
-
-function markActiveTraceProgressRow(rows: TraceProgressRow[], activeKey: string | null, width: number): TraceProgressRow[] {
-  if (!activeKey) {
-    return rows;
-  }
-  return rows.map((row) => {
-    if (row.key !== activeKey || !row.canToggle) {
-      return row;
-    }
-    return {
-      ...row,
-      text: fitLine(row.text.replace(/ \[\+\]$/, " [-]"), width),
-    };
-  });
-}
-
-function limitTraceProgressRows(rows: TraceProgressRow[], width: number, maxRows: number): TraceProgressRow[] {
-  if (rows.length <= maxRows) {
-    return rows;
-  }
-  const headCount = Math.min(3, Math.max(1, Math.floor(maxRows / 4)));
-  const tailCount = Math.max(1, maxRows - headCount - 1);
-  return [
-    ...rows.slice(0, headCount),
-    {
-      key: "trace-progress-overflow",
-      text: fitLine(`  ... ${String(rows.length - headCount - tailCount)} older progress events`, width),
-      fg: "#6c7086",
-      toggleKey: "trace-progress-overflow",
-      canToggle: false,
-      detailLines: [],
-    },
-    ...rows.slice(rows.length - tailCount),
-  ];
-}
-
-function renderTraceProgressEventRows(lines: string[], width: number): TraceProgressRow[] {
-  const rows: TraceProgressRow[] = [];
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index] ?? "";
-    const detailLines: string[] = [];
-    while (lines[index + 1]?.startsWith("  ")) {
-      detailLines.push(lines[index + 1] ?? "");
-      index += 1;
-    }
-    const row = parseTraceProgressLine(line, detailLines, width);
-    if (!row) {
-      continue;
-    }
-    rows.push(row);
-  }
-  return rows;
-}
-
-function parseTraceProgressLine(line: string, detailLines: string[], width: number): TraceProgressRow | null {
-  const parsed = parseTraceProgressEvent(line, detailLines);
-  if (!parsed) {
-    return null;
-  }
-  const { kind, status, summary } = parsed;
-  const statusMark = status === "completed" ? "ok"
-    : status === "failed" || status === "blocked" ? "!"
-      : status === "started" ? ">"
-        : "-";
-  const compactSummary = formatTraceProgressSummary(kind, status, summary, line);
-  const metrics = formatTraceProgressMetricBadge(detailLines);
-  const key = `trace-progress-${parsed.at ?? line}-${kind}-${status}-${summary}`;
-  const hasDetail = detailLines.length > 0;
-  const suffix = hasDetail ? " [+]" : "";
-  const fg = status === "failed" || status === "blocked" ? "#f38ba8"
-    : kind === "tool" ? "#89b4fa"
-      : kind === "assistant" || kind === "provider" ? "#cba6f7"
-        : "#a6adc8";
-  return {
-    key,
-    text: fitLine(`${statusMark} ${compactSummary}${metrics ? ` · ${metrics}` : ""}${suffix}`, width),
-    fg,
-    toggleKey: key,
-    canToggle: hasDetail,
-    detailLines,
-  };
-}
-
-function parseTraceProgressEvent(
-  line: string,
-  detailLines: string[],
-): { at: string | null; kind: string; status: string; summary: string } | null {
-  const parts = line.split(" | ");
-  if (parts.length >= 4 && /^\d{4}-\d{2}-\d{2}T/.test(parts[0] ?? "")) {
-    return {
-      at: parts[0] ?? null,
-      kind: parts[1] ?? "event",
-      status: parts[2] ?? "queued",
-      summary: parts.slice(3).join(" | "),
-    };
-  }
-  const metadata = detailLines.find((detailLine) => /\bat\s+\d{4}-\d{2}-\d{2}T.*\bkind\s+\w+.*\bstatus\s+\w+/.test(detailLine));
-  const metaMatch = metadata?.match(/\bat\s+(\S+)\s+·\s+kind\s+(\w+)\s+·\s+status\s+(\w+)/);
-  if (!metaMatch) {
-    return null;
-  }
-  return {
-    at: metaMatch[1] ?? null,
-    kind: metaMatch[2] ?? "event",
-    status: metaMatch[3] ?? "queued",
-    summary: line.replace(/^[^\p{L}\p{N}]+/u, "").trim(),
-  };
-}
-
-function formatTraceProgressMetricBadge(detailLines: string[]): string {
-  const detail = detailLines.map((line) => line.trim()).join("; ");
-  const duration = readTraceProgressMetric(detail, "duration");
-  const inputTokens = readTraceProgressMetric(detail, "turn_in") ?? readTraceProgressMetric(detail, "in");
-  const outputTokens = readTraceProgressMetric(detail, "turn_out") ?? readTraceProgressMetric(detail, "out");
-  return [
-    duration,
-    inputTokens ? `↓ ${inputTokens}` : null,
-    outputTokens ? `↑ ${outputTokens}` : null,
-  ].filter((value): value is string => Boolean(value)).join(" ");
-}
-
-function readTraceProgressMetric(detail: string, key: "duration" | "in" | "out" | "turn_in" | "turn_out"): string | null {
-  const separator = key === "duration" ? "=" : "~";
-  const match = new RegExp(`(?:^|[;\\s])${key}${separator}([^;\\s]+)`).exec(detail);
-  return match?.[1] ?? null;
 }
 
 function traceDetailContentLines(row: TraceProgressRow): string[] {
@@ -1783,22 +1651,6 @@ function renderTraceDetailPaletteRows(options: {
     { key: "trace-detail-footer", text: frameBody(footer, innerWidth), fg: "#a6adc8" },
     { key: "trace-detail-bottom", text: frameBottom(innerWidth), fg: "#89b4fa" },
   ].map((row) => ({ ...row, text: fitFrameLine(row.text, options.width) }));
-}
-
-function formatTraceProgressSummary(kind: string, status: string, summary: string, sourceLine?: string): string {
-  if (sourceLine && !sourceLine.includes(" | ")) {
-    return summary;
-  }
-  if (kind === "tool") {
-    const toolName = summary
-      .replace(/^tool\s+/, "")
-      .replace(/\s+(started|completed|failed|blocked)$/i, "");
-    return `tool ${toolName} ${status}`;
-  }
-  if (kind === "prompt") {
-    return `prompt ${status} · ${summary}`;
-  }
-  return `${kind} ${status} · ${summary}`;
 }
 
 function createTranscriptRenderRow(options: {
@@ -2176,6 +2028,21 @@ function transcriptBlockDisplayLabel(block: OpenTuiTranscriptBlock): string {
   return block.label;
 }
 
+function formatTranscriptBlockBadge(block: OpenTuiTranscriptBlock): string {
+  const lines = block.detailLines.length;
+  const parts = [`${String(lines)}l`];
+  if (block.kind === "tool" && /Failed|Blocked/i.test(block.label)) {
+    parts.push("needs attention");
+  }
+  if (block.kind === "assistant" && lines > 1) {
+    parts.push("reply");
+  }
+  if (block.collapsedByDefault) {
+    parts.push("collapsed");
+  }
+  return ` · ${parts.join(" · ")}`;
+}
+
 function isCompactTranscriptBlock(kind: OpenTuiTranscriptBlock["kind"]): boolean {
   return kind === "tool" || kind === "skill" || kind === "trace" || kind === "system";
 }
@@ -2501,17 +2368,39 @@ function renderStatuslineRows(options: {
   const progressPrefix = options.progress ? `${options.progress} ` : "";
   const attachmentPart = options.attachmentLabel ? ` · ${options.attachmentLabel}` : "";
   const narrow = options.width < 96;
+  const activeTool = options.statusline.activeTool ? ` · active ${compactStatusToken(options.statusline.activeTool)}` : "";
+  const warningPart = options.statusline.warningCount > 0 ? ` · warn ${String(options.statusline.warningCount)}` : "";
+  const toolPart = `tools ${String(options.statusline.currentTurnToolCount)}${options.statusline.currentTurnFailureCount > 0 ? ` !${String(options.statusline.currentTurnFailureCount)}` : ""}`;
   const row1 = narrow
-    ? `${progressPrefix}${formatModelLabel(options.statusline.model)} · git ${gitLabel} · ${clockLabel}`
-    : `${progressPrefix}${formatModelLabel(options.statusline.model)} · mem ${memLabel} · git ${gitLabel} · session ${options.statusline.sessionAge} · ${clockLabel}`;
+    ? `${progressPrefix}${formatModelLabel(options.statusline.model)} · ${options.statusline.effort} · ${options.statusline.approval} · ${clockLabel}`
+    : `${progressPrefix}${options.statusline.provider}/${formatModelLabel(options.statusline.model)} · effort ${options.statusline.effort} · ${options.statusline.transportMode} · approval ${options.statusline.approval} · git ${gitLabel} · session ${options.statusline.sessionAge} · ${clockLabel}`;
   const row2 = narrow
-    ? `phase ${options.phaseLabel} · ${options.shellNotice}${attachmentPart} · ${options.transcriptPosition} · ctx ${String(options.statusline.contextPercent)}% · tok ${formatCompactNumber(tokensTotal)}`
-    : `phase ${options.phaseLabel} · ctx ${contextBar} ${contextLabel} ${String(options.statusline.contextPercent)}% · tok ${formatCompactNumber(tokensTotal)} (${formatCompactNumber(options.statusline.lastInputTokens)}↓/${formatCompactNumber(options.statusline.lastOutputTokens)}↑) · ${options.transcriptPosition} · ${options.shellNotice}${attachmentPart}`;
+    ? `phase ${options.phaseLabel} · ctx ${String(options.statusline.contextPercent)}% · tok ${formatCompactNumber(tokensTotal)} · ${toolPart}${warningPart} · ${options.transcriptPosition}`
+    : `phase ${options.phaseLabel} · ctx ${contextBar} ${contextLabel} ${String(options.statusline.contextPercent)}% · tok ${formatCompactNumber(tokensTotal)} (${formatCompactNumber(options.statusline.lastInputTokens)}↓/${formatCompactNumber(options.statusline.lastOutputTokens)}↑) · ${toolPart}${activeTool}${warningPart} · ${options.transcriptPosition} · ${options.shellNotice}${attachmentPart} · mem ${memLabel}`;
   return [
     { key: "status-divider", text: chatDividerLine(options.width, "bottom"), fg: "#cba6f7" },
     { key: "status-row-1", text: fitLine(row1, options.width), fg: "#f9e2af" },
     { key: "status-row-2", text: fitLine(row2, options.width), fg: "#cdd6f4" },
   ];
+}
+
+function renderHeaderStatusLine(view: OpenTuiRuntimeView, width: number): string {
+  const context = `ctx ${String(view.statusline.contextPercent)}%`;
+  const warnings = view.statusline.warningCount > 0 ? ` | warn ${String(view.statusline.warningCount)}` : "";
+  const dirty = view.statusline.currentTurnFailureCount > 0 ? ` | blocked ${String(view.statusline.currentTurnFailureCount)}` : "";
+  const long = [
+    `provider ${view.statusline.provider}/${view.statusline.model}`,
+    `effort ${view.statusline.effort}`,
+    `transport ${view.statusline.transportMode}`,
+    `approval ${view.statusline.approval}`,
+    `session ${view.sessionId}`,
+    `turns ${String(view.turnCount)}`,
+    context,
+  ].join(" | ");
+  if (width < 96) {
+    return fitLine(`${view.statusline.provider}/${view.statusline.model} | ${view.statusline.approval} | turns ${String(view.turnCount)} | ${context}${warnings}${dirty}`, width);
+  }
+  return fitLine(`${long}${warnings}${dirty}`, width);
 }
 
 function formatTurnPhaseLabel(view: OpenTuiRuntimeView): string {
@@ -2721,9 +2610,11 @@ function renderCockpitPanelRows(options: {
     ? options.warningRows.map(formatCockpitWarningLine).join(" | ")
     : "clear";
   const overflow = options.warningOverflow > 0 ? ` (+${String(options.warningOverflow)})` : "";
+  const nextAction = options.warningRows[0]?.action ?? (options.risk.startsWith("completed") ? "review result or send next prompt" : "continue current turn");
   const body = [
     `Turn      ${options.ladder.intent}`,
     `Progress  ${options.ladder.plan} -> ${options.ladder.act} -> ${options.ladder.result}`,
+    `Next      ${nextAction}`,
     `Signals   ${warningLine}${overflow}`,
     ...(options.compact ? options.memoryRows.slice(0, 1) : options.memoryRows),
     `Controls  ${options.overrideHints.join(" | ")}`,

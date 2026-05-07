@@ -118,6 +118,17 @@ Run with YOLO guarded approval bypass:
 bun run dev -- --yolo run "continue current task"
 ```
 
+Start the local gRPC automation server for external harnesses:
+
+```bash
+bun run dev -- grpc --host 127.0.0.1 --port 0
+nexagent grpc --host 127.0.0.1 --port 0
+```
+
+The server prints `nexagent grpc listening <host:port>` on stdout. It exposes `Health`, `Inspect`, `RunCommand`, `RunPrompt`, and `Stop` from `proto/nexagent.proto`. Keep that proto file with packaged or compiled runtime artifacts so external clients can generate matching stubs. `RunCommand` accepts slash commands and guarded `!` shell commands; plain prompts should use `RunPrompt`.
+
+The gRPC server is an unauthenticated trusted-local automation surface. It only supports loopback hosts (`127.0.0.1` or `localhost`) because `RunCommand` can execute guarded shell commands and `Stop` can terminate the server.
+
 Run the default interactive OpenTUI shell:
 
 ```bash

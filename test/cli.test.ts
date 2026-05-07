@@ -154,6 +154,15 @@ test("parseCommand preserves empty run prompt for resolvePrompt", async () => {
   assert.deepEqual(parseCommand(["--opentui"]), { kind: "inspect", yolo: false, debug });
   assert.deepEqual(parseCommand(["--yolo", "run", "say", "hi"]), { kind: "run", prompt: "say hi", yolo: true, debug });
   assert.deepEqual(parseCommand(["run", "--yolo", "say", "hi"]), { kind: "run", prompt: "say hi", yolo: true, debug });
+  assert.deepEqual(parseCommand(["grpc", "--host", "localhost", "--port", "50051"]), { kind: "grpc", yolo: false, debug, host: "localhost", port: 50051 });
+  assert.deepEqual(parseCommand(["--yolo", "grpc"]), { kind: "grpc", yolo: true, debug, host: "127.0.0.1", port: 0 });
+  assert.throws(() => parseCommand(["grpc", "--host"]), /usage: grpc/);
+  assert.throws(() => parseCommand(["grpc", "--host", "--port", "50051"]), /usage: grpc/);
+  assert.throws(() => parseCommand(["grpc", "--host", "0.0.0.0"]), /loopback/);
+  assert.throws(() => parseCommand(["grpc", "--port"]), /usage: grpc/);
+  assert.throws(() => parseCommand(["grpc", "--port", "50051abc"]), /usage: grpc/);
+  assert.throws(() => parseCommand(["grpc", "--port", "1.5"]), /usage: grpc/);
+  assert.throws(() => parseCommand(["grpc", "--port", "65536"]), /usage: grpc/);
   assert.deepEqual(parseCommand(["--debug", "--verbose", "--debugfile", "trace.log", "run", "say", "hi"]), {
     kind: "run",
     prompt: "say hi",
@@ -2367,7 +2376,7 @@ test("createRuntimeInspectPayload includes prompt v2 summaries", async () => {
   assert.match(payload.promptV2.repoContext, /openspec includes changes, SPEC\.md/);
   assert.match(payload.promptV2.runtimeState, /Working directory: \/repo/);
   assert.equal(payload.promptV2.stableSections, "identity, execution_contract, tool_routing, editing_safety, provider_guidance");
-  assert.equal(payload.promptV2.dynamicSections, "repo_context, runtime_state");
+  assert.equal(payload.promptV2.dynamicSections, "repo_context, runtime_state, task_tool_guidance");
   assert.equal(payload.promptV2.dynamicBoundary, "__NEXAGENT_PROMPT_DYNAMIC_BOUNDARY__");
   assert.equal(payload.providerTransport.executor, "codex");
   assert.equal(payload.providerTransport.adapter, "codex-cli-exec");
@@ -2397,7 +2406,7 @@ test("createRuntimeTuiView includes grouped instruction sources", async () => {
   assert.match(instructionRows.get("runtimeState") ?? "", /Working directory: \/repo/);
   assert.equal(instructionRows.get("style"), "none");
   assert.equal(instructionRows.get("stableSections"), "identity, execution_contract, tool_routing, editing_safety, provider_guidance");
-  assert.equal(instructionRows.get("dynamicSections"), "repo_context, runtime_state");
+  assert.equal(instructionRows.get("dynamicSections"), "repo_context, runtime_state, task_tool_guidance");
   assert.equal(metadataRows.get("lastActivity"), "none");
   assert.equal(metadataRows.get("git"), "up to date with origin/main; clean");
   assert.equal(metadataRows.get("contextLeft"), "272000");

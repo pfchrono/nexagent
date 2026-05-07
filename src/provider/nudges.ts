@@ -2,6 +2,7 @@ import { recordRuntimeEvent, type RuntimeSession } from "../runtime/session.js";
 import type { MissingTurnEvidence } from "../runtime/turn-run.js";
 
 export const MAX_GUIDANCE_NUDGES_BEFORE_SYNTHESIS = 2;
+export const MAX_ACTIVE_SKILL_OUTPUT_NUDGES = 4;
 
 export const PROVIDER_NUDGES = {
   continuation: [
@@ -45,6 +46,14 @@ export const PROVIDER_NUDGES = {
     "Use the active skill instructions now with the available tools.",
     "Do not answer with only activated, started, ready, or a request to restate the target.",
     "Answer only after current-turn tool evidence exists or a real tool/approval blocker is recorded.",
+  ].join(" "),
+  requiredActiveSkillOutput: [
+    "The previous active-skill answer did not satisfy the active skill's completion contract.",
+    "For improve-codebase-architecture, return five numbered deepening opportunities.",
+    "Each opportunity must include clear file evidence plus Problem, Solution, and Benefits.",
+    "End by asking which candidate to explore next.",
+    "Remove audit/status chatter; output only the candidate list and the selection question.",
+    "Use existing tool evidence and run one more focused tool only if needed.",
   ].join(" "),
   requiredTodoEvidence: [
     "This is multi-stage work and needs visible task tracking.",
@@ -93,6 +102,11 @@ export const REQUIRED_EVIDENCE_NUDGE: Partial<Record<MissingTurnEvidence, Requir
     label: "active skill",
     summary: "required active skill evidence nudge applied",
     content: PROVIDER_NUDGES.requiredActiveSkillEvidence,
+  },
+  "active skill output": {
+    label: "active skill output",
+    summary: "required active skill output nudge applied",
+    content: PROVIDER_NUDGES.requiredActiveSkillOutput,
   },
   todo: {
     label: "todo",

@@ -4,13 +4,14 @@ import { test } from "bun:test";
 
 test("OpenTUI app shell renders live view fields and Phase 66 command surfaces", async () => {
   const source = await readFile(new URL("../src/opentui/App.tsx", import.meta.url), "utf8");
+  const traceSource = await readFile(new URL("../src/opentui/trace-progress.ts", import.meta.url), "utf8");
 
   assert.doesNotMatch(source, /OpenTUI sidecar proof\. Full transcript port begins after migration contract\./);
   assert.match(source, /view\.transcriptBlocks/);
   assert.doesNotMatch(source, /expandedTraceBlocks/);
   assert.match(source, /renderTraceProgressRows/);
-  assert.match(source, /parseTraceProgressEvent/);
-  assert.match(source, /kind\\s\+\(\\w\+\)/);
+  assert.match(traceSource, /parseTraceProgressEvent/);
+  assert.match(traceSource, /kind\\s\+\(\\w\+\)/);
   assert.match(source, /traceProgressPaletteKey/);
   assert.match(source, /traceDetailScrollOffset/);
   assert.match(source, /handleTraceProgressRowClick/);
@@ -209,10 +210,10 @@ test("OpenTUI app shell renders live view fields and Phase 66 command surfaces",
   assert.match(source, /formatOpenTuiStatuslineProgress/);
   assert.match(source, /tokensTotal <= 0/);
   assert.match(source, /replace\(" · running · ", ` · \$\{view\.status\} · `\)/);
-  assert.match(source, /formatTraceProgressMetricBadge/);
-  assert.match(source, /readTraceProgressMetric\(detail, "turn_in"\)/);
-  assert.match(source, /readTraceProgressMetric\(detail, "turn_out"\)/);
-  assert.match(source, /` · \$\{metrics\}`/);
+  assert.match(traceSource, /formatTraceProgressMetricBadge/);
+  assert.match(traceSource, /readTraceProgressMetric\(detail, "turn_in"\)/);
+  assert.match(traceSource, /readTraceProgressMetric\(detail, "turn_out"\)/);
+  assert.match(traceSource, /` · \$\{metrics\}`/);
   assert.match(source, /progressPrefix = options\.progress/);
   assert.match(source, /formatStatuslineClock\(new Date\(\)\)/);
   assert.match(source, /formatBtwOverlayRows\(session\.btw/);

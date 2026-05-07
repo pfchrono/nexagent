@@ -1,3 +1,5 @@
+import { readFileSync, statSync } from "node:fs";
+import path from "node:path";
 import type { InstructionContext } from "./instructions.js";
 import { formatToolMemoryPromptSummary } from "./tool-memory.js";
 import { formatTodoPromptSummary } from "./todos.js";
@@ -64,6 +66,7 @@ export function buildPromptV2(request: {
     ...buildProviderSections(request.session),
     ...buildModeSections(request.session),
     ...buildRepoSections(request.session),
+    ...buildTaskToolGuidanceSections(request.session, request.prompt),
     ...buildActiveSkillSections(request.session),
     ...buildRuntimeSections(request.session),
     ...buildConversationSections(request.session),
@@ -124,6 +127,53 @@ export function summarizePromptV2(sections: PromptV2Section[]): PromptV2Summary 
     runtimeState: summarizeSectionContent(sections, "runtime_state"),
     conversationState: summarizeSectionContent(sections, "conversation_state"),
   };
+}
+
+function buildTaskToolGuidanceSections(session: InstructionContext, prompt: string): PromptV2Section[] {
+  const content = buildTaskToolGuidanceContent(session, prompt);
+  if (content.length === 0) {
+    return [];
+  }
+  return [createPromptV2Section({
+    id: "task_tool_guidance",
+    title: "Task Tool Guidance",
+    priority: 320,
+    cache: "dynamic",
+    source: "runtime",
+    content,
+  })];
+}
+
+function buildTaskToolGuidanceContent(session: InstructionContext, prompt: string): string[] {
+  const lower = prompt.toLowerCase();
+  const content: string[] = [
+    "Choose tools from task shape, then stop once evidence is sufficient; do not loop on the same broad tool.",
+  ];
+  const hasStoredContext = Boolean(formatToolMemoryPromptSummary(session.toolMemory));
+  if (hasStoredContext) {
+    content.push("Check Stored context from previous tool results before re-reading or re-running similar inspections.");
+  }
+  if (/\bnexsight\b/.test(lower) || /\b(inspect|analy[sz]e|map|scan|inventory|architecture|codebase|repo|workspace|other codebases?)\b/.test(lower)) {
+    content.push("Broad repo/codebase work: start with one nexsight_gather or nexsight_execute that covers all likely targets; follow with nexsight_search/read only for named gaps.");
+    content.push("If Nexsight already returned broad evidence this turn, answer from it or ask for one focused missing fact; do not run another broad scan.");
+  }
+  if (/\b(read|open|inspect|show|summari[sz]e)\b/.test(lower) && /\b[\w./~-]+\.(?:md|ts|tsx|js|jsx|json|py|rs|go|toml|yaml|yml)\b/.test(prompt)) {
+    content.push("Exact file work: use read_file for the named file first; use stored context if that same file was already read.");
+  }
+  if (/\b(skill|agents\.md|claude\.md|readme|md files?|source code)\b/.test(lower)) {
+    content.push("Instruction/source reading: preserve useful file findings in tool context and reuse them in the next provider step instead of asking user to restate.");
+  }
+  if (/\b(fix|repair|implement|edit|update|patch|write|create|change)\b/.test(lower)) {
+    content.push("Change work: read exact target context, use apply_patch/write_file/batch_edit, then inspect diff or run focused verification.");
+  }
+  if (/\b(test|tests|build|tsc|typecheck|lint|verify|validation)\b/.test(lower)) {
+    content.push("Verification claims require shell_command evidence from the actual test/build command in this turn; otherwise say tests not run.");
+  }
+  if (/\b(provider|model|transport|empty output|codex|spark|chatgpt|failure|failed|error|bug|debug|diagnose)\b/.test(lower)) {
+    content.push("Runtime/provider debugging: inspect routing/model/adapter code plus relevant tests, capture exact failure class, patch narrowly, then run targeted tests.");
+  }
+  content.push("Recovery: if a tool is rejected or noisy, retry once with corrected schema or narrower target; if still blocked, switch tool family or return exact blocker.");
+  return content;
 }
 
 function buildStyleReminderSections(session: InstructionContext): PromptV2Section[] {
@@ -190,6 +240,8 @@ function buildCoreSections(): PromptV2Section[] {
         "If a needed tool is unavailable, search repo-local scripts, node_modules/.bin, local user bins, MCP/tool registries, or current docs; install project-local dependencies only when safe; ask user only for root/admin/system installs.",
         "Multi-stage work rule: for GSD workflows, phases, milestones, next-slice work, full-loop requests, or any goal with three or more meaningful steps, use the todo tool near the start, keep one task in_progress, and update it after evidence or verification.",
         "Final answer needs completed current-turn evidence or a named blocker, but keep it human-readable and compact.",
+        "Do not dump observed/evidence ledgers into normal final prose; tool results, trace reports, checkpoints, and stored context carry the detailed evidence.",
+        "At checkpoints or turn ends, give concise output/summary only unless user explicitly asks for the detailed evidence report.",
         "Default final style: one short sentence for what changed, one short verification line if checks ran, one blocker line only if blocked.",
         "Avoid long observed/verified/completed-evidence ledgers in chat unless user explicitly asks for audit detail or the artifact itself requires it.",
         "Never claim file, test, tool, GSD, MCP, Nexsight, or runtime state without current-turn evidence.",
@@ -411,6 +463,7 @@ function buildActiveSkillSections(session: InstructionContext): PromptV2Section[
   if (!skill) {
     return [];
   }
+  const referencedFiles = loadActiveSkillReferenceSnippets(skill.content);
 
   return [
     createPromptV2Section({
@@ -426,12 +479,59 @@ function buildActiveSkillSections(session: InstructionContext): PromptV2Section[
         `Args: ${skill.args || "(none)"}`,
         "Execution: follow this skill now when current invocation is a skill command, start/continue command, or continuation of skill work.",
         "Do not only say activated, started, ready, or ask for a restated target when args/content provide enough direction.",
+        "Required: make at least one valid nexagent tool call before final answer; active skill turns without tool evidence are blocked.",
         "Use tools for required reads, writes, spawns, tests, and generated artifacts; report exact blocker only when a tool or approval gate blocks progress.",
         "Instructions:",
         skill.content,
+        ...referencedFiles,
       ],
     }),
   ];
+}
+
+function loadActiveSkillReferenceSnippets(skillContent: string): string[] {
+  const paths = extractAbsoluteAtReferences(skillContent).slice(0, 5);
+  if (paths.length === 0) {
+    return [];
+  }
+
+  const snippets: string[] = ["Referenced skill files:"];
+  for (const targetPath of paths) {
+    const content = readReferenceFileSnippet(targetPath);
+    if (!content) {
+      snippets.push(`- ${targetPath}: unavailable`);
+      continue;
+    }
+    snippets.push(`- ${targetPath}\n${content}`);
+  }
+  return snippets;
+}
+
+function extractAbsoluteAtReferences(content: string): string[] {
+  const refs = new Set<string>();
+  for (const match of content.matchAll(/@((?:\/|~\/)[^\s<>)\]},"']+)/g)) {
+    const rawPath = match[1]?.replace(/[.,;:]+$/, "");
+    if (!rawPath) {
+      continue;
+    }
+    refs.add(rawPath.startsWith("~/")
+      ? path.join(process.env.HOME ?? "", rawPath.slice(2))
+      : rawPath);
+  }
+  return [...refs];
+}
+
+function readReferenceFileSnippet(targetPath: string): string | null {
+  try {
+    const stat = statSync(targetPath);
+    if (!stat.isFile() || stat.size > 128_000) {
+      return null;
+    }
+    const content = readFileSync(targetPath, "utf8").trim();
+    return content.length > 12_000 ? `${content.slice(0, 12_000)}\n[truncated]` : content;
+  } catch {
+    return null;
+  }
 }
 
 function buildConversationSections(session: InstructionContext): PromptV2Section[] {
@@ -449,7 +549,7 @@ function buildConversationSections(session: InstructionContext): PromptV2Section
   }
   const toolMemory = formatToolMemoryPromptSummary(session.toolMemory);
   if (toolMemory) {
-    content.push(`Recent tool findings: ${toolMemory}`);
+    content.push(`Stored context from previous tool results. Use this as available context before re-reading files or re-running tools:\n${toolMemory}`);
   }
   const subagentSummary = formatSubagentPromptSummary(session.subagents);
   if (subagentSummary) {

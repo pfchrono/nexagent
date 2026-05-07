@@ -110,6 +110,9 @@ function shouldCompactPlainText(text: string): boolean {
 }
 
 function looksLikeRawEvidenceDump(output: string, lines: string[]): boolean {
+  if (looksLikeStructuredCandidateReport(output)) {
+    return false;
+  }
   if (output.length > 4_000 && lines.length > 28) {
     return true;
   }
@@ -119,6 +122,27 @@ function looksLikeRawEvidenceDump(output: string, lines: string[]): boolean {
   }
   const transcriptLines = lines.filter((line) => /^\s*(?:Tool call:|Tool result|Step \d+|--- [A-Z0-9 _-]+ ---)/.test(line)).length;
   return transcriptLines >= 3 && lines.length > 18;
+}
+
+function looksLikeStructuredCandidateReport(output: string): boolean {
+  const numberedHeadings = new Set(
+    [...output.matchAll(/^\s*(\d{1,2})[\.)]\s+\S/gm)].map((match) => match[1]),
+  );
+  if (numberedHeadings.size < 3) {
+    return false;
+  }
+  if (!/\b(?:architecture|deepening|seam|module|adapter|interface|provider|runtime|transport)\b/i.test(output)) {
+    return false;
+  }
+  const fieldCount = [
+    /\bProblem\b/i,
+    /\bSolution\b/i,
+    /\bBenefits?\b/i,
+    /\bFiles?\b/i,
+    /\bEvidence\b/i,
+    /\bLeverage\b/i,
+  ].filter((pattern) => pattern.test(output)).length;
+  return fieldCount >= 3;
 }
 
 function shouldKeepVerboseOutputLine(line: string): boolean {

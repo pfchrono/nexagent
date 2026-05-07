@@ -1,5 +1,6 @@
 import type { RuntimeSession } from "../runtime/session.js";
 import { getInternalToolFunctionDefinitions } from "../runtime/tools.js";
+import { fetchWithProviderExecutionPolicy, resolveProviderExecutionPolicy } from "./execution-policy.js";
 
 export interface CodexHttpInvocation {
   exitCode: number;
@@ -45,25 +46,29 @@ export async function invokeCodexHttpTransport(
   }
 
   const baseUrl = (request.session.providerTransport.openaiBaseUrl ?? "https://api.openai.com/v1").replace(/\/+$/, "");
-  const response = await fetch(`${baseUrl}/responses`, {
-    method: "POST",
-    signal: request.abortSignal,
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
+  const response = await fetchWithProviderExecutionPolicy(
+    `${baseUrl}/responses`,
+    {
+      method: "POST",
+      signal: request.abortSignal,
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: model ?? "gpt-5.4",
+        ...(request.session.providerRouting.modelSelection.configuredReasoningEfforts?.[request.session.providerTransport.activeProvider]
+          ? { reasoning: { effort: request.session.providerRouting.modelSelection.configuredReasoningEfforts[request.session.providerTransport.activeProvider] } }
+          : {}),
+        ...(request.nativeInput !== undefined ? { input: request.nativeInput } : { input: request.prompt }),
+        ...(request.instructions ? { instructions: request.instructions } : {}),
+        ...(request.previousResponseId ? { previous_response_id: request.previousResponseId } : {}),
+        ...(request.nativeTools ? { tools: getInternalToolFunctionDefinitions(), parallel_tool_calls: false } : {}),
+        store: false,
+      }),
     },
-    body: JSON.stringify({
-      model: model ?? "gpt-5.4",
-      ...(request.session.providerRouting.modelSelection.configuredReasoningEfforts?.[request.session.providerTransport.activeProvider]
-        ? { reasoning: { effort: request.session.providerRouting.modelSelection.configuredReasoningEfforts[request.session.providerTransport.activeProvider] } }
-        : {}),
-      ...(request.nativeInput !== undefined ? { input: request.nativeInput } : { input: request.prompt }),
-      ...(request.instructions ? { instructions: request.instructions } : {}),
-      ...(request.previousResponseId ? { previous_response_id: request.previousResponseId } : {}),
-      ...(request.nativeTools ? { tools: getInternalToolFunctionDefinitions(), parallel_tool_calls: false } : {}),
-      store: false,
-    }),
-  });
+    resolveProviderExecutionPolicy(request.session),
+  );
 
   const bodyText = await response.text();
   if (!response.ok) {

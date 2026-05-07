@@ -31,11 +31,14 @@ test("nexsight router respects explicit skip signals", () => {
   assert.equal(promptRequiresNexsightEvidence("skip nexsight and use local read"), false);
   assert.equal(promptRequiresWriteEvidence("do not write files"), false);
   assert.equal(promptRequiresWriteEvidence("why did that fail instead of writing the report?"), false);
+  assert.equal(promptRequiresWriteEvidence("investigate why gpt-5.3-codex-spark fails, find the problem, then fix"), false);
+  assert.equal(promptRequiresWriteEvidence("write findings to REPORT.md"), true);
 });
 
 test("nexsight router requires todo evidence for multi-stage GSD work", () => {
   const obligations = deriveTurnObligations("continue GSD workflow and finish next slice");
   assert.equal(obligations.requiresTodoEvidence, true);
+  assert.equal(promptRequiresTodoEvidence("Execute active skill gsd-stats now."), false);
   assert.equal(promptRequiresTodoEvidence("implement 1 through 4 for this phase"), true);
   assert.equal(promptRequiresTodoEvidence("skip todo and fix README.md"), false);
   assert.equal(promptRequiresTodoEvidence("why did that fail?"), false);

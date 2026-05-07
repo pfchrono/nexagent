@@ -13,9 +13,6 @@ import {
   analyzeBlockedShellCommand,
   analyzeSafeGitCommand,
   findBlockedShellPattern,
-  validateReadToolPath as validateReadPathPolicy,
-  validateRepoToolPath as validateRepoPathPolicy,
-  validateWriteToolPath as validateWritePathPolicy,
 } from "./policy.js";
 import {
   ASK_USER_TOOL_NAME,
@@ -31,9 +28,12 @@ import {
 } from "./questionnaire.js";
 import { savePersistedRuntimeState } from "./persistence.js";
 import type { RuntimeSession } from "./session.js";
+import { resolveRepoPath, validateReadToolPath, validateRepoToolPath, validateWriteToolPath } from "./tool-paths.js";
 import { executeTodoTool } from "./todos.js";
 import { executeAgentTool, executeGetSubagentResultTool, executeSteerSubagentTool } from "./subagents.js";
 import { executeGetGoalTool, executeUpdateGoalTool } from "./goal.js";
+
+export { resolveRepoPath, validateReadToolPath, validateRepoToolPath, validateWriteToolPath } from "./tool-paths.js";
 
 export type InternalToolName =
   | "read_file"
@@ -577,6 +577,31 @@ export function getInternalToolDefinitions(): readonly InternalToolDefinition[] 
               additionalProperties: false,
             },
           },
+          tasks: {
+            type: "array",
+            description: "Common create-list alias. Replaces the visible todo list with these tasks.",
+            items: {
+              type: "object",
+              properties: {
+                id: { type: "string" },
+                content: { type: "string" },
+                text: { type: "string" },
+                subject: { type: "string" },
+                title: { type: "string" },
+                task: { type: "string" },
+                status: { type: "string" },
+                activeForm: { type: "string" },
+                active: { type: "string" },
+                doing: { type: "string" },
+                description: { type: "string" },
+                detail: { type: "string" },
+                blockedBy: { type: "array", items: { type: "string" } },
+                owner: { type: "string" },
+                metadata: { type: "object" },
+              },
+              additionalProperties: false,
+            },
+          },
         },
         required: [],
         additionalProperties: false,
@@ -748,7 +773,7 @@ const TOOL_ARGUMENT_COMPAT_ALIASES: Partial<Record<InternalToolName, ReadonlyArr
   search_files: ["query", "glob", "root"],
   web_search: ["max_results", "count"],
   shell_command: ["cwd", "workdir", "timeout", "timeout_ms", "timeoutMs", "maxOutputChars", "maxOutput", "max_output_chars", "max_output"],
-  todo: ["items", "todos"],
+  todo: ["items", "todos", "tasks"],
   nexsight_execute: ["lang", "timeout", "timeout_ms", "max_output", "max_output_chars"],
   nexsight_read: ["file", "filePath", "file_path", "max_chars", "start", "end", "start_line", "end_line"],
   nexsight_gather: ["path", "paths", "reason", "max_files", "max_chars_per_file", "max_chars"],
@@ -1029,39 +1054,6 @@ async function executeMcpCallTool(session: RuntimeSession, args: Record<string, 
   } catch (error) {
     return fail("mcp_call", error instanceof Error ? error.message : String(error));
   }
-}
-
-export function resolveRepoPath(session: RuntimeSession, inputPath?: string): string {
-  if (!inputPath || inputPath === ".") {
-    return session.cwd;
-  }
-  return path.resolve(session.cwd, expandHomePath(inputPath));
-}
-
-function expandHomePath(inputPath: string): string {
-  const home = process.env.HOME ?? process.env.USERPROFILE ?? "";
-  if (!home) {
-    return inputPath;
-  }
-  if (inputPath === "~") {
-    return home;
-  }
-  if (inputPath.startsWith("~/")) {
-    return path.join(home, inputPath.slice(2));
-  }
-  return inputPath;
-}
-
-export function validateRepoToolPath(session: RuntimeSession, targetPath: string): string | null {
-  return validateRepoPathPolicy(session, targetPath);
-}
-
-export function validateReadToolPath(session: RuntimeSession, targetPath: string): string | null {
-  return validateReadPathPolicy(session, targetPath);
-}
-
-export function validateWriteToolPath(session: RuntimeSession, targetPath: string): string | null {
-  return validateWritePathPolicy(session, targetPath);
 }
 
 function executeReadFileToolSync(session: RuntimeSession, args: Record<string, unknown>): InternalToolResult {
@@ -1748,7 +1740,7 @@ function resolveShellCommandCwd(session: RuntimeSession, args: Record<string, un
 }
 
 function normalizeTodoToolArguments(args: Record<string, unknown>): Record<string, unknown> {
-  const items = Array.isArray(args.items) ? args.items : Array.isArray(args.todos) ? args.todos : null;
+  const items = Array.isArray(args.items) ? args.items : Array.isArray(args.todos) ? args.todos : Array.isArray(args.tasks) ? args.tasks : null;
   if (!items || args.action !== undefined) {
     return args;
   }

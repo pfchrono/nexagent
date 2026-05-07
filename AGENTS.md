@@ -10,6 +10,7 @@ Canonical guidance for coding agents working in `nexagent`.
 - default interactive OpenTUI shell in `src/opentui/`
 - provider transports: `cli-exec`, `http-responses`, `codex-http`
 - provider/model controls include per-provider model selection and reasoning effort selection
+- loopback-only gRPC automation server for external harnesses: `nexagent grpc --host 127.0.0.1 --port 0`
 - layered prompt/instruction assembly in `src/runtime/instructions.ts`
 - guarded repo-local internal tools:
   - `read_file`
@@ -65,6 +66,14 @@ Use existing package scripts only:
 - `bun run dev` — run TypeScript CLI via Bun
 - `bun run start` — run built `dist/cli.js`
 - `bun run compile` — build platform binaries
+
+Use the gRPC route for live harness checks:
+
+- `nexagent grpc --host 127.0.0.1 --port 0` starts the trusted-local automation server and prints `nexagent grpc listening <host:port>`.
+- External clients should use `proto/nexagent.proto` and call `Health`, `Inspect`, `RunCommand`, `RunPrompt`, and `Stop`.
+- Use gRPC smoke checks for provider/model/skill regressions that only appear in the real harness, especially Codex Spark (`gpt-5.3-codex-spark`) and `$skill`/`/skill` routing.
+- Keep gRPC loopback-only unless an authenticated transport is added. `RunCommand` can execute guarded shell commands and `Stop` terminates the server.
+- When testing skills through gRPC, `/skill <name> ...` must be proven to auto-invoke the provider path, not only resolve the active skill.
 
 Do not invent commands. If command surface changes, update `package.json`, `README.md`, and this file.
 If a new launch switch is added or removed in `parseCommand`, update `formatLaunchHelp()` and tests so `nexagent --help` stays complete.

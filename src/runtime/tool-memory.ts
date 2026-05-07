@@ -6,6 +6,7 @@ export interface RuntimeToolMemoryEntry {
   ok: boolean;
   args: string;
   summary: string;
+  detail?: string;
   createdAt: string;
 }
 
@@ -16,9 +17,11 @@ export interface RuntimeToolMemoryState {
 }
 
 const TOOL_MEMORY_LIMIT = 32;
-const TOOL_MEMORY_PROMPT_LIMIT = 14;
-const SUMMARY_MAX_CHARS = 420;
-const ARGS_MAX_CHARS = 180;
+const TOOL_MEMORY_PROMPT_LIMIT = 28;
+const TOOL_MEMORY_PROMPT_CHAR_BUDGET = 12_000;
+const SUMMARY_MAX_CHARS = 1_000;
+const DETAIL_MAX_CHARS = 3_000;
+const ARGS_MAX_CHARS = 260;
 
 export function createRuntimeToolMemoryState(value?: Partial<RuntimeToolMemoryState> | null): RuntimeToolMemoryState {
   const entries = Array.isArray(value?.entries)
@@ -48,6 +51,7 @@ export function recordToolMemory(
     ok: result.ok,
     args: compactJson(call.arguments ?? {}, ARGS_MAX_CHARS),
     summary: summarizeToolOutput(result.output),
+    detail: summarizeToolDetail(call.name, result.output),
     createdAt: now,
   };
   state.entries.push(entry);
@@ -69,11 +73,20 @@ export function formatToolMemoryPromptSummary(state?: RuntimeToolMemoryState | n
   if (!state || state.entries.length === 0) {
     return null;
   }
-  return state.entries.slice(-TOOL_MEMORY_PROMPT_LIMIT).map((entry) => {
+  const lines: string[] = [];
+  let usedChars = 0;
+  for (const entry of state.entries.slice(-TOOL_MEMORY_PROMPT_LIMIT).reverse()) {
     const status = entry.ok ? "ok" : "failed";
     const args = entry.args && entry.args !== "{}" ? ` args=${entry.args}` : "";
-    return `${entry.tool} ${status}${args}: ${entry.summary}`;
-  }).join(" | ");
+    const detail = entry.detail ? `\n  evidence=${entry.detail}` : "";
+    const line = `- ${entry.tool} ${status}${args}: ${entry.summary}${detail}`;
+    if (usedChars + line.length > TOOL_MEMORY_PROMPT_CHAR_BUDGET && lines.length > 0) {
+      break;
+    }
+    lines.push(line);
+    usedChars += line.length;
+  }
+  return lines.reverse().join("\n");
 }
 
 export function formatToolMemoryStatus(state: RuntimeToolMemoryState): string {
@@ -102,6 +115,7 @@ function normalizeToolMemoryEntry(value: unknown): RuntimeToolMemoryEntry | null
     ok: entry.ok !== false,
     args: cleanString(entry.args) ?? "{}",
     summary,
+    detail: cleanString(entry.detail) ?? undefined,
     createdAt: cleanString(entry.createdAt) ?? new Date(0).toISOString(),
   };
 }
@@ -111,9 +125,36 @@ function summarizeToolOutput(output: string): string {
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean);
-  const useful = lines.filter((line) => !/^[-+]{3}\s/.test(line) && !/^@@/.test(line));
-  const selected = useful.slice(0, 6).join(" ; ") || "no output";
+  const useful = lines.filter((line) => !isLowSignalDiffLine(line));
+  const header = useful.find((line) => /^\[(read_file|write_file|apply_patch|batch_edit|preview_patch|list_dir|search_content|search_files|git_status|git_diff|shell_command|nexsight_)/.test(line));
+  const body = useful.filter((line) => line !== header).slice(0, 14);
+  const selected = [header, ...body].filter((line): line is string => Boolean(line)).join(" ; ") || "no output";
   return truncate(selected.replace(/\s+/g, " "), SUMMARY_MAX_CHARS);
+}
+
+function summarizeToolDetail(toolName: string, output: string): string | undefined {
+  const clean = output
+    .split(/\r?\n/)
+    .map((line) => line.trimEnd())
+    .filter((line) => line.trim().length > 0)
+    .filter((line) => !isLowSignalDiffLine(line.trim()))
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  if (!clean) {
+    return undefined;
+  }
+  if (toolName === "read_file" || toolName === "write_file" || toolName === "apply_patch" || toolName === "batch_edit" || toolName === "preview_patch") {
+    return truncate(clean, DETAIL_MAX_CHARS);
+  }
+  if (!/^\[(list_dir|search_content|search_files|git_status|git_diff|shell_command|nexsight_)/m.test(clean)) {
+    return undefined;
+  }
+  return truncate(clean, DETAIL_MAX_CHARS);
+}
+
+function isLowSignalDiffLine(line: string): boolean {
+  return /^[-+]{3}\s/.test(line) || /^@@/.test(line) || /^index\s+[0-9a-f]+\.\.[0-9a-f]+/.test(line);
 }
 
 function compactJson(value: unknown, maxChars: number): string {

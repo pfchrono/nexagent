@@ -32,10 +32,11 @@ export function promptRequiresWriteEvidence(prompt: string): boolean {
   }
 
   const writeVerb = /\b(write|create|save|append|overwrite|edit|update|modify|patch|add|fix|implement|change)\b/.test(lower);
+  const likelyFileReference = /(?:^|\s|["'`(])(?:\.{0,2}\/|~\/|\/)?[\w@./-]+\.(?:md|ts|tsx|js|jsx|json|jsonc|toml|yaml|yml|css|scss|html|sh|py|rs|go|lock)\b/i;
   const fileTarget = /\b(readme|agents\.md|claude\.md|package\.json|tsconfig\.json|bun\.lock)\b/i.test(prompt)
-    || /(?:^|\s|["'`(])(?:\.{0,2}\/|~\/|\/)?[\w@./ -]+\.(?:md|ts|tsx|js|jsx|json|jsonc|toml|yaml|yml|css|scss|html|sh|py|rs|go|lock)\b/i.test(prompt);
+    || likelyFileReference.test(prompt);
   const explicitFileWrite = /\b(write|create|save|append|overwrite)\b.*\b(file|artifact|report|findings|summary)\b/.test(lower)
-    || /\b(to|into|in)\s+(?:\.{0,2}\/|~\/|\/)?[\w@./ -]+\.[a-z0-9]+\b/i.test(prompt);
+    || /\b(to|into|in)\s+(?:\.{0,2}\/|~\/|\/)?[\w@./-]+\.(?:md|ts|tsx|js|jsx|json|jsonc|toml|yaml|yml|css|scss|html|sh|py|rs|go|lock)\b/i.test(prompt);
 
   return writeVerb && (fileTarget || explicitFileWrite);
 }
@@ -46,6 +47,9 @@ export function promptRequiresNexsightEvidence(prompt: string): boolean {
 
 export function promptRequiresTodoEvidence(prompt: string): boolean {
   const lower = prompt.toLowerCase();
+  if (lower.trim().startsWith("execute active skill")) {
+    return false;
+  }
   if (/\b(do not|don't|dont|avoid|skip|no)\s+(use\s+)?todos?\b/.test(lower)) {
     return false;
   }

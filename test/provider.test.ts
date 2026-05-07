@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
 import { invokeCodexChatGptHttpTransport, resolveCodexAuthJson } from "../src/provider/codex-chatgpt-http.js";
 import { executeProviderRequest, type ProviderRequest } from "../src/provider.js";
+import { stripModelIntent } from "../src/provider/model-output.js";
 import { createDefaultProviderRegistry } from "../src/provider/registry.js";
 import { createRuntimeExtensionHost } from "../src/runtime/extensions.js";
 import { initializeRuntimeDebug } from "../src/runtime/debug.js";
@@ -204,10 +205,11 @@ function createSession(provider = "codex", model: string | null = "gpt-5.4"): Ru
 
 test("executeProviderRequest returns codex output", async () => {
   let capturedPrompt = "";
+  const session = createSession();
 
   const result = await executeProviderRequest(
     {
-      session: createSession(),
+      session,
       prompt: "say hi",
     },
     {
@@ -244,6 +246,15 @@ test("executeProviderRequest returns codex output", async () => {
     fallbackApplied: false,
     output: "hello world",
   });
+  assert.deepEqual(
+    session.events
+      .filter((event) => event.kind === "provider")
+      .map((event) => [event.status, event.summary, event.detail]),
+    [
+      ["started", "codex turn started", "transport=cli-exec"],
+      ["completed", "codex turn completed", "transport=cli-exec; output_chars=11"],
+    ],
+  );
 });
 
 test("executeProviderRequest records model-authored intent and strips tag from final output", async () => {
@@ -279,6 +290,431 @@ test("executeProviderRequest records model-authored intent and strips tag from f
     session.events.find((event) => event.summary === "model turn intent")?.detail,
     "Inspect request, then answer briefly.",
   );
+});
+
+test("stripModelIntent removes repeated and unclosed intent tags", () => {
+  assert.equal(
+    stripModelIntent("<nexagent_intent>first</nexagent_intent>\n<nexagent_intent>second</nexagent_intent>\nvisible"),
+    "visible",
+  );
+  assert.equal(stripModelIntent("<nexagent_intent>started but not closed\nvisible"), "visible");
+});
+
+test("executeProviderRequest continues after intent-only provider output", async () => {
+  const session = createSession();
+  const prompts: string[] = [];
+
+  const result = await executeProviderRequest(
+    {
+      session,
+      prompt: "run active skill",
+    },
+    {
+      exec: async (request) => {
+        prompts.push(request.prompt);
+        return {
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+          output: prompts.length === 1
+            ? "<nexagent_intent>Gather stats and report.</nexagent_intent>\n"
+            : "stats done",
+        };
+      },
+      http: async () => {
+        throw new Error("http should not be used");
+      },
+      codexHttp: async () => {
+        throw new Error("codex-http should not be used");
+      },
+    },
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.ok ? result.output : "", "stats done");
+  assert.equal(prompts.length, 2);
+  assert.match(prompts[1] ?? "", /emitted only a model intent/);
+  assert.equal(
+    session.events.some((event) => event.summary === "intent-only response nudge applied"),
+    true,
+  );
+});
+
+test("executeProviderRequest preloads active skill referenced files as tool evidence", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-active-skill-preflight-"));
+  try {
+    const workflowPath = path.join(cwd, "workflow.md");
+    await writeFile(workflowPath, "Use gathered workflow facts.", "utf8");
+    const session = createSession();
+    session.cwd = cwd;
+    session.repo.root = cwd;
+    session.toolPolicy.allowedRoots = [cwd];
+    session.activeSkill = {
+      name: "demo",
+      source: "project",
+      path: path.join(cwd, "SKILL.md"),
+      args: "(none)",
+      content: `<execution_context>\n@${workflowPath}\n</execution_context>`,
+    };
+    let capturedPrompt = "";
+
+    const result = await executeProviderRequest(
+      {
+        session,
+        prompt: "Execute active skill demo now.",
+      },
+      {
+        exec: async (request) => {
+          capturedPrompt = request.prompt;
+          return {
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            output: "done with workflow facts",
+          };
+        },
+        http: async () => {
+          throw new Error("http should not be used");
+        },
+        codexHttp: async () => {
+          throw new Error("codex-http should not be used");
+        },
+      },
+    );
+
+    assert.equal(result.ok, true);
+    assert.match(capturedPrompt, /Active skill preflight evidence/);
+    assert.match(capturedPrompt, /Use gathered workflow facts\./);
+    assert.equal(
+      session.events.some((event) => event.kind === "tool" && event.summary === "tool read_file completed"),
+      true,
+    );
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("executeProviderRequest preloads default repo evidence for active skill without file refs", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-active-skill-default-preflight-"));
+  try {
+    await mkdir(path.join(cwd, "src"), { recursive: true });
+    await writeFile(path.join(cwd, "src", "sample.ts"), "export const sample = true;\n", "utf8");
+    const session = createSession();
+    session.cwd = cwd;
+    session.repo.root = cwd;
+    session.toolPolicy.allowedRoots = [cwd];
+    session.activeSkill = {
+      name: "demo",
+      source: "global",
+      path: path.join(cwd, "SKILL.md"),
+      args: "(none)",
+      content: "Map architecture seams and prioritize deepening candidates.",
+    };
+    let capturedPrompt = "";
+
+    const result = await executeProviderRequest(
+      {
+        session,
+        prompt: "Execute active skill improve-codebase-architecture now.",
+      },
+      {
+        exec: async (request) => {
+          capturedPrompt = request.prompt;
+          return {
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            output: "done from default preflight",
+          };
+        },
+        http: async () => {
+          throw new Error("http should not be used");
+        },
+        codexHttp: async () => {
+          throw new Error("codex-http should not be used");
+        },
+      },
+    );
+
+    assert.equal(result.ok, true);
+    assert.equal(result.ok ? result.output : "", "done from default preflight");
+    assert.match(capturedPrompt, /Active skill preflight evidence/);
+    assert.match(capturedPrompt, /sample\.ts/);
+    assert.equal(
+      session.events.some((event) => event.kind === "tool" && event.summary === "tool nexsight_gather completed"),
+      true,
+    );
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("executeProviderRequest rejects activation-only active skill output after preflight evidence", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-active-skill-activation-"));
+  try {
+    const workflowPath = path.join(cwd, "workflow.md");
+    await writeFile(workflowPath, "Use gathered workflow facts.", "utf8");
+    const session = createSession();
+    session.cwd = cwd;
+    session.repo.root = cwd;
+    session.toolPolicy.allowedRoots = [cwd];
+    session.activeSkill = {
+      name: "demo",
+      source: "project",
+      path: path.join(cwd, "SKILL.md"),
+      args: "(none)",
+      content: `<execution_context>\n@${workflowPath}\n</execution_context>`,
+    };
+    const prompts: string[] = [];
+
+    const result = await executeProviderRequest(
+      {
+        session,
+        prompt: "Execute active skill demo now.",
+      },
+      {
+        exec: async (request) => {
+          prompts.push(request.prompt);
+          return {
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            output: prompts.length === 1 ? "I'm in." : "done with workflow facts",
+          };
+        },
+        http: async () => {
+          throw new Error("http should not be used");
+        },
+        codexHttp: async () => {
+          throw new Error("codex-http should not be used");
+        },
+      },
+    );
+
+    assert.equal(result.ok, true);
+    assert.equal(result.ok ? result.output : "", "done with workflow facts");
+    assert.equal(prompts.length, 2);
+    assert.match(prompts[1] ?? "", /The user has already authorized this task/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("executeProviderRequest nudges incomplete improve-codebase-architecture output after preflight evidence", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-active-skill-output-"));
+  try {
+    await mkdir(path.join(cwd, "src"), { recursive: true });
+    await writeFile(path.join(cwd, "src", "provider.ts"), "export function provider() { return true; }\n", "utf8");
+    const session = createSession();
+    session.cwd = cwd;
+    session.repo.root = cwd;
+    session.toolPolicy.allowedRoots = [cwd];
+    session.activeSkill = {
+      name: "improve-codebase-architecture",
+      source: "global",
+      path: path.join(cwd, "SKILL.md"),
+      args: "(none)",
+      content: "Map architecture seams and surface five deepening opportunities.",
+    };
+    const prompts: string[] = [];
+    const complete = [
+      "1. Provider policy Module",
+      "**Files** - src/provider.ts",
+      "**Problem** - policy mixed with execution.",
+      "**Solution** - extract policy module.",
+      "**Benefits** - better locality and leverage.",
+      "2. Runtime turn Module\n**Files** - src/runtime/turn-run.ts\n**Problem** - final evidence spread.\n**Solution** - isolate completion contract.\n**Benefits** - smaller test surface.",
+      "3. Tool adapter Module\n**Files** - src/runtime/tools.ts\n**Problem** - aliases leak.\n**Solution** - adapter contract.\n**Benefits** - stronger leverage.",
+      "4. Prompt contract Module\n**Files** - src/runtime/prompt-v2.ts\n**Problem** - prompt rules drift.\n**Solution** - explicit contract builder.\n**Benefits** - cleaner locality.",
+      "5. OpenTUI shell Module\n**Files** - src/opentui/App.tsx\n**Problem** - input and rendering coupled.\n**Solution** - shell adapter seam.\n**Benefits** - test leverage.",
+      "Which of these would you like to explore?",
+    ].join("\n");
+
+    const result = await executeProviderRequest(
+      {
+        session,
+        prompt: "Execute active skill improve-codebase-architecture now.",
+      },
+      {
+        exec: async (request) => {
+          prompts.push(request.prompt);
+          return {
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            output: prompts.length === 1
+              ? "1. Provider seam\n2. Runtime seam\n\nWhich of these would you like to explore?"
+              : complete,
+          };
+        },
+        http: async () => {
+          throw new Error("http should not be used");
+        },
+        codexHttp: async () => {
+          throw new Error("codex-http should not be used");
+        },
+      },
+    );
+
+    assert.equal(result.ok, true);
+    assert.equal(result.ok ? result.output : "", complete);
+    assert.equal(prompts.length, 2);
+    assert.match(prompts[1] ?? "", /five numbered deepening opportunities/i);
+    assert.equal(
+      session.events.some((event) => event.kind === "control" && event.summary === "required active skill output nudge applied"),
+      true,
+    );
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("executeProviderRequest preserves incomplete improve-codebase-architecture final synthesis as partial output", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-active-skill-partial-"));
+  try {
+    await mkdir(path.join(cwd, "src"), { recursive: true });
+    await writeFile(path.join(cwd, "src", "provider.ts"), "export function provider() { return true; }\n", "utf8");
+    const session = createSession();
+    session.cwd = cwd;
+    session.repo.root = cwd;
+    session.toolPolicy.allowedRoots = [cwd];
+    session.activeSkill = {
+      name: "improve-codebase-architecture",
+      source: "global",
+      path: path.join(cwd, "SKILL.md"),
+      args: "(none)",
+      content: "Map architecture seams and surface five deepening opportunities.",
+    };
+    const partial = "1. **Provider seam in `src/provider.ts`**\n**Problem:** orchestration is large.\n**Solution:** split module.\n**Benefits:** locality.\n\n2. **Transport policy in `src/provider.ts` and `src/models.ts`**\n**Problem:** policy coupling.\n**Solution:** extract adapter.\n**Benefits:** leverage.";
+    const outputs = [
+      "I'm in.",
+      "Still working on it.",
+      partial,
+      partial,
+      partial,
+    ];
+
+    const result = await executeProviderRequest(
+      {
+        session,
+        prompt: "Execute active skill improve-codebase-architecture now.",
+      },
+      {
+        exec: async () => ({
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+          output: outputs.shift() ?? partial,
+        }),
+        http: async () => {
+          throw new Error("http should not be used");
+        },
+        codexHttp: async () => {
+          throw new Error("codex-http should not be used");
+        },
+      },
+    );
+
+    assert.equal(result.ok, true);
+    assert.match(result.ok ? result.output : "", /Provider seam/);
+    assert.equal(
+      session.events.some((event) => event.kind === "control" && event.summary === "active skill output accepted as partial"),
+      true,
+    );
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("executeProviderRequest reports empty output after repeated intent-only responses", async () => {
+  const session = createSession();
+
+  const result = await executeProviderRequest(
+    {
+      session,
+      prompt: "run active skill",
+    },
+    {
+      exec: async () => ({
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+        output: "<nexagent_intent>Gather stats and report.</nexagent_intent>\n",
+      }),
+      http: async () => {
+        throw new Error("http should not be used");
+      },
+      codexHttp: async () => {
+        throw new Error("codex-http should not be used");
+      },
+    },
+  );
+
+  assert.equal(result.ok, false);
+  assert.equal(result.ok ? "" : result.message, "provider returned empty output");
+});
+
+test("executeProviderRequest synthesizes from tool evidence after empty provider output", async () => {
+  const session = createSession();
+  const prompts: string[] = [];
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-empty-output-evidence-"));
+  session.cwd = cwd;
+  session.repo.root = cwd;
+  session.toolPolicy.allowedRoots = [cwd];
+
+  try {
+    await writeFile(path.join(cwd, "README.md"), "demo\n", "utf8");
+    const result = await executeProviderRequest(
+      {
+        session,
+        prompt: "list current directory then answer",
+      },
+      {
+        exec: async (request) => {
+          prompts.push(request.prompt);
+          if (prompts.length === 1) {
+            return {
+              exitCode: 0,
+              stdout: "",
+              stderr: "",
+              output: '<nexagent_tool_call>{"name":"list_dir","arguments":{"path":"."}}</nexagent_tool_call>',
+            };
+          }
+          if (prompts.length === 2) {
+            return {
+              exitCode: 0,
+              stdout: "",
+              stderr: "",
+              output: "",
+            };
+          }
+          return {
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            output: "Repository entries inspected from list_dir evidence.",
+          };
+        },
+        http: async () => {
+          throw new Error("http should not be used");
+        },
+        codexHttp: async () => {
+          throw new Error("codex-http should not be used");
+        },
+      },
+    );
+
+    assert.equal(result.ok, true);
+    assert.equal(result.ok ? result.output : "", "Repository entries inspected from list_dir evidence.");
+    assert.equal(prompts.length, 3);
+    assert.match(prompts[2] ?? "", /returned empty assistant text after completed tool evidence/);
+    assert.equal(
+      session.events.some((event) => event.kind === "control" && event.summary === "empty output evidence synthesis requested"),
+      true,
+    );
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
 });
 
 test("executeProviderRequest compacts final output when caveman mode is active", async () => {
@@ -718,6 +1154,66 @@ test("executeProviderRequest fails when native transport exits zero but assistan
     message: "provider returned empty output",
     detail: "provider finished with exit code 0 but produced no assistant text.",
   });
+});
+
+test("executeProviderRequest corrects unsupported test claims when tests were not requested", async () => {
+  const session = createSession();
+
+  const result = await executeProviderRequest(
+    {
+      session,
+      prompt: "investigate why spark failed",
+    },
+    {
+      exec: async () => ({
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+        output: "Observed: Spark returns empty output.\nVerified: focused tests pass for Spark routing.",
+      }),
+      http: async () => {
+        throw new Error("http should not be used");
+      },
+      codexHttp: async () => {
+        throw new Error("codex-http should not be used");
+      },
+    },
+  );
+
+  assert.equal(result.ok, true);
+  assert.match(result.ok ? result.output : "", /Tests not run in this turn/);
+  assert.equal(
+    session.events.some((event) => event.summary === "unsupported test claim corrected"),
+    true,
+  );
+});
+
+test("executeProviderRequest still blocks unsupported test claims when user requested tests", async () => {
+  const session = createSession();
+
+  const result = await executeProviderRequest(
+    {
+      session,
+      prompt: "run tests and verify spark failed",
+    },
+    {
+      exec: async () => ({
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+        output: "Verified: focused tests pass for Spark routing.",
+      }),
+      http: async () => {
+        throw new Error("http should not be used");
+      },
+      codexHttp: async () => {
+        throw new Error("codex-http should not be used");
+      },
+    },
+  );
+
+  assert.equal(result.ok, false);
+  assert.equal(result.ok ? "" : result.message, "assistant completed without required test evidence");
 });
 
 test("executeProviderRequest records applied steer history at provider boundary", async () => {
@@ -1391,9 +1887,101 @@ test("executeProviderRequest carries bounded tool findings into future prompts",
     );
 
     assert.equal(second.ok, true);
-    assert.match(secondPrompt, /Recent tool findings:/);
+    assert.match(secondPrompt, /Stored context from previous tool results/);
     assert.match(secondPrompt, /list_dir ok/);
     assert.match(secondPrompt, /package\.json/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("executeProviderRequest carries file read and write evidence into future prompts", async () => {
+  const session = createSession();
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-provider-rich-tool-memory-"));
+  session.cwd = cwd;
+  session.repo.root = cwd;
+  session.toolPolicy.allowedRoots = [cwd];
+  await writeFile(path.join(cwd, "notes.md"), "alpha finding\nbeta detail\ngamma next\n", "utf8");
+  let secondPrompt = "";
+  let toolStep = 0;
+
+  try {
+    const first = await executeProviderRequest(
+      {
+        session,
+        prompt: "read then update notes",
+      },
+      {
+        exec: async (request) => {
+          if (!request.prompt.includes("Internal tool transcript")) {
+            return {
+              exitCode: 0,
+              stdout: "",
+              stderr: "",
+              output: '<nexagent_tool_call>{"name":"read_file","arguments":{"path":"notes.md"}}</nexagent_tool_call>',
+            };
+          }
+          toolStep += 1;
+          if (toolStep === 1) {
+            return {
+              exitCode: 0,
+              stdout: "",
+              stderr: "",
+              output: '<nexagent_tool_call>{"name":"write_file","arguments":{"path":"notes.md","content":"alpha finding\\nbeta detail\\ngamma next\\ndelta stored\\n"}}</nexagent_tool_call>',
+            };
+          }
+          return {
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            output: "notes updated",
+          };
+        },
+        http: async () => {
+          throw new Error("http should not be used");
+        },
+        codexHttp: async () => {
+          throw new Error("codex-http should not be used");
+        },
+      },
+    );
+
+    assert.equal(first.ok, true);
+    assert.equal(session.toolMemory.entries.length, 2);
+
+    const second = await executeProviderRequest(
+      {
+        session,
+        prompt: "what context do you have?",
+      },
+      {
+        exec: async (request) => {
+          secondPrompt = request.prompt;
+          return {
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            output: "used stored context",
+          };
+        },
+        http: async () => {
+          throw new Error("http should not be used");
+        },
+        codexHttp: async () => {
+          throw new Error("codex-http should not be used");
+        },
+      },
+    );
+
+    assert.equal(second.ok, true);
+    assert.match(secondPrompt, /Stored context from previous tool results/);
+    assert.match(secondPrompt, /- read_file ok/);
+    assert.match(secondPrompt, /evidence=alpha finding/);
+    assert.match(secondPrompt, /alpha finding/);
+    assert.match(secondPrompt, /beta detail/);
+    assert.match(secondPrompt, /write_file ok/);
+    assert.match(secondPrompt, /evidence=wrote notes\.md/);
+    assert.match(secondPrompt, /delta stored/);
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }
@@ -1462,7 +2050,7 @@ test("executeProviderRequest omits low-signal policy blocks from tool findings",
   );
 
   assert.equal(second.ok, true);
-  assert.doesNotMatch(secondPrompt, /Recent tool findings:/);
+  assert.doesNotMatch(secondPrompt, /Stored context from previous tool results/);
   assert.doesNotMatch(secondPrompt, /rm -rf/);
 });
 
@@ -2091,6 +2679,151 @@ test("executeProviderRequest nudges non-actionable confirmation replies to conti
   });
 });
 
+test("executeProviderRequest nudges fabricated no-tool-response blockers to continue", async () => {
+  const session = createSession();
+  const prompts: string[] = [];
+
+  const result = await executeProviderRequest(
+    {
+      session,
+      prompt: "BOOMERANG MODE ACTIVE\n\nTask:\n$improve-codebase-architecture",
+    },
+    {
+      exec: async (request) => {
+        prompts.push(request.prompt);
+        if (prompts.length === 1) {
+          return {
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            output: "I'm blocked right now: I couldn't complete this because I can't get any tool responses from the workspace this turn.",
+          };
+        }
+        if (prompts.length === 2) {
+          return {
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            output: '<nexagent_tool_call>{"name":"git_status","arguments":{}}</nexagent_tool_call>',
+          };
+        }
+        return {
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+          output: "done after real tool evidence",
+        };
+      },
+      http: async () => {
+        throw new Error("http should not be used");
+      },
+      codexHttp: async () => {
+        throw new Error("codex-http should not be used");
+      },
+    },
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.ok ? result.output : "", "done after real tool evidence");
+  assert.equal(prompts.length, 3);
+  assert.equal(
+    session.events.some((event) => event.kind === "control" && event.summary === "continuation nudge applied"),
+    true,
+  );
+  assert.equal(
+    session.events.some((event) => event.kind === "tool" && event.summary === "tool git_status completed"),
+    true,
+  );
+});
+
+test("executeProviderRequest rejects fabricated tool-access blocker after todo-only evidence", async () => {
+  const session = createSession();
+  session.activeSkill = {
+    name: "improve-codebase-architecture",
+    source: "global",
+    path: "/tmp/improve-codebase-architecture/SKILL.md",
+    args: "(none)",
+    content: "Explore module seams and seams-without-value to surface deepening candidates backed by repo evidence.",
+  };
+  const prompts: string[] = [];
+  const finalCandidates = [
+    "1. Provider policy Module",
+    "**Files** - src/provider.ts",
+    "**Problem** - provider policy and execution stay coupled.",
+    "**Solution** - extract policy module.",
+    "**Benefits** - better locality and leverage.",
+    "2. Runtime turn Module\n**Files** - src/runtime/turn-run.ts\n**Problem** - completion checks are spread.\n**Solution** - keep evidence contract at turn seam.\n**Benefits** - smaller test surface.",
+    "3. Tool adapter Module\n**Files** - src/runtime/tools.ts\n**Problem** - argument aliases leak to callers.\n**Solution** - normalize behind adapter seam.\n**Benefits** - higher leverage.",
+    "4. Prompt contract Module\n**Files** - src/runtime/prompt-v2.ts\n**Problem** - prompt requirements drift.\n**Solution** - central contract builder.\n**Benefits** - stronger locality.",
+    "5. OpenTUI shell Module\n**Files** - src/opentui/App.tsx\n**Problem** - rendering and input are coupled.\n**Solution** - split shell adapter seam.\n**Benefits** - better test leverage.",
+    "Which of these would you like to explore?",
+  ].join("\n");
+
+  const result = await executeProviderRequest(
+    {
+      session,
+      prompt: "Execute active skill improve-codebase-architecture now.",
+    },
+    {
+      exec: async (request) => {
+        prompts.push(request.prompt);
+        if (prompts.length === 1) {
+          return {
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            output: '<nexagent_tool_call>{"name":"todo","arguments":{"tasks":[{"content":"Explore seams","status":"in_progress"}]}}</nexagent_tool_call>',
+          };
+        }
+        if (prompts.length === 2) {
+          return {
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            output: "I can't actually execute workspace tools from this turn; all tool calls are currently failing to return results in this environment, so I still can't gather live repository evidence.",
+          };
+        }
+        if (prompts.length === 3) {
+          return {
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            output: '<nexagent_tool_call>{"name":"git_status","arguments":{}}</nexagent_tool_call>',
+          };
+        }
+        return {
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+          output: finalCandidates,
+        };
+      },
+      http: async () => {
+        throw new Error("http should not be used");
+      },
+      codexHttp: async () => {
+        throw new Error("codex-http should not be used");
+      },
+    },
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.ok ? result.output : "", finalCandidates);
+  assert.equal(prompts.length, 4);
+  assert.equal(
+    session.events.some((event) => event.kind === "tool" && event.summary === "tool todo completed"),
+    true,
+  );
+  assert.equal(
+    session.events.some((event) => event.kind === "control" && event.summary === "continuation nudge applied"),
+    true,
+  );
+  assert.equal(
+    session.events.some((event) => event.kind === "tool" && event.summary === "tool git_status completed"),
+    true,
+  );
+});
+
 test("executeProviderRequest requires active skill tool evidence instead of accepting started", async () => {
   const session = createSession();
   session.activeSkill = {
@@ -2147,7 +2880,9 @@ test("executeProviderRequest requires active skill tool evidence instead of acce
   assert.match(prompts[0] ?? "", /Execute ingest-docs workflow end-to-end/);
   assert.match(prompts[1] ?? "", /active skill is selected/i);
   assert.equal(
-    session.events.some((event) => event.kind === "control" && event.summary === "required active skill evidence nudge applied"),
+    session.events.some(
+      (event) => event.kind === "control" && event.summary === "required active skill evidence nudge applied",
+    ),
     true,
   );
   assert.deepEqual(result, {
@@ -3830,8 +4565,8 @@ test("resolveCodexAuthJson keeps valid token without refresh", async () => {
   assert.equal(writeCalled, false);
 });
 
-test("invokeCodexChatGptHttpTransport sends instructions separate from user input", async () => {
-  const requests: Array<{ input: unknown; instructions: unknown; previous_response_id: unknown }> = [];
+test("invokeCodexChatGptHttpTransport sends Codex-style responses body", async () => {
+  const requests: Array<Record<string, unknown>> = [];
   const now = Date.parse("2026-04-25T12:00:00.000Z");
   const validToken = createJwt({
     exp: Math.floor((now + 60 * 60_000) / 1000),
@@ -3860,11 +4595,7 @@ test("invokeCodexChatGptHttpTransport sends instructions separate from user inpu
       writeText: async () => undefined,
       fetchImpl: async (_input, init) => {
         const body = JSON.parse(String(init.body ?? "{}")) as Record<string, unknown>;
-        requests.push({
-          input: body.input,
-          instructions: body.instructions,
-          previous_response_id: body.previous_response_id,
-        });
+        requests.push(body);
         return new Response(JSON.stringify({ output_text: "ok" }), {
           status: 200,
           headers: { "Content-Type": "application/json" },
@@ -3876,11 +4607,373 @@ test("invokeCodexChatGptHttpTransport sends instructions separate from user inpu
 
   assert.equal(invocation.exitCode, 0);
   assert.equal(invocation.output, "ok");
-  assert.deepEqual(requests, [{
+  assert.deepEqual({
+    input: requests[0]?.input,
+    instructions: requests[0]?.instructions,
+    previous_response_id: requests[0]?.previous_response_id,
+    tools: requests[0]?.tools,
+    tool_choice: requests[0]?.tool_choice,
+    parallel_tool_calls: requests[0]?.parallel_tool_calls,
+    include: requests[0]?.include,
+    prompt_cache_key: requests[0]?.prompt_cache_key,
+    client_metadata: requests[0]?.client_metadata,
+  }, {
     input: [{ role: "user", content: "user says hi" }],
     instructions: "system assembled prompt",
+    tools: [],
+    tool_choice: "auto",
+    parallel_tool_calls: false,
+    include: ["reasoning.encrypted_content"],
+    prompt_cache_key: "session_test",
+    client_metadata: { "x-codex-installation-id": "session_test" },
     previous_response_id: undefined,
-  }]);
+  });
+});
+
+test("invokeCodexChatGptHttpTransport applies provider timeout and retry policy", async () => {
+  const now = Date.parse("2026-04-25T12:00:00.000Z");
+  const validToken = createJwt({
+    exp: Math.floor((now + 60 * 60_000) / 1000),
+    "https://api.openai.com/auth": {
+      chatgpt_account_id: "acct_live",
+    },
+  });
+  const session = createSession();
+  session.providerTransport.requestTimeoutMs = 1500;
+  session.providerTransport.maxRetries = 1;
+  const signals: Array<AbortSignal | null> = [];
+
+  const invocation = await invokeCodexChatGptHttpTransport(
+    {
+      session,
+      prompt: "retry once",
+      instructions: "system",
+    },
+    "gpt-5.4",
+    {
+      authJsonPath: "/tmp/auth.json",
+      readText: async () =>
+        JSON.stringify({
+          tokens: {
+            access_token: validToken,
+            refresh_token: "refresh_live",
+            account_id: "acct_live",
+          },
+        }),
+      writeText: async () => undefined,
+      fetchImpl: async (_input, init) => {
+        signals.push(init.signal ?? null);
+        if (signals.length === 1) {
+          return new Response("temporarily unavailable", { status: 503, statusText: "Unavailable" });
+        }
+        return new Response(JSON.stringify({ output_text: "ok" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      },
+      now: () => now,
+    },
+  );
+
+  assert.equal(invocation.exitCode, 0);
+  assert.equal(invocation.output, "ok");
+  assert.equal(signals.length, 2);
+  assert.ok(signals.every(Boolean));
+});
+
+test("invokeCodexChatGptHttpTransport retries once after empty streamed text", async () => {
+  const now = Date.parse("2026-04-25T12:00:00.000Z");
+  const validToken = createJwt({
+    exp: Math.floor((now + 60 * 60_000) / 1000),
+    "https://api.openai.com/auth": {
+      chatgpt_account_id: "acct_live",
+    },
+  });
+  let calls = 0;
+  const requestBodies: Array<Record<string, unknown>> = [];
+
+  const invocation = await invokeCodexChatGptHttpTransport(
+    {
+      session: createSession("codex", "codexspark"),
+      prompt: "recover empty spark",
+      instructions: "system assembled prompt",
+    },
+    "gpt-5.3-codex-spark",
+    {
+      authJsonPath: "/tmp/auth.json",
+      readText: async () =>
+        JSON.stringify({
+          tokens: {
+            access_token: validToken,
+            refresh_token: "refresh_live",
+            account_id: "acct_live",
+          },
+        }),
+      writeText: async () => undefined,
+      fetchImpl: async (_input, init) => {
+        calls += 1;
+        requestBodies.push(JSON.parse(String(init.body ?? "{}")) as Record<string, unknown>);
+        if (calls === 1) {
+          return new Response([
+            "event: response.created",
+            "data: {\"type\":\"response.created\",\"response\":{\"status\":\"in_progress\"}}",
+            "",
+            "event: response.completed",
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[]}}",
+            "",
+          ].join("\n"), {
+            status: 200,
+            headers: { "Content-Type": "text/event-stream" },
+          });
+        }
+        return new Response([
+          "event: response.output_text.done",
+          "data: {\"type\":\"response.output_text.done\",\"text\":\"retry text\"}",
+          "",
+        ].join("\n"), {
+          status: 200,
+          headers: { "Content-Type": "text/event-stream" },
+        });
+      },
+      now: () => now,
+    },
+  );
+
+  assert.equal(invocation.exitCode, 0);
+  assert.equal(invocation.output, "retry text");
+  assert.equal(calls, 2);
+  assert.match(String(requestBodies[1]?.instructions ?? ""), /Return a non-empty assistant message/);
+  assert.equal(requestBodies[1]?.previous_response_id, undefined);
+});
+
+test("invokeCodexChatGptHttpTransport reports empty streamed response shape", async () => {
+  const now = Date.parse("2026-04-25T12:00:00.000Z");
+  const validToken = createJwt({
+    exp: Math.floor((now + 60 * 60_000) / 1000),
+    "https://api.openai.com/auth": {
+      chatgpt_account_id: "acct_live",
+    },
+  });
+
+  const invocation = await invokeCodexChatGptHttpTransport(
+    {
+      session: createSession("codex", "codexspark"),
+      prompt: "still empty spark",
+      instructions: "system assembled prompt",
+    },
+    "gpt-5.3-codex-spark",
+    {
+      authJsonPath: "/tmp/auth.json",
+      readText: async () =>
+        JSON.stringify({
+          tokens: {
+            access_token: validToken,
+            refresh_token: "refresh_live",
+            account_id: "acct_live",
+          },
+        }),
+      writeText: async () => undefined,
+      fetchImpl: async () => new Response([
+        "event: response.output_item.done",
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\"}}",
+        "",
+        "event: response.completed",
+        "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[]}}",
+        "",
+      ].join("\n"), {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      }),
+      now: () => now,
+    },
+  );
+
+  assert.equal(invocation.exitCode, 1);
+  assert.match(invocation.stderr, /codex-http returned empty assistant text/);
+  assert.match(invocation.stderr, /response\.output_item\.done \[item:reasoning\]/);
+  assert.match(invocation.stderr, /response\.completed \[status:completed\]/);
+});
+
+test("invokeCodexChatGptHttpTransport coerces Spark reasoning to high", async () => {
+  const now = Date.parse("2026-04-25T12:00:00.000Z");
+  const validToken = createJwt({
+    exp: Math.floor((now + 60 * 60_000) / 1000),
+    "https://api.openai.com/auth": {
+      chatgpt_account_id: "acct_live",
+    },
+  });
+  const session = createSession("codex", "codexspark");
+  session.providerRouting.modelSelection.configuredReasoningEfforts = { codex: "medium" };
+  let requestBody: Record<string, unknown> = {};
+
+  const invocation = await invokeCodexChatGptHttpTransport(
+    {
+      session,
+      prompt: "diagnose spark",
+      instructions: "system assembled prompt",
+    },
+    "gpt-5.3-codex-spark",
+    {
+      authJsonPath: "/tmp/auth.json",
+      readText: async () =>
+        JSON.stringify({
+          tokens: {
+            access_token: validToken,
+            refresh_token: "refresh_live",
+            account_id: "acct_live",
+          },
+        }),
+      writeText: async () => undefined,
+      fetchImpl: async (_input, init) => {
+        requestBody = JSON.parse(String(init.body ?? "{}")) as Record<string, unknown>;
+        return new Response(JSON.stringify({ output_text: "spark ok" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      },
+      now: () => now,
+    },
+  );
+
+  assert.equal(invocation.exitCode, 0);
+  assert.equal(invocation.output, "spark ok");
+  assert.deepEqual(requestBody.reasoning, { effort: "high" });
+  assert.deepEqual(requestBody.include, ["reasoning.encrypted_content"]);
+});
+
+test("invokeCodexChatGptHttpTransport reads completed stream payload text", async () => {
+  const now = Date.parse("2026-04-25T12:00:00.000Z");
+  const validToken = createJwt({
+    exp: Math.floor((now + 60 * 60_000) / 1000),
+    "https://api.openai.com/auth": {
+      chatgpt_account_id: "acct_live",
+    },
+  });
+
+  const invocation = await invokeCodexChatGptHttpTransport(
+    {
+      session: createSession("codex", "codexspark"),
+      prompt: "diagnose spark",
+      instructions: "system assembled prompt",
+    },
+    "gpt-5.3-codex-spark",
+    {
+      authJsonPath: "/tmp/auth.json",
+      readText: async () =>
+        JSON.stringify({
+          tokens: {
+            access_token: validToken,
+            refresh_token: "refresh_live",
+            account_id: "acct_live",
+          },
+        }),
+      writeText: async () => undefined,
+      fetchImpl: async () => new Response([
+        "event: response.created",
+        "data: {\"type\":\"response.created\"}",
+        "",
+        "event: response.completed",
+        "data: {\"response\":{\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"spark works\"}]}]}}",
+        "",
+      ].join("\n"), {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      }),
+      now: () => now,
+    },
+  );
+
+  assert.equal(invocation.exitCode, 0);
+  assert.equal(invocation.output, "spark works");
+});
+
+test("invokeCodexChatGptHttpTransport reads output item stream text", async () => {
+  const now = Date.parse("2026-04-25T12:00:00.000Z");
+  const validToken = createJwt({
+    exp: Math.floor((now + 60 * 60_000) / 1000),
+    "https://api.openai.com/auth": {
+      chatgpt_account_id: "acct_live",
+    },
+  });
+
+  const invocation = await invokeCodexChatGptHttpTransport(
+    {
+      session: createSession("codex", "codexspark"),
+      prompt: "diagnose spark",
+      instructions: "system assembled prompt",
+    },
+    "gpt-5.3-codex-spark",
+    {
+      authJsonPath: "/tmp/auth.json",
+      readText: async () =>
+        JSON.stringify({
+          tokens: {
+            access_token: validToken,
+            refresh_token: "refresh_live",
+            account_id: "acct_live",
+          },
+        }),
+      writeText: async () => undefined,
+      fetchImpl: async () => new Response([
+        "event: response.output_item.done",
+        "data: {\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"item text\"}]}}",
+        "",
+      ].join("\n"), {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      }),
+      now: () => now,
+    },
+  );
+
+  assert.equal(invocation.exitCode, 0);
+  assert.equal(invocation.output, "item text");
+});
+
+test("invokeCodexChatGptHttpTransport reads stream event type from data payload", async () => {
+  const now = Date.parse("2026-04-25T12:00:00.000Z");
+  const validToken = createJwt({
+    exp: Math.floor((now + 60 * 60_000) / 1000),
+    "https://api.openai.com/auth": {
+      chatgpt_account_id: "acct_live",
+    },
+  });
+
+  const invocation = await invokeCodexChatGptHttpTransport(
+    {
+      session: createSession("codex", "codexspark"),
+      prompt: "diagnose spark",
+      instructions: "system assembled prompt",
+    },
+    "gpt-5.3-codex-spark",
+    {
+      authJsonPath: "/tmp/auth.json",
+      readText: async () =>
+        JSON.stringify({
+          tokens: {
+            access_token: validToken,
+            refresh_token: "refresh_live",
+            account_id: "acct_live",
+          },
+        }),
+      writeText: async () => undefined,
+      fetchImpl: async () => new Response([
+        "event: message",
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"typed event text\"}]}}",
+        "",
+        "event: message",
+        "data: {\"type\":\"response.done\",\"response\":{\"output\":[]}}",
+        "",
+      ].join("\n"), {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      }),
+      now: () => now,
+    },
+  );
+
+  assert.equal(invocation.exitCode, 0);
+  assert.equal(invocation.output, "typed event text");
 });
 
 function createJwt(payload: Record<string, unknown>): string {

@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import {
@@ -90,12 +93,37 @@ test("buildPromptV2 emits stable section snapshot for default codex cli prompt",
       ["provider_guidance", "stable", "provider"],
       ["repo_context", "dynamic", "repo"],
       ["runtime_state", "dynamic", "runtime"],
+      ["task_tool_guidance", "dynamic", "runtime"],
       ["current_invocation", "dynamic", "conversation"],
     ],
   );
   assert.match(prompt.prompt, /Transport: Codex CLI \(codex-cli-exec\); auth=ready\./);
   assert.match(prompt.prompt, /Text tool-call transport: there is no separate function-call UI/);
   assert.match(prompt.prompt, /<nexagent_tool_call>\{"name":"read_file","arguments":\{"path":"README\.md"\}\}<\/nexagent_tool_call>/);
+});
+
+test("buildPromptV2 adds task-specific tool guidance for broad repo work and verification", () => {
+  const prompt = buildPromptV2({
+    session: createInstructionContext(),
+    prompt: "Investigate provider failure across the codebase and verify with tests.",
+  });
+
+  assert.match(prompt.prompt, /## Task Tool Guidance/);
+  assert.match(prompt.prompt, /Broad repo\/codebase work/);
+  assert.match(prompt.prompt, /one nexsight_gather or nexsight_execute/);
+  assert.match(prompt.prompt, /Runtime\/provider debugging/);
+  assert.match(prompt.prompt, /Verification claims require shell_command evidence/);
+  assert.match(prompt.prompt, /Recovery: if a tool is rejected or noisy/);
+});
+
+test("buildPromptV2 adds exact file guidance for source and markdown reads", () => {
+  const prompt = buildPromptV2({
+    session: createInstructionContext(),
+    prompt: "Read AGENTS.md and src/runtime/tools.ts, then summarize what tools to use.",
+  });
+
+  assert.match(prompt.prompt, /Exact file work: use read_file/);
+  assert.match(prompt.prompt, /Instruction\/source reading/);
 });
 
 test("buildPromptV2 tells models to infer test targets from repo evidence", () => {
@@ -250,6 +278,30 @@ test("buildPromptV2 snapshots archivist and active skill conversation context", 
   assert.match(prompt.prompt, /Args: \(none\)/);
   assert.match(prompt.prompt, /Do not only say activated, started, ready/);
   assert.match(prompt.prompt, /Advance to next GSD step\./);
+});
+
+test("buildPromptV2 hydrates active skill absolute file references", () => {
+  const cwd = mkdtempSync(path.join(tmpdir(), "nexagent-prompt-skill-ref-"));
+  try {
+    const workflowPath = path.join(cwd, "workflow.md");
+    writeFileSync(workflowPath, "Read project stats and report them.", "utf8");
+    const session = createInstructionContext();
+    session.activeSkill = {
+      name: "stats",
+      source: "repo",
+      path: path.join(cwd, "SKILL.md"),
+      args: "",
+      content: `<execution_context>\n@${workflowPath}\n</execution_context>`,
+    };
+
+    const prompt = buildPromptV2({ session, prompt: "execute active skill stats now" });
+
+    assert.match(prompt.prompt, /Required: make at least one valid nexagent tool call/);
+    assert.match(prompt.prompt, /Referenced skill files:/);
+    assert.match(prompt.prompt, /Read project stats and report them\./);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
 });
 
 test("buildPromptV2 switches provider guidance by transport", () => {

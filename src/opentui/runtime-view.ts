@@ -74,7 +74,11 @@ export interface OpenTuiLspProblemsView {
 }
 
 export interface OpenTuiStatuslineView {
+  provider: string;
   model: string;
+  effort: string;
+  transportMode: string;
+  approval: string;
   branch: string;
   repoName: string;
   sessionAge: string;
@@ -85,6 +89,10 @@ export interface OpenTuiStatuslineView {
   contextPercent: number;
   lastInputTokens: number;
   lastOutputTokens: number;
+  currentTurnToolCount: number;
+  currentTurnFailureCount: number;
+  activeTool: string | null;
+  warningCount: number;
 }
 
 export interface OpenTuiRuntimeView {
@@ -136,7 +144,7 @@ export function createOpenTuiRuntimeView(session: RuntimeSession): OpenTuiRuntim
   const transcriptBlocks = createTranscriptBlocks(session);
   const traceBlocks = createTraceBlocks(session);
   const cockpit = createCockpitView(session, approval);
-  const statusline = createStatuslineView(session, model);
+  const statusline = createStatuslineView(session, provider, model, approval);
   const logo = createLogoView(session, provider, model);
   return {
     product: session.product,
@@ -626,7 +634,7 @@ function formatCompactTraceEventLines(events: RuntimeSession["events"]): string[
   return lines;
 }
 
-function createStatuslineView(session: RuntimeSession, model: string): OpenTuiStatuslineView {
+function createStatuslineView(session: RuntimeSession, provider: string, model: string, approval: string): OpenTuiStatuslineView {
   const contextWindow = getCodexModelDefinition(model)?.contextWindow ?? 128000;
   const remainingContext = getRemainingContextTokens(session);
   const contextUsed = Math.max(0, contextWindow - remainingContext);
@@ -634,8 +642,18 @@ function createStatuslineView(session: RuntimeSession, model: string): OpenTuiSt
   const memoryTotalBytes = totalmem();
   const memoryUsedBytes = Math.max(0, memoryTotalBytes - freemem());
   const turnMetrics = collectCurrentTurnTokenMetrics(session);
+  const turnEvents = getCurrentTurnEvents(session);
+  const toolEvents = turnEvents.filter((event) => event.kind === "tool");
+  const latestTool = toolEvents.at(-1) ?? null;
+  const activeTool = latestTool && (latestTool.status === "started" || latestTool.status === "queued") ? latestTool : null;
+  const configuredEffort = session.providerRouting.modelSelection.configuredReasoningEfforts?.[provider];
+  const defaultEffort = getCodexModelDefinition(model)?.defaultReasoningEffort ?? null;
   return {
+    provider,
     model,
+    effort: configuredEffort ?? defaultEffort ?? "default",
+    transportMode: session.providerTransport.mode,
+    approval,
     branch: session.repo.branch ?? "detached",
     repoName: session.repo.name,
     sessionAge: formatSessionAge(session),
@@ -646,18 +664,26 @@ function createStatuslineView(session: RuntimeSession, model: string): OpenTuiSt
     contextPercent,
     lastInputTokens: turnMetrics.inputTokens || session.telemetry.lastInputTokens,
     lastOutputTokens: turnMetrics.outputTokens || session.telemetry.lastOutputTokens,
+    currentTurnToolCount: toolEvents.length,
+    currentTurnFailureCount: turnEvents.filter((event) => event.status === "failed" || event.status === "blocked").length,
+    activeTool: activeTool ? firstLine(activeTool.summary).replace(/^tool\s+/i, "").replace(/\s+(started|queued)$/i, "") : null,
+    warningCount: createCockpitWarnings(session).length,
   };
 }
 
 function collectCurrentTurnTokenMetrics(session: RuntimeSession): { inputTokens: number; outputTokens: number } {
-  const promptIndex = [...session.events].map((event) => event.kind).lastIndexOf("prompt");
-  const events = promptIndex >= 0 ? session.events.slice(promptIndex) : session.events;
+  const events = getCurrentTurnEvents(session);
   return events.reduce((metrics, event) => {
     const detail = event.detail ?? "";
     metrics.inputTokens += readMetricTokenCount(detail, "turn_in") || readMetricTokenCount(detail, "in");
     metrics.outputTokens += readMetricTokenCount(detail, "turn_out") || readMetricTokenCount(detail, "out");
     return metrics;
   }, { inputTokens: 0, outputTokens: 0 });
+}
+
+function getCurrentTurnEvents(session: RuntimeSession): RuntimeSession["events"] {
+  const promptIndex = [...session.events].map((event) => event.kind).lastIndexOf("prompt");
+  return promptIndex >= 0 ? session.events.slice(promptIndex) : session.events;
 }
 
 function readMetricTokenCount(detail: string, key: "in" | "out" | "turn_in" | "turn_out"): number {

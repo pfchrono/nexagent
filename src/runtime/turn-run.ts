@@ -5,11 +5,16 @@ import type { RuntimeSession } from "./session.js";
 import { recordRuntimeEvent, setRuntimeAction } from "./session.js";
 
 export type TurnRunState = "initializing" | "provider_loop" | "finalizing" | "completed" | "blocked";
-export type MissingTurnEvidence = "write" | "Nexsight" | "active skill" | "todo" | "ask user" | "test";
+export type MissingTurnEvidence = "write" | "Nexsight" | "active skill" | "active skill output" | "todo" | "ask user" | "test";
 
 export interface TurnRunContext {
   session: RuntimeSession;
   prompt: string;
+}
+
+export interface ProviderTurnLifecycle {
+  provider: string;
+  transportMode: string;
 }
 
 export interface TurnRunTransition {
@@ -72,6 +77,9 @@ export class TurnRun {
     if (missingRequired) {
       return missingRequired;
     }
+    if (this.obligations.requiresActiveSkillEvidence && evidence.hasAnyToolEvidence && hasIncompleteActiveSkillOutput(this.context.session, output)) {
+      return "active skill output";
+    }
     if (claimsNexsightWork(output) && !evidence.hasNexsightEvidence) {
       return "Nexsight";
     }
@@ -108,6 +116,18 @@ export class TurnRun {
   async runProviderLoop(executor: () => Promise<ProviderResult>): Promise<ProviderResult> {
     this.transition("provider_loop", "TurnRun owned provider/tool loop started");
     return executor();
+  }
+
+  onProviderTurnStarted(lifecycle: ProviderTurnLifecycle): number {
+    return recordProviderTurnStarted(this.context.session, lifecycle);
+  }
+
+  onProviderTurnCompleted(lifecycle: ProviderTurnLifecycle, outputChars: number, flags: ProviderTurnDetailFlags = {}): void {
+    recordProviderTurnCompleted(this.context.session, lifecycle, outputChars, flags);
+  }
+
+  onProviderTurnFailed(lifecycle: ProviderTurnLifecycle, detail: string): void {
+    recordProviderTurnFailed(this.context.session, lifecycle, detail);
   }
 
   async runToolLoop<T>(
@@ -185,6 +205,98 @@ export class TurnRun {
     });
     return result;
   }
+}
+
+export type ProviderTurnDetailFlags = Record<string, string | number | boolean>;
+
+export function recordProviderTurnStarted(session: RuntimeSession, lifecycle: ProviderTurnLifecycle): number {
+  const eventStart = session.events.length;
+  recordRuntimeEvent(session, {
+    kind: "provider",
+    status: "started",
+    summary: `${lifecycle.provider} turn started`,
+    detail: `transport=${lifecycle.transportMode}`,
+  });
+  return eventStart;
+}
+
+export function recordProviderTurnCompleted(
+  session: RuntimeSession,
+  lifecycle: ProviderTurnLifecycle,
+  outputChars: number,
+  flags: ProviderTurnDetailFlags = {},
+): void {
+  const flagDetail = Object.entries(flags)
+    .filter(([, value]) => value !== false && value !== null && value !== undefined)
+    .map(([key, value]) => `${key}=${String(value)}`);
+  recordRuntimeEvent(session, {
+    kind: "provider",
+    status: "completed",
+    summary: `${lifecycle.provider} turn completed`,
+    detail: [
+      `transport=${lifecycle.transportMode}`,
+      `output_chars=${String(outputChars)}`,
+      ...flagDetail,
+    ].join("; "),
+  });
+}
+
+export function recordProviderTurnFailed(session: RuntimeSession, lifecycle: ProviderTurnLifecycle, detail: string): void {
+  recordRuntimeEvent(session, {
+    kind: "provider",
+    status: "failed",
+    summary: `${lifecycle.provider} turn failed`,
+    detail,
+  });
+}
+
+function hasIncompleteActiveSkillOutput(session: RuntimeSession, output: string): boolean {
+  if (session.activeSkill?.name !== "improve-codebase-architecture") {
+    return false;
+  }
+  if (/\b(?:blocked|blocker|can't|cannot|unable|no safe path)\b/i.test(output)) {
+    return false;
+  }
+  const candidateCount = countArchitectureCandidateHeadings(output);
+  if (candidateCount < 5) {
+    return true;
+  }
+  return !hasArchitectureFileEvidence(output)
+    || !/\bProblem\b/i.test(output)
+    || !/\bSolution\b/i.test(output)
+    || !/\bBenefits\b/i.test(output)
+    || !hasArchitectureSelectionPrompt(output);
+}
+
+function countArchitectureCandidateHeadings(output: string): number {
+  const seen = new Set<number>();
+  for (const match of output.matchAll(/^\s*(\d{1,2})[\.)]\s+\S/gm)) {
+    const value = Number.parseInt(match[1] ?? "", 10);
+    if (Number.isFinite(value)) {
+      seen.add(value);
+    }
+  }
+  return seen.size;
+}
+
+function hasArchitectureFileEvidence(output: string): boolean {
+  if (/\bFiles\b/i.test(output)) {
+    return true;
+  }
+  const paths = new Set<string>();
+  for (const match of output.matchAll(/(?:^|[`'"\s(])((?:src|test|scripts|docs|proto)\/[A-Za-z0-9_.\/-]+)/g)) {
+    const filePath = match[1]?.replace(/[.,;:)`'"]+$/, "");
+    if (filePath) {
+      paths.add(filePath);
+    }
+  }
+  return paths.size >= 3;
+}
+
+function hasArchitectureSelectionPrompt(output: string): boolean {
+  return /Which of these would you like to explore\?/i.test(output)
+    || /\bWhich\b[\s\S]{0,80}\bexplore\?/i.test(output)
+    || /\bpick (?:one|a candidate|which)\b/i.test(output);
 }
 
 function hasDiscussionDecisionEvidence(output: string, evidence: TurnEvidenceSummary): boolean {
