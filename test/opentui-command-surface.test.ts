@@ -27,6 +27,7 @@ test("OpenTUI command surface lists global command palette rows", () => {
   assert.ok(surface.rows.some((row) => row.label === "LSP status" && row.value === "/lsp status"));
   assert.ok(surface.rows.some((row) => row.label === "$alpha" && row.value === "/skill alpha"));
   assert.ok(surface.rows.some((row) => row.label === "/status"));
+  assert.ok(surface.rows.every((row) => row.source));
 });
 
 test("OpenTUI global command palette searches actions commands models and efforts", () => {
