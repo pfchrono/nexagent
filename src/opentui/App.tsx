@@ -2297,7 +2297,7 @@ function renderConfigPanelRows(view: OpenTuiRuntimeView, width: number, selected
   const innerWidth = Math.max(20, width - 4);
   const rows: ConfigPanelRow[] = [
     { key: "config-top", text: frameTop(" dashboard ", innerWidth), fg: "#f9e2af" },
-    { key: "config-subtitle", text: frameBody("provider · model · tools · approvals · sessions · MCP · LSP · memory · context", innerWidth), fg: "#a6adc8" },
+    { key: "config-subtitle", text: frameBody("provider · model · tools · approvals · sessions · extensions · MCP · LSP · memory · context", innerWidth), fg: "#a6adc8" },
     { key: "config-help", text: frameBody("↑/↓ select · Enter run · click select · Esc close", innerWidth), fg: "#a6adc8" },
   ];
   for (const section of view.configSections) {
@@ -2352,6 +2352,9 @@ function configActionForRow(section: string, line: string): string | null {
   }
   if (section === "sessions") {
     return normalized.startsWith("open ") ? "/sessions timeline" : "/sessions";
+  }
+  if (section === "extensions") {
+    return "/extensions";
   }
   if (section === "ui") {
     if (normalized.startsWith("logo ")) {

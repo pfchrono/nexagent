@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { createRuntimeExtensionArgs, createRuntimeExtensionContext, emitRuntimeExtensionEvent, loadRuntimeExtensions } from "../src/runtime/extensions.js";
+import { createRuntimeExtensionArgs, createRuntimeExtensionContext, emitRuntimeExtensionEvent, formatRuntimeExtensionsStatus, loadRuntimeExtensions } from "../src/runtime/extensions.js";
 import type { RuntimeSession } from "../src/runtime/session.js";
 
 test("loadRuntimeExtensions loads Pi-like local extension module", async () => {
@@ -38,9 +38,12 @@ test("loadRuntimeExtensions loads Pi-like local extension module", async () => {
     assert.equal(host.shortcuts.has("ctrl+x"), true);
     assert.equal(host.tools.has("sample_tool"), true);
     assert.match(host.notifications.join("\n"), /ignored unsupported extension API pi\.registerMysteryApi/);
+    assert.match(host.activity.map((entry) => `${entry.status} ${entry.event}: ${entry.summary}`).join("\n"), /registered agent_start: handler 1/);
+    assert.match(host.activity.map((entry) => `${entry.status} ${entry.event}: ${entry.summary}`).join("\n"), /registered command: \/sample-ext/);
 
     await emitRuntimeExtensionEvent(session, "agent_start");
     assert.deepEqual(host.notifications.slice(-1), ["info: started"]);
+    assert.match(formatRuntimeExtensionsStatus(session).replace(/\d{4}-[^ ]+/g, "<time>"), /recent:\n(?:  .+\n)*  <time> completed agent_start: handler completed/);
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }
@@ -81,6 +84,7 @@ test("extension shim supports Pi args, getCommand, session branch, and shortcut 
     assert.equal(host.commands.has("/speedread"), true);
     assert.equal(host.shortcuts.has("alt+r"), true);
     assert.match(host.notifications.join("\n"), /remapped extension shortcut ctrl\+r to alt\+r/);
+    assert.match(host.activity.map((entry) => `${entry.status} ${entry.event}: ${entry.summary}`).join("\n"), /warning shortcut: remapped ctrl\+r to alt\+r/);
     const output = await host.commands.get("/speedread")?.handler(createRuntimeExtensionArgs(["hello", "world"]), createRuntimeExtensionContext(session));
     assert.equal(output, "hello world|hello,world|answer text");
   } finally {
@@ -116,6 +120,7 @@ test("loadRuntimeExtensions adapts legacy hook object exports", async () => {
     assert.equal(host.handlers.has("before_tool_execution"), true);
     const results = await emitRuntimeExtensionEvent(session, "before_tool_execution", { tool: "shell_command" });
     assert.deepEqual(results, [false]);
+    assert.match(host.activity.map((entry) => `${entry.status} ${entry.event}: ${entry.summary}`).join("\n"), /completed before_tool_execution: handler completed/);
     await emitRuntimeExtensionEvent(session, "agent_start");
     assert.deepEqual(host.notifications.slice(-1), ["info: legacy start"]);
   } finally {

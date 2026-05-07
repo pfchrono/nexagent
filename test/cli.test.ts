@@ -1218,6 +1218,14 @@ test("runRuntimeCommand dispatches sync extension commands", async () => {
     name: "/hello-ext",
     handler: (args) => `hello ${args.join(" ")}`,
   });
+  host.activity.push({
+    at: "2026-05-07T10:00:00.000Z",
+    event: "command",
+    status: "registered",
+    summary: "/hello-ext",
+    source: "/repo/.nexagent/extensions/hello.js",
+  });
+  host.notifications.push("info: hello ready");
   session.extensions = host;
 
   const result = runRuntimeCommand(session, "/hello-ext from shim");
@@ -1226,7 +1234,10 @@ test("runRuntimeCommand dispatches sync extension commands", async () => {
     output: "hello from shim",
     activity: "extension /hello-ext",
   });
-  assert.match(runRuntimeCommand(session, "/extensions")?.output ?? "", /commands: 1/);
+  const extensions = runRuntimeCommand(session, "/extensions")?.output ?? "";
+  assert.match(extensions, /commands: 1/);
+  assert.match(extensions, /notifications: info: hello ready/);
+  assert.match(extensions, /registered command: \/hello-ext/);
 });
 
 test("runRuntimeCommand exposes extension tools in tool policy", async () => {

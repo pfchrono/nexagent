@@ -39,7 +39,7 @@ Canonical guidance for coding agents working in `nexagent`.
 - slash commands including `/status`, `/status --sentry`, `/usage`, `/keys`, `/todos`, `/goal`, `/btw`, `/agents`, `/notify`, `/emoji`, `/color`, `/safegit`, `/scip`, `/extensions`, `/nexsight`, `/provider`, `/model`, `/effort`, `/tools`, `/memory`, `/memory --maintenance`, `/config`, `/lsp`, `/skill`, `/boomerang`, `/attach`, `/detach`, `/mouse`, `/approval`, `/compact`, `/diff`, `/rg`
 - `$skill` shorthand routed into `/skill`
 - guarded `!<command>` shell transcript command
-- Pi-like runtime extension lifecycle shim with startup discovery from `.nexagent/extensions`, `.pi/extensions`, global `~/.nexagent/extensions`, and `~/.pi/agent/extensions`; supports `on(...)`, sync slash command registration, tool registration metadata, and lifecycle events
+- Pi-like runtime extension lifecycle shim with startup discovery from `.nexagent/extensions`, `.pi/extensions`, global `~/.nexagent/extensions`, and `~/.pi/agent/extensions`; supports `on(...)`, sync slash command registration, tool registration metadata, visible lifecycle activity, and lifecycle events
 - `--yolo` session mode that bypasses guarded approvals while preserving protected OS-root shell/tool blocks
 - provider-gated multi-image attachment flow for HTTP transports, with `Alt+V` clipboard image paste and `/attach` path attach
 - startup MCP hydration from `.nexagent/mcp.json` and global `~/.nexagent/mcp.json`, with legacy `.mcp.json` migration compatibility, deduped server names, and bounded startup timeouts

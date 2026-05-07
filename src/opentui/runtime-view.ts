@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { freemem, totalmem } from "node:os";
 
 import { getCodexModelDefinition } from "../models.js";
+import { createRuntimeExtensionSummary, formatRuntimeExtensionActivity } from "../runtime/extensions.js";
 import { detectKeybindingConflicts } from "../runtime/keybindings.js";
 import { getLspStatus } from "../runtime/lsp.js";
 import { deriveTurnCompletionState, getRemainingContextTokens, type RuntimeSession } from "../runtime/session.js";
@@ -83,6 +84,10 @@ export interface OpenTuiLspProblemsView {
   rows: string[];
 }
 
+export interface OpenTuiExtensionEventsView {
+  rows: string[];
+}
+
 export interface OpenTuiSessionTimelineView {
   rows: string[];
 }
@@ -139,6 +144,7 @@ export interface OpenTuiRuntimeView {
   traceBlocks: OpenTuiTranscriptBlock[];
   cockpit: OpenTuiCockpitView;
   configSections: OpenTuiConfigSectionView[];
+  extensionEvents: OpenTuiExtensionEventsView;
   lspProblems: OpenTuiLspProblemsView;
   sessionTimeline: OpenTuiSessionTimelineView;
   logo: OpenTuiLogoView;
@@ -191,10 +197,28 @@ export function createOpenTuiRuntimeView(session: RuntimeSession): OpenTuiRuntim
     traceBlocks,
     cockpit,
     configSections: createConfigSections(session, statusline, approval),
+    extensionEvents: createExtensionEventsView(session),
     lspProblems: createLspProblemsView(session),
     sessionTimeline: createSessionTimelineView(session),
     logo,
     statusline,
+  };
+}
+
+function createExtensionEventsView(session: RuntimeSession): OpenTuiExtensionEventsView {
+  const summary = createRuntimeExtensionSummary(session.extensions);
+  const recent = formatRuntimeExtensionActivity(summary.activity).map((row) => row.trim());
+  return {
+    rows: [
+      `status ${summary.status}`,
+      `sources ${summary.sources.length > 0 ? summary.sources.length.toString() : "0"}`,
+      `events ${summary.events.length > 0 ? summary.events.join(",") : "none"}`,
+      `commands ${String(summary.commandCount)}`,
+      `tools ${String(summary.toolCount)}`,
+      `invalid ${summary.invalidEntries.length > 0 ? summary.invalidEntries.slice(-2).join(" | ") : "none"}`,
+      `notifications ${summary.notifications.slice(-2).join(" | ") || "none"}`,
+      ...recent.slice(-4).map((line) => `recent ${line}`),
+    ],
   };
 }
 
@@ -350,6 +374,10 @@ function createConfigSections(session: RuntimeSession, statusline: OpenTuiStatus
     {
       title: "sessions",
       rows: createSessionTimelineView(session).rows,
+    },
+    {
+      title: "extensions",
+      rows: createExtensionEventsView(session).rows,
     },
     {
       title: "mcp",
@@ -906,6 +934,15 @@ function createCockpitWarnings(session: RuntimeSession): OpenTuiCockpitWarningRo
       type: "mcp",
       message: `MCP failed: ${failedMcpServers.map((status) => status.name).join(", ")}`,
       action: "/config or /status --sentry",
+    });
+  }
+  const extensionInvalid = session.extensions?.invalidEntries ?? [];
+  if (extensionInvalid.length > 0) {
+    warnings.push({
+      severity: "warning",
+      type: "extensions",
+      message: `extension issue: ${firstLine(extensionInvalid.at(-1) ?? "invalid extension")}`,
+      action: "/extensions",
     });
   }
   if (session.operationControls.steerMessage) {

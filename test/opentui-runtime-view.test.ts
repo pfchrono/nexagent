@@ -6,6 +6,7 @@ import { test } from "bun:test";
 
 import { createLocalOutputBlock, createOpenTuiRuntimeView } from "../src/opentui/runtime-view.js";
 import { createDefaultProviderRegistry } from "../src/provider/registry.js";
+import { createRuntimeExtensionHost } from "../src/runtime/extensions.js";
 import { touchLspFileSync } from "../src/runtime/lsp.js";
 import type { RuntimeSession } from "../src/runtime/session.js";
 
@@ -103,6 +104,10 @@ test("createOpenTuiRuntimeView maps runtime session without mutation", () => {
         rows: ["current session_test", "status ready", "entries 0", "latest none", "open /sessions timeline"],
       },
       {
+        title: "extensions",
+        rows: ["status none", "sources 0", "events none", "commands 0", "tools 0", "invalid none", "notifications none", "recent none"],
+      },
+      {
       title: "mcp",
       rows: ["configured 0", "hydrated 0/0", "tools 0", "failed none"],
     },
@@ -129,6 +134,9 @@ test("createOpenTuiRuntimeView maps runtime session without mutation", () => {
       lastTouched: null,
       source: "disabled",
       rows: [],
+    },
+    extensionEvents: {
+      rows: ["status none", "sources 0", "events none", "commands 0", "tools 0", "invalid none", "notifications none", "recent none"],
     },
     sessionTimeline: {
       rows: [
@@ -192,7 +200,7 @@ test("createOpenTuiRuntimeView maps config sections and logo modes", () => {
   assert.equal(view.logo.mode, "condensed");
   assert.match(view.logo.frames[0] ?? "", /nexagent/);
   assert.match(view.logo.metadata, /cfg:condensed/);
-  assert.deepEqual(view.configSections.map((section) => section.title), ["provider", "model", "approval", "ui", "memory", "sessions", "mcp", "tools", "lsp", "context", "diagnostics"]);
+  assert.deepEqual(view.configSections.map((section) => section.title), ["provider", "model", "approval", "ui", "memory", "sessions", "extensions", "mcp", "tools", "lsp", "context", "diagnostics"]);
   const lspRows = view.configSections.find((section) => section.title === "lsp")?.rows ?? [];
   assert.match(lspRows.join("\n"), /^status (ready|fallback)$/m);
   assert.deepEqual(lspRows.slice(1, 4), [
@@ -206,8 +214,41 @@ test("createOpenTuiRuntimeView maps config sections and logo modes", () => {
   assert.match(lspRows.join("\n"), /^indexArchivist on$/m);
   assert.match(view.configSections.find((section) => section.title === "memory")?.rows.join("\n") ?? "", /failure-playbook/);
   assert.match(view.configSections.find((section) => section.title === "sessions")?.rows.join("\n") ?? "", /^open \/sessions timeline$/m);
+  assert.match(view.configSections.find((section) => section.title === "extensions")?.rows.join("\n") ?? "", /^recent none$/m);
   assert.match(view.configSections.find((section) => section.title === "context")?.rows.join("\n") ?? "", /^percent 0$/m);
   assert.match(view.configSections.find((section) => section.title === "tools")?.rows.join("\n") ?? "", /^mode repo-local-guarded$/m);
+});
+
+test("createOpenTuiRuntimeView exposes extension event activity and failures", () => {
+  const session = createSession();
+  const host = createRuntimeExtensionHost();
+  host.status = "configured";
+  host.sourcePaths.push("/repo/.nexagent/extensions/sample.js");
+  host.handlers.set("before_tool_execution", [() => undefined]);
+  host.commands.set("/sample-ext", { name: "/sample-ext", handler: () => "ok" });
+  host.tools.set("sample_tool", { name: "sample_tool" });
+  host.invalidEntries.push("before_tool_execution: denied");
+  host.notifications.push("warn: extension notice");
+  host.activity.push({
+    at: "2026-05-07T10:00:00.000Z",
+    event: "before_tool_execution",
+    status: "failed",
+    summary: "denied",
+    source: "/repo/.nexagent/extensions/sample.js",
+  });
+  session.extensions = host;
+
+  const view = createOpenTuiRuntimeView(session);
+
+  assert.match(view.extensionEvents.rows.join("\n"), /^status configured$/m);
+  assert.match(view.extensionEvents.rows.join("\n"), /^events before_tool_execution$/m);
+  assert.match(view.extensionEvents.rows.join("\n"), /^recent 2026-05-07T10:00:00.000Z failed before_tool_execution: denied/m);
+  assert.deepEqual(view.cockpit.warnings.find((warning) => warning.type === "extensions"), {
+    severity: "warning",
+    type: "extensions",
+    message: "extension issue: before_tool_execution: denied",
+    action: "/extensions",
+  });
 });
 
 test("createOpenTuiRuntimeView runs bounded custom statusline command", () => {

@@ -17,7 +17,7 @@ Terminal-first AI coding harness for local operator-driven development.
 - Exposes Nexsight tools for bounded code/data execution, local indexing, and context search with SQLite FTS when available.
 - Provides guarded web fetch/search and batch edit helpers for research and multi-file patch workflows.
 - Provides slash commands for status, usage, sessions/timeline, keymap help, persistent goals, Lean-style Nexsight compressed reads/search, Pi-compatible notify/emoji/color/safe-git/SCIP helpers, provider/model/effort control, tools, memory, config, LSP, skill routing, boomerang autonomous task handoffs, mouse behavior, approvals, compaction, file reads/searches, diffs, and image attachments.
-- Loads Pi-like extension modules from `.nexagent/extensions`, `.pi/extensions`, `~/.nexagent/extensions`, and `~/.pi/agent/extensions` with lifecycle events, sync slash-command registration, and tool metadata registration.
+- Loads Pi-like extension modules from `.nexagent/extensions`, `.pi/extensions`, `~/.nexagent/extensions`, and `~/.pi/agent/extensions` with visible lifecycle activity, sync slash-command registration, and tool metadata registration.
 - Hydrates stdio MCP servers at startup from `.nexagent/mcp.json`, with per-server startup timeouts and deduped server selection.
 - Supports `$skill` shorthand for skill routing.
 - Supports `!<command>` for guarded shell command transcript output.
@@ -286,7 +286,7 @@ Inside TUI:
 - `/color [status|index]`, `/color-next`, and `/color-set <index>` — deterministic or configured ANSI session color marker
 - `/safegit [status|patterns]` — high-risk git mutation guard for force push, hard reset, forced clean, stash deletion, forced branch delete, and reflog expiry
 - `/scip [status|symbols <path>|diagnostics <path>|check [path]]` — Pi SCIP compatibility aliases backed by local LSP/static analysis
-- `/extensions` — Pi-like extension lifecycle shim status, loaded sources, registered events, commands, tools, and load errors
+- `/extensions` — Pi-like extension lifecycle shim status, loaded sources, registered events, commands, tools, notifications, recent activity, and load/runtime errors
 - `/config` — open the interactive OpenTUI config side window; `/config status` prints provider, UI, memory, LSP, and diagnostics status; `/config key <action> <key|clear>` customizes supported OpenTUI shortcuts
 - `/config [set] logo <full|condensed|off>` — persist startup logo mode
 - `/config [set] lsp <on|off>` and `/config [set] lsp-index <on|off>` — persist LSP/code-intel toggles

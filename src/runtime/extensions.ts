@@ -38,6 +38,14 @@ export interface RuntimeExtensionTool {
   execute?: (...args: unknown[]) => unknown;
 }
 
+export interface RuntimeExtensionActivity {
+  at: string;
+  event: string;
+  status: "registered" | "started" | "completed" | "failed" | "info" | "warning";
+  summary: string;
+  source: string | null;
+}
+
 export interface RuntimeExtensionHost {
   status: "none" | "configured";
   sourcePaths: string[];
@@ -49,6 +57,7 @@ export interface RuntimeExtensionHost {
   notifications: string[];
   widgets: Map<string, string[]>;
   editorText: string;
+  activity: RuntimeExtensionActivity[];
   uiBridge?: {
     notify?: (message: string, level?: string) => void;
     setWidget?: (id: string, lines: string[] | undefined) => void;
@@ -158,6 +167,7 @@ export function createRuntimeExtensionHost(): RuntimeExtensionHost {
     notifications: [],
     widgets: new Map(),
     editorText: "",
+    activity: [],
   };
 }
 
@@ -168,6 +178,8 @@ export function createRuntimeExtensionSummary(host?: RuntimeExtensionHost): {
   commandCount: number;
   toolCount: number;
   invalidEntries: string[];
+  notifications: string[];
+  activity: RuntimeExtensionActivity[];
 } {
   const resolved = host ?? createRuntimeExtensionHost();
   return {
@@ -177,6 +189,8 @@ export function createRuntimeExtensionSummary(host?: RuntimeExtensionHost): {
     commandCount: resolved.commands.size,
     toolCount: resolved.tools.size,
     invalidEntries: resolved.invalidEntries,
+    notifications: resolved.notifications,
+    activity: resolved.activity,
   };
 }
 
@@ -191,11 +205,15 @@ export function emitRuntimeExtensionEvent(
     return Promise.resolve([]);
   }
   const ctx = createRuntimeExtensionContext(session);
+  recordRuntimeExtensionActivity(host, event, "started", `handlers ${String(handlers.length)}`);
   return Promise.all(handlers.map(async (handler) => {
     try {
-      return await handler(payload, ctx);
+      const result = await handler(payload, ctx);
+      recordRuntimeExtensionActivity(host, event, "completed", "handler completed");
+      return result;
     } catch (error) {
       host?.invalidEntries.push(`${event}: ${error instanceof Error ? error.message : String(error)}`);
+      recordRuntimeExtensionActivity(host, event, "failed", error instanceof Error ? error.message : String(error));
       return null;
     }
   }));
@@ -222,7 +240,19 @@ export function formatRuntimeExtensionsStatus(session: RuntimeSession): string {
     `tools: ${String(summary.toolCount)}`,
     `shortcuts: ${String(session.extensions?.shortcuts.size ?? 0)}`,
     `invalid: ${summary.invalidEntries.length > 0 ? summary.invalidEntries.join(" | ") : "none"}`,
+    `notifications: ${summary.notifications.slice(-4).join(" | ") || "none"}`,
+    "recent:",
+    ...formatRuntimeExtensionActivity(summary.activity),
   ].join("\n");
+}
+
+export function formatRuntimeExtensionActivity(activity: RuntimeExtensionActivity[]): string[] {
+  if (activity.length === 0) {
+    return ["  none"];
+  }
+  return activity.slice(-8).map((entry) =>
+    `  ${entry.at} ${entry.status} ${entry.event}: ${entry.summary}${entry.source ? ` (${entry.source})` : ""}`
+  );
 }
 
 function discoverExtensionFiles(cwd: string): string[] {
@@ -259,16 +289,20 @@ async function loadRuntimeExtensionFile(host: RuntimeExtensionHost, filePath: st
     if (typeof factory === "function") {
       await (factory as RuntimeExtensionFactory)(createRuntimeExtensionApi(host, filePath));
       host.sourcePaths.push(filePath);
+      recordRuntimeExtensionActivity(host, "load", "completed", `loaded ${path.basename(filePath)}`, filePath);
       return;
     }
     if (factory && typeof factory === "object") {
       registerLegacyRuntimeExtension(host, filePath, factory as Record<string, unknown>);
       host.sourcePaths.push(filePath);
+      recordRuntimeExtensionActivity(host, "load", "completed", `loaded ${path.basename(filePath)}`, filePath);
       return;
     }
     host.invalidEntries.push(`${filePath}: default export must be function or extension object`);
+    recordRuntimeExtensionActivity(host, "load", "failed", "default export must be function or extension object", filePath);
   } catch (error) {
     host.invalidEntries.push(`${filePath}: ${error instanceof Error ? error.message : String(error)}`);
+    recordRuntimeExtensionActivity(host, "load", "failed", error instanceof Error ? error.message : String(error), filePath);
   }
 }
 
@@ -360,6 +394,7 @@ function createRuntimeExtensionApi(host: RuntimeExtensionHost, sourcePath: strin
       const handlers = host.handlers.get(eventName) ?? [];
       handlers.push(handler);
       host.handlers.set(eventName, handlers);
+      recordRuntimeExtensionActivity(host, eventName, "registered", `handler ${String(handlers.length)}`, sourcePath);
     },
     registerCommand(command, handler) {
       registerRuntimeExtensionCommand(host, sourcePath, command, handler);
@@ -376,6 +411,7 @@ function createRuntimeExtensionApi(host: RuntimeExtensionHost, sourcePath: strin
         return;
       }
       host.tools.set(tool.name, tool);
+      recordRuntimeExtensionActivity(host, "tool", "registered", tool.name, sourcePath);
     },
     getCommand(name) {
       return host.commands.get(normalizeCommandName(name));
@@ -391,6 +427,7 @@ function createRuntimeExtensionApi(host: RuntimeExtensionHost, sourcePath: strin
       }
       return (..._args: unknown[]) => {
         host.notifications.push(`debug: ignored unsupported extension API pi.${prop}`);
+        recordRuntimeExtensionActivity(host, "api", "warning", `ignored pi.${prop}`, sourcePath);
         return undefined;
       };
     },
@@ -407,6 +444,7 @@ function registerRuntimeExtensionCommand(
     if (typeof handler === "function") {
       const name = normalizeCommandName(command);
       host.commands.set(name, { name, handler });
+      recordRuntimeExtensionActivity(host, "command", "registered", name, sourcePath);
       return;
     }
     if (handler && typeof handler === "object") {
@@ -437,6 +475,7 @@ function registerRuntimeExtensionCommand(
     description: typeof entry.description === "string" ? entry.description : undefined,
     handler: run as RuntimeExtensionCommand["handler"],
   });
+  recordRuntimeExtensionActivity(host, "command", "registered", name, sourcePath);
 }
 
 function registerRuntimeExtensionShortcut(
@@ -467,6 +506,7 @@ function registerRuntimeExtensionShortcut(
     description: typeof entry.description === "string" ? entry.description : undefined,
     handler: run as RuntimeExtensionCommand["handler"],
   });
+  recordRuntimeExtensionActivity(host, "shortcut", "registered", resolvedShortcut, sourcePath);
 }
 
 function resolveExtensionShortcut(host: RuntimeExtensionHost, sourcePath: string, shortcut: string): string {
@@ -476,9 +516,11 @@ function resolveExtensionShortcut(host: RuntimeExtensionHost, sourcePath: string
   const fallback = shortcut.replace(/^(?:ctrl|control)\+/, "alt+");
   if (fallback !== shortcut && !BUILTIN_SHORTCUTS.has(fallback) && !host.shortcuts.has(fallback)) {
     host.notifications.push(`warn: remapped extension shortcut ${shortcut} to ${fallback} (${sourcePath})`);
+    recordRuntimeExtensionActivity(host, "shortcut", "warning", `remapped ${shortcut} to ${fallback}`, sourcePath);
     return fallback;
   }
   host.invalidEntries.push(`${sourcePath}: registerShortcut ${shortcut} conflicts with existing shortcut`);
+  recordRuntimeExtensionActivity(host, "shortcut", "failed", `conflict ${shortcut}`, sourcePath);
   return shortcut;
 }
 
@@ -499,6 +541,7 @@ export function createRuntimeExtensionContext(session: RuntimeSession): RuntimeE
   const ui = new Proxy({
     notify(message: string, level = "info") {
       session.extensions?.notifications.push(`${level}: ${message}`);
+      recordRuntimeExtensionActivity(session.extensions, "notification", level === "error" ? "failed" : level === "warn" ? "warning" : "info", String(message));
       session.extensions?.uiBridge?.notify?.(message, level);
     },
     setWidget(id: string, lines: string[] | undefined) {
@@ -507,11 +550,13 @@ export function createRuntimeExtensionContext(session: RuntimeSession): RuntimeE
       }
       if (lines === undefined) {
         session.extensions.widgets.delete(id);
+        recordRuntimeExtensionActivity(session.extensions, "widget", "info", `cleared ${id}`);
         session.extensions.uiBridge?.setWidget?.(id, undefined);
         return;
       }
       const normalizedLines = Array.isArray(lines) ? lines : [String(lines)];
       session.extensions.widgets.set(id, normalizedLines);
+      recordRuntimeExtensionActivity(session.extensions, "widget", "info", `set ${id}`);
       session.extensions.uiBridge?.setWidget?.(id, normalizedLines);
     },
     getEditorText() {
@@ -529,6 +574,7 @@ export function createRuntimeExtensionContext(session: RuntimeSession): RuntimeE
     },
     setFooter(footer: string) {
       session.extensions?.widgets.set("footer", [footer]);
+      recordRuntimeExtensionActivity(session.extensions, "widget", "info", "set footer");
       session.extensions?.uiBridge?.setWidget?.("footer", [footer]);
     },
     custom<T>(factory: RuntimeExtensionCustomFactory<T>) {
@@ -585,6 +631,33 @@ export function createRuntimeExtensionContext(session: RuntimeSession): RuntimeE
       },
     },
   };
+}
+
+function recordRuntimeExtensionActivity(
+  host: RuntimeExtensionHost | undefined,
+  event: string,
+  status: RuntimeExtensionActivity["status"],
+  summary: string,
+  source: string | null = null,
+): void {
+  if (!host) {
+    return;
+  }
+  host.activity.push({
+    at: new Date().toISOString(),
+    event,
+    status,
+    summary: firstLine(summary, 120),
+    source,
+  });
+  if (host.activity.length > 50) {
+    host.activity.splice(0, host.activity.length - 50);
+  }
+}
+
+function firstLine(value: string, limit: number): string {
+  const line = String(value).split(/\r?\n/)[0]?.trim() ?? "";
+  return line.length > limit ? `${line.slice(0, limit - 3)}...` : line;
 }
 
 export function createRuntimeExtensionArgs(args: readonly string[]): RuntimeExtensionArgs {
