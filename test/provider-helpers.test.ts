@@ -16,6 +16,11 @@ import {
   type RequiredEvidenceNudgeState,
 } from "../src/provider/nudges.js";
 import {
+  classifyRecoveryPolicy,
+  claimsUnsupportedWriteCompletion,
+  isNonActionableDeferral,
+} from "../src/provider/recovery-policy.js";
+import {
   classifyToolFailure,
   createToolFailureDiagnosticInput,
   formatToolArgumentsPreview,
@@ -91,6 +96,74 @@ test("provider nudge helpers keep required-evidence policy data-driven", () => {
   recordRequiredEvidenceNudge(session, "required write evidence nudge applied", "x".repeat(180));
   assert.equal(session.events.at(-1)?.summary, "required write evidence nudge applied");
   assert.equal(session.events.at(-1)?.detail?.endsWith("..."), true);
+});
+
+test("recovery policy classifies provider output without running provider loops", () => {
+  const base = {
+    step: 0,
+    maxSteps: 8,
+    hasWriteEvidence: false,
+    priorWriteEvidenceNudges: 0,
+    maxWriteEvidenceNudges: 2,
+  };
+
+  assert.deepEqual(classifyRecoveryPolicy({
+    ...base,
+    output: "<nexagent_tool_call>{bad json}</nexagent_tool_call>",
+  }), {
+    kind: "retry",
+    reason: "malformed_tool_call",
+  });
+
+  assert.deepEqual(classifyRecoveryPolicy({
+    ...base,
+    output: "I updated README.md with the new workflow.",
+  }), {
+    kind: "retry",
+    reason: "unsupported_write_completion",
+  });
+
+  assert.deepEqual(classifyRecoveryPolicy({
+    ...base,
+    output: "Tests pass.",
+    missingClaimEvidence: "test",
+    promptRequiresTestEvidence: false,
+  }), {
+    kind: "correct",
+    reason: "unsupported_test_claim",
+  });
+
+  assert.deepEqual(classifyRecoveryPolicy({
+    ...base,
+    output: "Unblocker: run me in a tool-enabled turn and I can inspect current state.",
+  }), {
+    kind: "retry",
+    reason: "non_actionable_deferral",
+  });
+
+  assert.deepEqual(classifyRecoveryPolicy({
+    ...base,
+    output: "Need write evidence.",
+    missingRequiredEvidence: "write",
+  }), {
+    kind: "block",
+    reason: "missing_required_evidence",
+    missing: "write",
+  });
+
+  assert.deepEqual(classifyRecoveryPolicy({
+    ...base,
+    output: "Observed: README.md needs an update.",
+  }), {
+    kind: "accept",
+  });
+});
+
+test("recovery phrase helpers avoid planning text false positives", () => {
+  assert.equal(claimsUnsupportedWriteCompletion("I updated README.md with new commands.", 0), true);
+  assert.equal(claimsUnsupportedWriteCompletion("Observed: README.md needs an update.", 0), false);
+  assert.equal(isNonActionableDeferral("Unblocker: run me in a tool-enabled turn."), true);
+  assert.equal(isNonActionableDeferral("Done - verification passed."), false);
 });
 
 test("required Nexsight helpers summarize bounded fallback evidence", () => {

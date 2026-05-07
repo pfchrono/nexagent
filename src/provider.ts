@@ -57,6 +57,11 @@ import {
   stripModelIntent,
 } from "./provider/model-output.js";
 import {
+  classifyRecoveryPolicy,
+  claimsFileMutation,
+  isNonActionableDeferral,
+} from "./provider/recovery-policy.js";
+import {
   captureSentryDiagnostic,
   logSentryError,
   logSentryInfo,
@@ -422,23 +427,35 @@ async function executeProviderRequestImpl(
           }
           return recovery.result;
         }
-        if (claimsUnsupportedWriteCompletion(output, writeEvidenceNudgeCount) && !hasWriteEvidence(request.session, turnEventStart)) {
+        const hasCurrentWriteEvidence = hasWriteEvidence(request.session, turnEventStart);
+        const missingClaimEvidence = turnRun.evaluateFinalEvidence(turnEventStart, toolTranscript, output);
+        const recoveryDecision = classifyRecoveryPolicy({
+          output,
+          step,
+          maxSteps: MAX_INTERNAL_TOOL_STEPS,
+          hasWriteEvidence: hasCurrentWriteEvidence,
+          priorWriteEvidenceNudges: writeEvidenceNudgeCount,
+          maxWriteEvidenceNudges: MAX_GUIDANCE_NUDGES_BEFORE_SYNTHESIS,
+          missingClaimEvidence,
+          promptRequiresTestEvidence: promptRequiresTestEvidence(request.prompt),
+        });
+        if (recoveryDecision.kind === "retry" && recoveryDecision.reason === "unsupported_write_completion") {
           writeEvidenceNudgeCount += 1;
-          if (step < MAX_INTERNAL_TOOL_STEPS - 1 && writeEvidenceNudgeCount < MAX_GUIDANCE_NUDGES_BEFORE_SYNTHESIS) {
-            recordRuntimeEvent(request.session, {
-              kind: "control",
-              status: "queued",
-              summary: "write evidence nudge applied",
-              detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
-            });
-            prompt = createPromptWithToolTranscript(assembled.prompt, toolTranscript, PROVIDER_NUDGES.writeEvidence);
-            continue;
-          }
+          recordRuntimeEvent(request.session, {
+            kind: "control",
+            status: "queued",
+            summary: "write evidence nudge applied",
+            detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
+          });
+          prompt = createPromptWithToolTranscript(assembled.prompt, toolTranscript, PROVIDER_NUDGES.writeEvidence);
+          continue;
+        }
+        if (recoveryDecision.kind === "block" && recoveryDecision.reason === "unsupported_write_completion") {
+          writeEvidenceNudgeCount += 1;
           return createMissingWriteEvidenceFailure(request, model, transport.transport, transport.id, output);
         }
-        const missingClaimEvidence = turnRun.evaluateFinalEvidence(turnEventStart, toolTranscript, output);
         if (missingClaimEvidence) {
-          if (missingClaimEvidence === "test" && !promptRequiresTestEvidence(request.prompt)) {
+          if (recoveryDecision.kind === "correct" && recoveryDecision.reason === "unsupported_test_claim") {
             return createUnsupportedTestClaimCorrection(request, model, transport.transport, transport.id, output);
           }
           if (missingClaimEvidence === "active skill output") {
@@ -474,7 +491,7 @@ async function executeProviderRequestImpl(
           }
           return createMissingRequiredToolEvidenceFailure(request, model, transport.transport, transport.id, missingClaimEvidence, output);
         }
-        if (isNonActionableDeferral(output) && step < MAX_INTERNAL_TOOL_STEPS - 1) {
+        if (recoveryDecision.kind === "retry" && recoveryDecision.reason === "non_actionable_deferral") {
           guidanceNudgeCount += 1;
           const earlyFinal = await maybeSynthesizeAfterRepeatedGuidance(
             request,
@@ -982,23 +999,35 @@ async function executeOpenAiNativeToolLoop(
         }
         return createMissingRequiredToolEvidenceFailure(request, model, transport.transport, transport.id, nudge.label, output);
       }
-      if (claimsUnsupportedWriteCompletion(output, writeEvidenceNudgeCount) && !hasWriteEvidence(request.session, turnEventStart)) {
+      const hasCurrentWriteEvidence = hasWriteEvidence(request.session, turnEventStart);
+      const missingClaimEvidence = turnRun.evaluateFinalEvidence(turnEventStart, toolTranscript, output);
+      const recoveryDecision = classifyRecoveryPolicy({
+        output,
+        step,
+        maxSteps: MAX_INTERNAL_TOOL_STEPS,
+        hasWriteEvidence: hasCurrentWriteEvidence,
+        priorWriteEvidenceNudges: writeEvidenceNudgeCount,
+        maxWriteEvidenceNudges: MAX_GUIDANCE_NUDGES_BEFORE_SYNTHESIS,
+        missingClaimEvidence,
+        promptRequiresTestEvidence: promptRequiresTestEvidence(request.prompt),
+      });
+      if (recoveryDecision.kind === "retry" && recoveryDecision.reason === "unsupported_write_completion") {
         writeEvidenceNudgeCount += 1;
-        if (step < MAX_INTERNAL_TOOL_STEPS - 1 && writeEvidenceNudgeCount < MAX_GUIDANCE_NUDGES_BEFORE_SYNTHESIS) {
-          recordRuntimeEvent(request.session, {
-            kind: "control",
-            status: "queued",
-            summary: "write evidence nudge applied",
-            detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
-          });
-          nativeInput = [{ role: "user", content: PROVIDER_NUDGES.writeEvidence }];
-          return null;
-        }
+        recordRuntimeEvent(request.session, {
+          kind: "control",
+          status: "queued",
+          summary: "write evidence nudge applied",
+          detail: output.length > 160 ? `${output.slice(0, 157)}...` : output,
+        });
+        nativeInput = [{ role: "user", content: PROVIDER_NUDGES.writeEvidence }];
+        return null;
+      }
+      if (recoveryDecision.kind === "block" && recoveryDecision.reason === "unsupported_write_completion") {
+        writeEvidenceNudgeCount += 1;
         return createMissingWriteEvidenceFailure(request, model, transport.transport, transport.id, output);
       }
-      const missingClaimEvidence = turnRun.evaluateFinalEvidence(turnEventStart, toolTranscript, output);
       if (missingClaimEvidence) {
-        if (missingClaimEvidence === "test" && !promptRequiresTestEvidence(request.prompt)) {
+        if (recoveryDecision.kind === "correct" && recoveryDecision.reason === "unsupported_test_claim") {
           return createUnsupportedTestClaimCorrection(request, model, transport.transport, transport.id, output);
         }
         if (missingClaimEvidence === "active skill output") {
@@ -1023,7 +1052,7 @@ async function executeOpenAiNativeToolLoop(
         }
         return createMissingRequiredToolEvidenceFailure(request, model, transport.transport, transport.id, missingClaimEvidence, output);
       }
-      if (isNonActionableDeferral(output) && step < MAX_INTERNAL_TOOL_STEPS - 1) {
+      if (recoveryDecision.kind === "retry" && recoveryDecision.reason === "non_actionable_deferral") {
         recordRuntimeEvent(request.session, {
           kind: "control",
           status: "queued",
@@ -2065,194 +2094,4 @@ function createToolBudgetPartialResult(
     fallbackApplied: false,
     output,
   };
-}
-
-function isNonActionableDeferral(output: string): boolean {
-  const text = output.trim();
-  if (!text) {
-    return false;
-  }
-
-  if (containsToolCallMarkup(text) || /^(done|complete|completed|fixed|updated|implemented)\b/i.test(text)) {
-    return false;
-  }
-
-  const lower = text.toLowerCase();
-  const activationOnly = /^(started|starting|activated|all set|ready|on it|running now|i'm in|i am in)[.!]?\s*$/i.test(text)
-    || /^(started|starting now|activated|all set|ready)\b/i.test(text);
-  const asksForUserToContinue = [
-    "if you want, i can",
-    "if you'd like, i can",
-    "i can proceed",
-    "i can do that now",
-    "please say",
-    "please run this",
-    "run this and",
-    "you can run",
-    "you should run",
-    "reply with",
-    "say \"",
-    "say '",
-    "say “",
-    "say ‘",
-    "send:",
-    "tell me to",
-    "want me to",
-    "should i",
-    "your move",
-  ].some((phrase) => lower.includes(phrase));
-  const admitsNoAction = [
-    "i'll do",
-    "i will do",
-    "i'll execute",
-    "i will execute",
-    "i'm ready to execute",
-    "i am ready to execute",
-    "i need one concrete",
-    "i need the exact target",
-    "i need exact target",
-    "need the exact target",
-    "give me the exact task",
-    "throw me the exact task",
-    "paste the last concrete request",
-    "i need to actually",
-    "i need to apply",
-    "i need to edit",
-    "i need to run",
-    "can't actually execute workspace tools",
-    "cannot actually execute workspace tools",
-    "couldn't actually execute workspace tools",
-    "could not actually execute workspace tools",
-    "i haven't",
-    "i have not",
-    "i didn't",
-    "i did not",
-    "i don't have tool execution",
-    "missing tool-call execution",
-    "missing tool call execution",
-    "no tool-call execution",
-    "no tool call execution",
-    "did not expose callable tool execution",
-    "callable tool execution",
-    "response lane",
-    "tool-enabled turn",
-    "tool enabled turn",
-    "all tool calls are currently failing",
-    "tool calls are currently failing",
-    "can't get any tool responses",
-    "cannot get any tool responses",
-    "couldn't get any tool responses",
-    "could not get any tool responses",
-    "repository tools are not returning output",
-    "repository tools aren't returning output",
-    "no file system read/index trace",
-    "tool-path issue",
-    "no tool responses",
-    "no tool response",
-    "received no visible output",
-    "no visible output to inspect",
-    "tool output is visible",
-    "tools are unavailable",
-    "tool access",
-    "no file-change evidence",
-  ].some((phrase) => lower.includes(phrase));
-  const selfCorrectionOnly = [
-    "you're right",
-    "you are right",
-    "fair callout",
-    "my bad",
-    "that miss is on me",
-    "i should have",
-    "i should've",
-    "i'll follow",
-    "i will follow",
-    "going forward",
-  ].some((phrase) => lower.includes(phrase));
-  const concreteCompletionEvidence = [
-    "tests pass",
-    "verification passed",
-    "wrote ",
-    "updated ",
-    "created ",
-    "changed ",
-    "ran ",
-    "committed ",
-  ].some((phrase) => lower.includes(phrase));
-  const inventedTransportBlockerBeforeVerification =
-    /\bblocked\b[\s\S]{0,120}\btransport (?:hiccup|error|failure)\b/i.test(text)
-    && /\bbefore\b[\s\S]{0,120}\b(?:verification|verify|final verification)\b/i.test(text);
-
-  return inventedTransportBlockerBeforeVerification
-    || ((activationOnly || asksForUserToContinue || admitsNoAction || selfCorrectionOnly) && !concreteCompletionEvidence);
-}
-
-function claimsFileMutation(output: string): boolean {
-  return output
-    .split(/[\n.!?;]+/)
-    .map((segment) => segment.trim())
-    .filter(Boolean)
-    .some((segment) => {
-      if (isPlanningOrObservationSegment(segment)) {
-        return false;
-      }
-      const lower = segment.toLowerCase();
-      const mutationClaim = [
-        "done — applied",
-        "done - applied",
-        "applied directly",
-        "i updated",
-        "updated readme",
-        "updated `readme",
-        "readme now includes",
-        "i added",
-        "added sections",
-        "wrote ",
-        "created ",
-        "modified ",
-        "changed ",
-      ].some((phrase) => lower.includes(phrase));
-      const fileMention = /\b(readme|\.md|\.ts|\.tsx|\.json|file|files)\b/i.test(segment);
-      return mutationClaim && fileMention;
-    });
-}
-
-function isPlanningOrObservationSegment(segment: string): boolean {
-  return /^(?:observed|observation|next step|recommendation|recommended|plan|todo)\s*:/i.test(segment)
-    || /\buncommitted edits?\b/i.test(segment)
-    || /\b(?:should|need to|needs to|would|will)\s+(?:create|update|write|modify|change|add|plan)\b/i.test(segment);
-}
-
-function claimsUnsupportedWriteCompletion(output: string, priorWriteEvidenceNudges: number): boolean {
-  if (claimsFileMutation(output)) {
-    return true;
-  }
-  if (priorWriteEvidenceNudges <= 0) {
-    return false;
-  }
-
-  const lower = output.toLowerCase();
-  const fileMention = /\b(readme|\.md|\.ts|\.tsx|\.json|file|files)\b/i.test(output);
-  const verificationClaim = [
-    "exists",
-    "verified",
-    "direct read",
-    "direct reads",
-    "showed contents",
-    "content is",
-    "current exact content",
-  ].some((phrase) => lower.includes(phrase));
-  const correctionOrBlocker = [
-    "no file change",
-    "no file was",
-    "did not write",
-    "didn't write",
-    "not written",
-    "not created",
-    "was not created",
-    "blocked",
-    "cannot",
-    "can't",
-  ].some((phrase) => lower.includes(phrase));
-
-  return fileMention && verificationClaim && !correctionOrBlocker;
 }
