@@ -24,6 +24,14 @@ _Avoid_: nudge strings, retry prompts, blocker classifier
 The final outcome of a **Tool-Capable Turn**, including grounded evidence or a valid stop reason.
 _Avoid_: final answer, provider result, done state
 
+**Provider Readiness Journal**:
+A bounded provider health and error history used to explain whether a provider is ready before or during a **Tool-Capable Turn**.
+_Avoid_: status text, random provider error log
+
+**Transport Adapter Contract**:
+The shared behavioral contract that every **Provider Adapter** should satisfy for execution, recovery, completion mapping, and readiness reporting.
+_Avoid_: one-off provider glue, special transport path
+
 ## Relationships
 
 - A **Tool-Capable Turn** may execute zero or more tool requests before completion.
@@ -32,6 +40,20 @@ _Avoid_: final answer, provider result, done state
 - A **Tool-Capable Turn** uses one **Tool Host** for all tool discovery and execution.
 - A **Recovery Policy** belongs inside a **Tool-Capable Turn** and produces either another provider step, a tool step, or **Turn Completion**.
 - **Turn Completion** belongs to exactly one **Tool-Capable Turn**.
+- A **Provider Readiness Journal** belongs near provider selection and diagnostics, not inside UI presentation code.
+- A **Transport Adapter Contract** should let different provider transports behave consistently without hiding provider-specific capabilities.
+
+## Current workload
+
+Open follow-up architecture issues are ranked by dependency and expected leverage:
+
+1. #24 — Consolidate provider transport adapters around a shared **Transport Adapter Contract**.
+2. #25 — Surface **Turn Completion** and **Provider Readiness Journal** state in OpenTUI.
+3. #26 — Route MCP tools through the shared **Tool Host** contract where practical.
+4. #27 — Add provider registry schema versioning and migration diagnostics.
+5. #28 — Add opt-in provider readiness network probes.
+
+When new architecture or triage work creates useful out-of-scope follow-up, create linked GitHub issues and update this workload summary if it changes the active direction.
 
 ## Example dialogue
 

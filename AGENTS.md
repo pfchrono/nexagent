@@ -58,7 +58,8 @@ Canonical guidance for coding agents working in `nexagent`.
 - `AGENTS.md` is canonical agent guidance.
 - `CLAUDE.md` exists only as compatibility shim and should point here.
 - `README.md` is canonical user-facing project overview.
-- Historical planning, dogfood notes, and generated context docs are not tracked in this repo.
+- `CONTEXT.md` is tracked project context for durable domain language, active architectural direction, and current issue workload.
+- Historical planning, dogfood notes, and generated context docs other than root `CONTEXT.md` are not tracked in this repo.
 
 Do not split durable agent instructions between `AGENTS.md` and `CLAUDE.md`.
 
@@ -97,7 +98,7 @@ If a slash command changes, update `src/cli/catalog.ts`, README command docs, an
 - Match existing TypeScript style.
 - Keep runtime behavior grounded in tests.
 - Do not refactor unrelated systems during feature work.
-- Do not mass-add local state directories or generated planning/context files such as `.bun/`, `.nexagent/`, `.codex/`, `.npm/`, `.opencode/`, `.rtk/`, `.planning/`, `dogfood-memory.md`, `CONTEXT.md`, or `docs/`.
+- Do not mass-add local state directories or generated planning/context files such as `.bun/`, `.nexagent/`, `.codex/`, `.npm/`, `.opencode/`, `.rtk/`, `.planning/`, `dogfood-memory.md`, generated `CONTEXT*.md` files other than root `CONTEXT.md`, or `docs/`.
 - Preserve protected OS-root safety. `--yolo` is not permission to mutate critical system roots.
 - Treat uncommitted changes as user work unless you made them.
 
@@ -118,6 +119,7 @@ If a slash command changes, update `src/cli/catalog.ts`, README command docs, an
 - Do not use `ask_user_question` as an approval loop, progress update, or substitute for repo inspection. If tools can safely discover answer or continue work, use tools instead.
 - When a file shows repeated rework, write or update a spec, test, or concrete acceptance check before continuing implementation.
 - Record recurring error patterns, rejected approaches, and project-specific constraints in durable guidance instead of rediscovering them each session.
+- Update `CONTEXT.md` when work changes Nexagent's domain language, active architectural direction, or current issue workload. Keep it compact and high-signal; do not duplicate README usage docs, issue bodies, or implementation logs.
 - Use evidence labels for claims: observed, verified, inferred, assumption, or unknown. Do not present inference as verified. Evidence labels guide claim discipline only; they are not a reason to stop loop work while useful inspection or verification tools remain.
 - Use context-preserving tools for large output: summarize logs, test output, search results, diffs, and API responses before bringing them into the conversation.
 - Use parallel agents for independent research or exploration tasks when available. Keep implementation ownership clear and avoid overlapping edits.
@@ -130,7 +132,7 @@ If a slash command changes, update `src/cli/catalog.ts`, README command docs, an
 
 Use `$improve-codebase-architecture` when the user asks for architecture cleanup, refactoring opportunities, deeper modules, better testability, or AI-navigability.
 
-- Explore first. Read `AGENTS.md`, `README.md`, relevant code, tests, and issue/PR context before proposing changes. Historical planning, dogfood notes, generated `CONTEXT*.md`, and `docs/` are not tracked truth in this repo.
+- Explore first. Read `AGENTS.md`, `README.md`, root `CONTEXT.md`, relevant code, tests, and issue/PR context before proposing changes. Historical planning, dogfood notes, generated `CONTEXT*.md` other than root `CONTEXT.md`, and `docs/` are not tracked truth in this repo.
 - Use subagents when possible for independent exploration. Give each subagent a bounded question, current goal, relevant files, decisions already made, and expected evidence. Prefer separate ownership areas so subagents do not overlap edits.
 - Use architecture vocabulary consistently: Module, Interface, Implementation, Depth, Seam, Adapter, Leverage, and Locality.
 - Apply the deletion test before proposing a refactor: if deleting a module only moves complexity into callers, it is earning its keep; if complexity vanishes, it may be shallow.
