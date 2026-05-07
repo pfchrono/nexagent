@@ -72,28 +72,44 @@ test("createOpenTuiRuntimeView maps runtime session without mutation", () => {
       risk: "pending · approval open",
     },
     configSections: [
-      {
-        title: "provider",
-        rows: ["active codex", "transport cli-exec", "auth ready"],
-      },
-      {
-        title: "ui",
-        rows: ["logo full", "mouse undefined", "statusline off"],
+    {
+      title: "provider",
+      rows: ["active codex", "transport cli-exec", "auth ready"],
+    },
+    {
+      title: "model",
+      rows: ["active gpt-5.4", "effort medium", "provider codex"],
+    },
+    {
+      title: "approval",
+      rows: ["mode open", "required no", "pending none", "last none"],
+    },
+    {
+      title: "ui",
+      rows: ["logo full", "mouse undefined", "statusline off"],
       },
       {
         title: "memory",
         rows: ["archivist off", "storage disabled", "retrieval idle"],
       },
       {
-        title: "mcp",
-        rows: ["configured 0", "hydrated 0/0", "tools 0", "failed none"],
-      },
-      {
-        title: "lsp",
-        rows: ["status disabled", "enabled off", "configured no", "command none", "source disabled", "problems 0", "lastTouched none", "indexArchivist off"],
-      },
-      {
-        title: "diagnostics",
+      title: "mcp",
+      rows: ["configured 0", "hydrated 0/0", "tools 0", "failed none"],
+    },
+    {
+      title: "tools",
+      rows: ["mode repo-local-guarded", "internal repo-local", "extension 0", "mcp 0"],
+    },
+    {
+      title: "lsp",
+      rows: ["status disabled", "enabled off", "configured no", "command none", "source disabled", "problems 0", "lastTouched none", "indexArchivist off"],
+    },
+    {
+      title: "context",
+      rows: ["used 0", "window 272000", "percent 0", "compaction raw"],
+    },
+    {
+      title: "diagnostics",
         rows: ["sentry /status --sentry", "redaction tags-only"],
       },
     ],
@@ -156,7 +172,7 @@ test("createOpenTuiRuntimeView maps config sections and logo modes", () => {
   assert.equal(view.logo.mode, "condensed");
   assert.match(view.logo.frames[0] ?? "", /nexagent/);
   assert.match(view.logo.metadata, /cfg:condensed/);
-  assert.deepEqual(view.configSections.map((section) => section.title), ["provider", "ui", "memory", "mcp", "lsp", "diagnostics"]);
+  assert.deepEqual(view.configSections.map((section) => section.title), ["provider", "model", "approval", "ui", "memory", "mcp", "tools", "lsp", "context", "diagnostics"]);
   const lspRows = view.configSections.find((section) => section.title === "lsp")?.rows ?? [];
   assert.match(lspRows.join("\n"), /^status (ready|fallback)$/m);
   assert.deepEqual(lspRows.slice(1, 4), [
@@ -169,6 +185,8 @@ test("createOpenTuiRuntimeView maps config sections and logo modes", () => {
   assert.match(lspRows.join("\n"), /^lastTouched none$/m);
   assert.match(lspRows.join("\n"), /^indexArchivist on$/m);
   assert.match(view.configSections.find((section) => section.title === "memory")?.rows.join("\n") ?? "", /failure-playbook/);
+  assert.match(view.configSections.find((section) => section.title === "context")?.rows.join("\n") ?? "", /^percent 0$/m);
+  assert.match(view.configSections.find((section) => section.title === "tools")?.rows.join("\n") ?? "", /^mode repo-local-guarded$/m);
 });
 
 test("createOpenTuiRuntimeView exposes compact LSP problems panel data", async () => {

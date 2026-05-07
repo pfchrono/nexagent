@@ -203,7 +203,7 @@ function rowsForInput(
 
 function globalCommandPaletteRows(cwd: string, query: string, selectedIndex: number): CommandPaletteRow[] {
   const coreActions = [
-    { label: "Status dashboard", hint: "session · show runtime, repo, auth, style, and Sentry status", value: "/status " },
+    { label: "Status dashboard", hint: "session · unified runtime dashboard", value: "/status dashboard" },
     { label: "Config dashboard", hint: "ui · open interactive runtime configuration", value: "/config " },
     { label: "Keys", hint: "ui · show keyboard shortcuts and interaction modes", value: "/keys " },
     { label: "Provider status", hint: "control · show provider transport and capabilities", value: "/provider status" },

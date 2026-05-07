@@ -2272,8 +2272,9 @@ function renderLogoRows(view: OpenTuiRuntimeView, spinnerTick: number, width: nu
 function renderConfigPanelRows(view: OpenTuiRuntimeView, width: number, selectedIndex: number): ConfigPanelRow[] {
   const innerWidth = Math.max(20, width - 4);
   const rows: ConfigPanelRow[] = [
-    { key: "config-top", text: frameTop(" config ", innerWidth), fg: "#f9e2af" },
-    { key: "config-subtitle", text: frameBody("↑/↓ select · Enter run · click select · Esc close", innerWidth), fg: "#a6adc8" },
+    { key: "config-top", text: frameTop(" dashboard ", innerWidth), fg: "#f9e2af" },
+    { key: "config-subtitle", text: frameBody("provider · model · tools · approvals · MCP · LSP · memory · context", innerWidth), fg: "#a6adc8" },
+    { key: "config-help", text: frameBody("↑/↓ select · Enter run · click select · Esc close", innerWidth), fg: "#a6adc8" },
   ];
   for (const section of view.configSections) {
     rows.push({
@@ -2319,6 +2320,12 @@ function configActionForRow(section: string, line: string): string | null {
   if (section === "provider") {
     return "/provider status";
   }
+  if (section === "model") {
+    return normalized.startsWith("effort ") ? "/effort status" : "/model status";
+  }
+  if (section === "approval") {
+    return "/approval status";
+  }
   if (section === "ui") {
     if (normalized.startsWith("logo ")) {
       const current = normalized.replace(/^logo\s+/, "").trim();
@@ -2338,6 +2345,9 @@ function configActionForRow(section: string, line: string): string | null {
   if (section === "mcp") {
     return "/tools";
   }
+  if (section === "tools") {
+    return "/tools";
+  }
   if (section === "lsp") {
     if (normalized.startsWith("enabled ")) {
       return normalized.endsWith("on") ? "/config lsp off" : "/config lsp on";
@@ -2349,6 +2359,9 @@ function configActionForRow(section: string, line: string): string | null {
   }
   if (section === "diagnostics") {
     return "/status --sentry";
+  }
+  if (section === "context") {
+    return "/compact status";
   }
   return null;
 }

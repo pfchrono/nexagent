@@ -34,7 +34,7 @@ test("OpenTUI global command palette searches actions commands models and effort
   const model = createCommandSurface(process.cwd(), "55", 0, { global: true });
   const effort = createCommandSurface(process.cwd(), "xhigh", 0, { global: true });
 
-  assert.equal(status.rows[0]?.value, "/status ");
+  assert.ok(status.rows.some((row) => row.value === "/status dashboard"));
   assert.equal(model.rows[0]?.value, "/model gpt-5.5 ");
   assert.equal(effort.rows[0]?.value, "/effort xhigh");
 });

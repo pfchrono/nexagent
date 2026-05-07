@@ -2081,6 +2081,13 @@ function isMemoryMaintenanceArg(arg: string): boolean {
 
 function handleStatusCommand(session: RuntimeSession, args: string[]): RuntimeCommandResult {
   const { detailMode, args: statusArgs } = splitVerboseArg(args);
+  if (statusArgs.length === 1 && statusArgs[0]?.toLowerCase() === "dashboard") {
+    return {
+      ok: true,
+      output: formatRuntimeDashboardStatus(session),
+      activity: "status dashboard",
+    };
+  }
   const hasSentryStatus = statusArgs.includes("--sentry");
   const sendSentryTestEvent = statusArgs.includes("--send-test-event");
   if (sendSentryTestEvent && !hasSentryStatus) {
@@ -3408,11 +3415,29 @@ function formatMemoryMaintenanceStatus(result: ReturnType<typeof maintainArchivi
 }
 
 function formatConfigStatus(session: RuntimeSession): string {
+  return formatRuntimeDashboardStatus(session);
+}
+
+function formatRuntimeDashboardStatus(session: RuntimeSession): string {
+  const provider = session.providerTransport.activeProvider;
+  const configuredModels = session.providerRouting.modelSelection.configuredModels as Record<string, string | undefined>;
+  const model = configuredModels[provider] ?? "unknown";
+  const effort = session.providerRouting.modelSelection.configuredReasoningEfforts?.[provider] ?? "default";
+  const contextWindow = getCodexModelDefinition(model)?.contextWindow ?? 128000;
+  const remainingContext = getRemainingContextTokens(session);
+  const contextUsed = Math.max(0, contextWindow - remainingContext);
+  const contextPercent = contextWindow > 0 ? Math.round((contextUsed / contextWindow) * 100) : 0;
   return [
-    "config",
+    "dashboard",
     "provider",
     `active: ${session.provider}`,
     `transport: ${session.providerTransport.mode}`,
+    "model",
+    `active: ${model}`,
+    `effort: ${effort}`,
+    "approval",
+    `mode: ${session.operationControls.yoloMode ? "yolo" : session.operationControls.requireApprovalForGuarded ? "guarded" : "open"}`,
+    `pending: ${session.operationControls.pendingApproval?.tool ?? "none"}`,
     "ui",
     `logoMode: ${session.ui?.logoMode ?? "full"}`,
     `mouseMode: ${session.commandModes.mouseMode}`,
@@ -3422,11 +3447,20 @@ function formatConfigStatus(session: RuntimeSession): string {
     "memory",
     `archivist: ${session.archivist.enabled ? "on" : "off"}`,
     `storage: ${session.archivist.storagePath ?? "disabled"}`,
+    "tools",
+    `mode: ${session.toolPolicy.mode}`,
+    `mcpTools: ${String(session.mcpRegistry?.tools?.length ?? 0)}`,
+    `extensionTools: ${String(session.extensions?.tools.size ?? 0)}`,
     "lsp",
     `enabled: ${String(session.lsp?.enabled === true)}`,
     `configured: ${String(Boolean(session.lsp?.command))}`,
     `command: ${session.lsp?.command ?? "none"}`,
     `indexArchivist: ${String(session.lsp?.indexArchivist === true)}`,
+    "context",
+    `used: ${String(contextUsed)}`,
+    `window: ${String(contextWindow)}`,
+    `percent: ${String(contextPercent)}`,
+    `compaction: ${session.compaction.summary ? "summary" : "raw"}`,
     "diagnostics",
     "sentry: /status --sentry",
     "redaction: tags-only",

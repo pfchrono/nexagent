@@ -174,7 +174,7 @@ export function createOpenTuiRuntimeView(session: RuntimeSession): OpenTuiRuntim
     traceDetailLines,
     traceBlocks,
     cockpit,
-    configSections: createConfigSections(session),
+    configSections: createConfigSections(session, statusline, approval),
     lspProblems: createLspProblemsView(session),
     logo,
     statusline,
@@ -212,7 +212,7 @@ function createLogoView(session: RuntimeSession, provider: string, model: string
   };
 }
 
-function createConfigSections(session: RuntimeSession): OpenTuiConfigSectionView[] {
+function createConfigSections(session: RuntimeSession, statusline: OpenTuiStatuslineView, approval: string): OpenTuiConfigSectionView[] {
   const mcpStatuses = session.mcpRegistry?.statuses ?? [];
   const hydratedMcpServers = mcpStatuses.filter((status) => status.status === "hydrated");
   const failedMcpServers = mcpStatuses.filter((status) => status.status === "failed");
@@ -254,6 +254,23 @@ function createConfigSections(session: RuntimeSession): OpenTuiConfigSectionView
       ],
     },
     {
+      title: "model",
+      rows: [
+        `active ${statusline.model}`,
+        `effort ${statusline.effort}`,
+        `provider ${statusline.provider}`,
+      ],
+    },
+    {
+      title: "approval",
+      rows: [
+        `mode ${approval}`,
+        `required ${session.operationControls.requireApprovalForGuarded ? "yes" : "no"}`,
+        `pending ${session.operationControls.pendingApproval?.tool ?? "none"}`,
+        `last ${session.operationControls.lastDecision ?? "none"}`,
+      ],
+    },
+    {
       title: "ui",
       rows: [
         `logo ${session.ui?.logoMode ?? "full"}`,
@@ -274,6 +291,15 @@ function createConfigSections(session: RuntimeSession): OpenTuiConfigSectionView
       rows: mcpRows,
     },
     {
+      title: "tools",
+      rows: [
+        `mode ${session.toolPolicy.mode}`,
+        `internal repo-local`,
+        `extension ${String(session.extensions?.tools.size ?? 0)}`,
+        `mcp ${String(session.mcpRegistry?.tools?.length ?? 0)}`,
+      ],
+    },
+    {
       title: "lsp",
       rows: [
         `status ${lspState}`,
@@ -284,6 +310,15 @@ function createConfigSections(session: RuntimeSession): OpenTuiConfigSectionView
         `problems ${String(lsp.problemCount)}`,
         `lastTouched ${lsp.lastTouchedPath ?? "none"}`,
         `indexArchivist ${session.lsp?.indexArchivist === true ? "on" : "off"}`,
+      ],
+    },
+    {
+      title: "context",
+      rows: [
+        `used ${String(statusline.contextUsed)}`,
+        `window ${String(statusline.contextWindow)}`,
+        `percent ${String(statusline.contextPercent)}`,
+        `compaction ${session.compaction.summary ? "summary" : "raw"}`,
       ],
     },
     {

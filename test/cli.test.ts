@@ -900,9 +900,18 @@ test("runRuntimeCommand exposes and persists config and LSP settings", async () 
 
     const status = runRuntimeCommand(session, "/config");
     assert.equal(status?.ok, true);
-    assert.match(status?.output ?? "", /^config$/m);
+    assert.match(status?.output ?? "", /^dashboard$/m);
+    assert.match(status?.output ?? "", /^model$/m);
+    assert.match(status?.output ?? "", /^approval$/m);
+    assert.match(status?.output ?? "", /^tools$/m);
+    assert.match(status?.output ?? "", /^context$/m);
     assert.match(status?.output ?? "", /^logoMode: full$/m);
     assert.match(status?.output ?? "", /^enabled: false$/m);
+
+    const statusDashboard = runRuntimeCommand(session, "/status dashboard");
+    assert.equal(statusDashboard?.ok, true);
+    assert.equal(statusDashboard?.activity, "status dashboard");
+    assert.equal(statusDashboard?.output, status?.output);
 
     const logo = runRuntimeCommand(session, "/config set logo condensed");
     assert.equal(logo?.ok, true);

@@ -148,6 +148,11 @@ test("OpenTUI app shell renders live view fields and Phase 66 command surfaces",
   assert.match(source, /configExpanded/);
   assert.match(source, /key\.ctrl && key\.name === "g"/);
   assert.match(source, /renderConfigPanelRows/);
+  assert.match(source, /frameTop\(" dashboard ", innerWidth\)/);
+  assert.match(source, /provider · model · tools · approvals · MCP · LSP · memory · context/);
+  assert.match(source, /section === "model"/);
+  assert.match(source, /section === "approval"/);
+  assert.match(source, /section === "context"/);
   assert.match(source, /renderLspProblemsPanelRows/);
   assert.match(source, /view\.lspProblems\.visible/);
   assert.match(source, /lsp-problems-latest/);
