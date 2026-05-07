@@ -135,7 +135,7 @@ Run the default interactive OpenTUI shell:
 bun run dev
 ```
 
-OpenTUI is the default interactive path after the v1.5 migration acceptance checks. Current shell work includes the live runtime shell, multiline composer, searchable command palette, unified typed suggestions for commands, skills, paths, issue refs, models, efforts, and files, configurable keybinding registry, bounded transcript review, collapsible trace blocks, cockpit warning/action/approval/memory/MCP/LSP surfaces, mouse wheel scrolling, clipboard text paste, multi-image paste/attach chips, edit-tool diff previews, and OSC52 copy feedback. Transcript review uses `PageUp`/`PageDown`, `Ctrl+Up`/`Ctrl+Down`, mouse wheel, `Ctrl+End` for latest output, `Ctrl+T` for trace, and `Ctrl+Y` to copy the selected block. `Ctrl+P` opens the command palette, `Ctrl+O` toggles cockpit, `Ctrl+G` opens config, `Ctrl+V` pastes clipboard text, `Alt+V` pastes clipboard images, and `Ctrl+Q` or `/quit` exits OpenTUI. Use `/keys` to list registry action ids and `/config key <action> <key|clear>` to customize supported shortcuts with conflict checks.
+OpenTUI is the default interactive path after the v1.5 migration acceptance checks. Current shell work includes the live runtime shell, multiline composer, searchable command palette, unified typed suggestions for commands, skills, paths, issue refs, models, efforts, and files, configurable keybinding registry, bounded transcript review, collapsible trace blocks, cockpit warning/action/approval/memory/MCP/LSP surfaces, mouse wheel scrolling, clipboard text paste, multi-image paste/attach chips, rich edit review blocks, and OSC52 copy feedback. Transcript review uses `PageUp`/`PageDown`, `Ctrl+Up`/`Ctrl+Down`, mouse wheel, `Ctrl+End` for latest output, `Ctrl+T` for trace, and `Ctrl+Y` to copy the selected block. `Ctrl+P` opens the command palette, `Ctrl+O` toggles cockpit, `Ctrl+G` opens config, `Ctrl+V` pastes clipboard text, `Alt+V` pastes clipboard images, and `Ctrl+Q` or `/quit` exits OpenTUI. Use `/keys` to list registry action ids and `/config key <action> <key|clear>` to customize supported shortcuts with conflict checks.
 
 Show launch help:
 
@@ -337,7 +337,7 @@ Recent dogfood work tightened the provider loop:
 - tool events include duration and bounded output token estimates for the trace
 - Prompt V3 adds an evidence contract: claims are labeled as observed, verified, inferred, assumption, or unknown, and contradictions update verdicts without stopping loop work prematurely.
 - Failed tool calls are classified, logged with redacted diagnostics, and stored as Archivist recovery playbooks so later turns can recall working argument shapes or fallback paths.
-- Edit tools return bounded unified diff previews; OpenTUI renders changed-file summaries and colored add/remove lines for patch review.
+- Edit tools return bounded unified diff previews; OpenTUI renders changed-file summaries, hunk markers, before/after lines, and review affordances for `/read`, `/diff`, selected-block copy, and manual revert. Approve/reject is not a separate state after a guarded edit has already applied.
 - Command output goes to compact chat blocks, while debug lifecycle detail stays in trace. Turn and tool rows show duration plus input/output token badges.
 
 These guardrails are not a replacement for review. They reduce common harness failure modes while keeping operator-visible trace evidence.

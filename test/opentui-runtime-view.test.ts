@@ -641,9 +641,14 @@ test("createOpenTuiRuntimeView expands edit tool diff previews in chat", () => {
   const toolBlock = view.transcriptBlocks.find((block) => block.kind === "tool");
 
   assert.equal(toolBlock?.collapsedByDefault, false);
+  assert.match(toolBlock?.detailLines.join("\n") ?? "", /^review surface$/m);
+  assert.match(toolBlock?.detailLines.join("\n") ?? "", /^files 1: \.nexagent\/patch-preview-smoke\.txt$/m);
   assert.match(toolBlock?.detailLines.join("\n") ?? "", /Edited \.nexagent\/patch-preview-smoke\.txt \(\+1 -1\)/);
-  assert.match(toolBlock?.detailLines.join("\n") ?? "", /-beta/);
-  assert.match(toolBlock?.detailLines.join("\n") ?? "", /\+gamma/);
+  assert.match(toolBlock?.detailLines.join("\n") ?? "", /actions open \/read \.nexagent\/patch-preview-smoke\.txt \| diff \/diff \.nexagent\/patch-preview-smoke\.txt \| copy Ctrl\+Y latest block/);
+  assert.match(toolBlock?.detailLines.join("\n") ?? "", /approve\/reject: non-stateful after tool apply/);
+  assert.match(toolBlock?.detailLines.join("\n") ?? "", /hunk @@ -1,2 \+1,2 @@/);
+  assert.match(toolBlock?.detailLines.join("\n") ?? "", /before -beta/);
+  assert.match(toolBlock?.detailLines.join("\n") ?? "", /after \+gamma/);
   assert.doesNotMatch(toolBlock?.detailLines[0] ?? "", /output=patched/);
 });
 

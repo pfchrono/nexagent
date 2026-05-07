@@ -1216,6 +1216,10 @@ function formatToolIcon(toolName: string): string {
 }
 
 function formatToolDetailLines(detail: string): string[] {
+  const review = formatDiffReviewLines(detail);
+  if (review.length > 0) {
+    return review;
+  }
   return splitTranscriptLines(detail)
     .map((line) => firstLine(line)
       .replace(/\bread-only\b/g, "read only")
@@ -1225,6 +1229,51 @@ function formatToolDetailLines(detail: string): string[] {
       .replace(/;\s*/g, " · ")
       .replace(/\bin~/g, "in ")
       .replace(/\bout~/g, "out "));
+}
+
+function formatDiffReviewLines(detail: string): string[] {
+  const rawLines = splitTranscriptLines(detail).map((line) => firstLine(line)).filter(Boolean);
+  const edited = rawLines
+    .map((line) => line.match(/^Edited (.+) \(\+(\d+) -(\d+)\)$/))
+    .filter((match): match is RegExpMatchArray => Boolean(match));
+  if (edited.length === 0) {
+    return [];
+  }
+  const files = edited.map((match) => ({
+    path: match[1] ?? "unknown",
+    added: match[2] ?? "0",
+    removed: match[3] ?? "0",
+  }));
+  const primary = files[0]?.path ?? ".";
+  const rows = [
+    "review surface",
+    `files ${String(files.length)}: ${files.map((file) => file.path).join(", ")}`,
+    ...files.map((file) => `Edited ${file.path} (+${file.added} -${file.removed})`),
+    `actions open /read ${primary} | diff /diff ${primary} | copy Ctrl+Y latest block`,
+    "approve/reject: non-stateful after tool apply; inspect /diff then revert manually if needed",
+    "hunks",
+  ];
+  for (const line of rawLines) {
+    if (line.startsWith("@@")) {
+      rows.push(`hunk ${line}`);
+      continue;
+    }
+    if (/^-[^-]/.test(line)) {
+      rows.push(`before ${line}`);
+      continue;
+    }
+    if (/^\+[^+]/.test(line)) {
+      rows.push(`after ${line}`);
+      continue;
+    }
+    if (/^diff:/i.test(line) || /^Edited /.test(line)) {
+      continue;
+    }
+    if (/^(?:---|\+\+\+) /.test(line)) {
+      rows.push(`file ${line}`);
+    }
+  }
+  return rows;
 }
 
 function isPatchPreviewToolEvent(event: RuntimeSession["events"][number], lines: readonly string[]): boolean {
