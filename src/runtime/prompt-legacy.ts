@@ -1,7 +1,7 @@
 import path from "node:path";
 
 import type { InstructionContext } from "./instructions.js";
-import { formatInternalToolPromptGuidance } from "./tools.js";
+import { getInternalToolHostPromptGuidance } from "./tool-host.js";
 
 export type PromptSectionKey =
   | "identity"
@@ -221,7 +221,7 @@ function buildToolAvailability(session: InstructionContext): string[] {
     "Tool execution rule: when a runnable command or file edit is needed, emit the tool call directly; do not output command blocks for the user to execute.",
     "Tool failure rule: if a broad command or path fails, retry with a narrower path, absolute path, or read/list/search tool before asking user for help.",
     "Missing tool rule: if a command/tool is missing, search package scripts, node_modules/.bin, local bins, available MCP/tool registries, and official web docs when needed; install project-local dependencies only when safe and scoped; ask user only for root/admin installs.",
-    ...formatInternalToolPromptGuidance(),
+    ...getInternalToolHostPromptGuidance(),
   ];
 }
 

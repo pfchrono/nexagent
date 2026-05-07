@@ -87,8 +87,10 @@ import { consumeOperatorSteer, estimateTokenCount, hasRuntimeApprovalSessionGran
 import type { RuntimeApprovalRequest, RuntimeSession } from "./runtime/session.js";
 import { styleAssistantOutput } from "./runtime/style.js";
 import { recordToolMemory } from "./runtime/tool-memory.js";
+import { createInternalToolHost } from "./runtime/tool-host.js";
 import { type ToolCapableTurn, type MissingTurnEvidence } from "./runtime/tool-capable-turn.js";
-import { classifyInternalToolRisk, executeInternalToolAsync, validateInternalToolArguments, type InternalToolCall, type InternalToolResult } from "./runtime/tools.js";
+import { type classifyInternalToolRisk } from "./runtime/tool-risk.js";
+import { type InternalToolCall, type InternalToolResult } from "./runtime/tools.js";
 
 export interface ProviderRequest {
   session: RuntimeSession;
@@ -1514,7 +1516,8 @@ async function withAbortController<T>(
 }
 
 async function executeToolWithRuntimeActivity(session: RuntimeSession, call: InternalToolCall): Promise<InternalToolResult> {
-  const argumentFailure = validateInternalToolArguments(call);
+  const toolHost = createInternalToolHost(session);
+  const argumentFailure = toolHost.validate(call);
   if (argumentFailure) {
     recordRuntimeEvent(session, {
       kind: "tool",
@@ -1525,7 +1528,7 @@ async function executeToolWithRuntimeActivity(session: RuntimeSession, call: Int
     return argumentFailure;
   }
 
-  const risk = classifyInternalToolRisk(call);
+  const risk = toolHost.authorize(call);
   const argsPreview = formatToolArgumentsPreview(call.arguments);
   const startedAt = Date.now();
   recordRuntimeEvent(session, {
@@ -1572,7 +1575,7 @@ async function executeToolWithRuntimeActivity(session: RuntimeSession, call: Int
     };
   }
   setRuntimeAction(session, "running", `tool ${call.name} · ${risk}`);
-  const result = await executeInternalToolAsync(session, call);
+  const result = await toolHost.execute(call);
   const durationMs = Date.now() - startedAt;
   setRuntimeAction(session, result.ok ? "ready" : "error", `tool ${call.name} ${result.ok ? "complete" : "failed"} · ${risk}`);
   const outputPreview = truncateToolOutput(result.output);

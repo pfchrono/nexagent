@@ -1,5 +1,5 @@
 import type { RuntimeSession } from "../runtime/session.js";
-import { getInternalToolFunctionDefinitions } from "../runtime/tools.js";
+import { getInternalToolHostFunctionDefinitions } from "../runtime/tool-host.js";
 import { fetchWithProviderExecutionPolicy, resolveProviderExecutionPolicy } from "./execution-policy.js";
 
 export interface CodexHttpInvocation {
@@ -63,7 +63,7 @@ export async function invokeCodexHttpTransport(
         ...(request.nativeInput !== undefined ? { input: request.nativeInput } : { input: request.prompt }),
         ...(request.instructions ? { instructions: request.instructions } : {}),
         ...(request.previousResponseId ? { previous_response_id: request.previousResponseId } : {}),
-        ...(request.nativeTools ? { tools: getInternalToolFunctionDefinitions(), parallel_tool_calls: false } : {}),
+        ...(request.nativeTools ? { tools: getInternalToolHostFunctionDefinitions(), parallel_tool_calls: false } : {}),
         store: false,
       }),
     },

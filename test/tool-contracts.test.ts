@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { getInternalToolHostFunctionDefinitions, getInternalToolHostPromptGuidance, createInternalToolHost } from "../src/runtime/tool-host.js";
 import { getToolContract, getToolContracts, isNexsightToolName, isWriteToolName } from "../src/runtime/tool-contracts.js";
 import { fail, formatToolError, formatToolPath, ok, pending, toToolResult } from "../src/runtime/tool-results.js";
 import { classifyInternalToolRisk } from "../src/runtime/tool-risk.js";
-import { getInternalToolDefinitions } from "../src/runtime/tools.js";
+import { getInternalToolDefinitions, getInternalToolFunctionDefinitions } from "../src/runtime/tools.js";
 import type { RuntimeSession } from "../src/runtime/session.js";
 
 test("tool contracts cover all internal tool definitions", () => {
@@ -29,6 +30,19 @@ test("tool contracts expose stable write and nexsight evidence flags", () => {
 test("tool contracts remain unique by name", () => {
   const names = getToolContracts().map((contract) => contract.name);
   assert.equal(new Set(names).size, names.length);
+});
+
+test("tool host exposes shared prompt and native function contracts", () => {
+  const session = { cwd: "/repo" } as RuntimeSession;
+  const host = createInternalToolHost(session);
+
+  assert.deepEqual(host.functionDefinitions(), getInternalToolFunctionDefinitions());
+  assert.deepEqual(getInternalToolHostFunctionDefinitions(), getInternalToolFunctionDefinitions());
+  assert.deepEqual(getInternalToolHostPromptGuidance(), host.promptGuidance());
+  assert.equal(host.list().length, getInternalToolDefinitions().length);
+  assert.equal(host.describe("read_file").name, "read_file");
+  assert.equal(host.authorize({ name: "nexsight_execute", arguments: { code: "console.log(1)" } }), "low");
+  assert.equal(host.validate({ name: "read_file", arguments: { path: "src/app.ts", limit: 10 } }), null);
 });
 
 test("tool result helpers define stable guarded tool result shape", () => {
