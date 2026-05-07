@@ -116,6 +116,7 @@ If a slash command changes, update `src/cli/catalog.ts`, README command docs, an
 - Use context-preserving tools for large output: summarize logs, test output, search results, diffs, and API responses before bringing them into the conversation.
 - Use parallel agents for independent research or exploration tasks when available. Keep implementation ownership clear and avoid overlapping edits.
 - When delegating, hand off the current goal, issue number or task slice, relevant decisions, files already touched, verification already run, and intended output. Tell subagents they are not alone in the codebase, must avoid reverting others' changes, and must return changed files plus evidence.
+- When a subagent's task is complete, obsolete, or no longer needed, close it after consuming its result. Do this before starting the next issue or spawning another subagent so agent slots stay available.
 - Commit incrementally when asked to commit or when work naturally reaches a reviewable checkpoint. Small commits make rollback and review easier.
 - Break large work into deliverable chunks with verification after each chunk. Avoid long sessions that mix unrelated goals.
 
