@@ -3,6 +3,7 @@ import test from "node:test";
 
 import type { ProviderResult } from "../src/provider.js";
 import { TurnRun } from "../src/runtime/turn-run.js";
+import { ToolCapableTurn, createToolCapableTurn } from "../src/runtime/tool-capable-turn.js";
 import type { RuntimeSession } from "../src/runtime/session.js";
 
 function createSession(): RuntimeSession {
@@ -47,6 +48,15 @@ test("turn run reaches completed state on successful provider result", async () 
   assert.equal(run.getState(), "completed");
   const states = run.getTransitions().map((entry) => entry.to);
   assert.deepEqual(states, ["provider_loop", "finalizing", "completed"]);
+});
+
+test("tool-capable turn module exposes the turn state machine seam", () => {
+  const session = createSession();
+  const run = createToolCapableTurn({ session, prompt: "inspect repo" });
+
+  assert.ok(run instanceof ToolCapableTurn);
+  assert.equal(run.getState(), "initializing");
+  assert.equal(run.getObligations().requiresWriteEvidence, false);
 });
 
 test("turn run reaches blocked state on provider failure", async () => {

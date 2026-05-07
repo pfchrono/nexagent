@@ -5,11 +5,16 @@ import { savePersistedRuntimeState } from "../runtime/persistence.js";
 import { beginSkillRun, completeSkillRun, recordSkillToolResult } from "../runtime/skill-runner.js";
 import { styleAssistantOutput } from "../runtime/style.js";
 import { clearRuntimeTodos, pruneFinishedTurnTodos } from "../runtime/todos.js";
-import { TurnRun, type ProviderTurnDetailFlags, type ProviderTurnLifecycle } from "../runtime/turn-run.js";
+import {
+  createToolCapableTurn,
+  type ToolCapableTurn,
+  type ProviderTurnDetailFlags,
+  type ProviderTurnLifecycle,
+} from "../runtime/tool-capable-turn.js";
 import type { InternalToolCall, InternalToolResult } from "../runtime/tools.js";
 
 export type ProviderTurnExecutor = (
-  turnRun: TurnRun,
+  turnRun: ToolCapableTurn,
   onToolResult: (call: InternalToolCall, result: InternalToolResult) => void,
 ) => Promise<ProviderResult>;
 
@@ -20,7 +25,7 @@ export interface ProviderExecutionLifecycle {
 }
 
 export async function runProviderExecutionLifecycle<T>(
-  turnRun: TurnRun,
+  turnRun: ToolCapableTurn,
   lifecycle: ProviderTurnLifecycle,
   executor: (events: ProviderExecutionLifecycle) => Promise<T>,
 ): Promise<T> {
@@ -38,12 +43,12 @@ export function recordProviderExecutionCompleted(
   outputChars: number,
   flags?: ProviderTurnDetailFlags,
 ): void {
-  const turnRun = new TurnRun({ session: request.session, prompt: request.prompt });
+  const turnRun = createToolCapableTurn({ session: request.session, prompt: request.prompt });
   turnRun.onProviderTurnCompleted(createProviderTurnLifecycle(request), outputChars, flags);
 }
 
 export function recordProviderExecutionFailed(request: ProviderRequest, detail: string): void {
-  const turnRun = new TurnRun({ session: request.session, prompt: request.prompt });
+  const turnRun = createToolCapableTurn({ session: request.session, prompt: request.prompt });
   turnRun.onProviderTurnFailed(createProviderTurnLifecycle(request), detail);
 }
 
@@ -59,7 +64,7 @@ export async function runProviderTurn(
   executor: ProviderTurnExecutor,
   emitAgentStart: () => Promise<unknown> = () => emitRuntimeExtensionEvent(request.session, "agent_start", { prompt: request.prompt }),
 ): Promise<ProviderResult> {
-  const turnRun = new TurnRun({
+  const turnRun = createToolCapableTurn({
     session: request.session,
     prompt: request.prompt,
   });

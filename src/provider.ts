@@ -82,7 +82,7 @@ import { consumeOperatorSteer, estimateTokenCount, hasRuntimeApprovalSessionGran
 import type { RuntimeApprovalRequest, RuntimeSession } from "./runtime/session.js";
 import { styleAssistantOutput } from "./runtime/style.js";
 import { recordToolMemory } from "./runtime/tool-memory.js";
-import { TurnRun, type MissingTurnEvidence } from "./runtime/turn-run.js";
+import { type ToolCapableTurn, type MissingTurnEvidence } from "./runtime/tool-capable-turn.js";
 import { classifyInternalToolRisk, executeInternalToolAsync, validateInternalToolArguments, type InternalToolCall, type InternalToolResult } from "./runtime/tools.js";
 
 export interface ProviderRequest {
@@ -173,7 +173,7 @@ export async function executeProviderRequest(
 async function executeProviderRequestImpl(
   request: ProviderRequest,
   invokers: CodexInvokers = { exec: invokeCodexExecTransport, http: invokeCodexHttpTransport, codexHttp: invokeCodexChatGptHttpTransport },
-  turnRun: TurnRun,
+  turnRun: ToolCapableTurn,
   onToolResult?: (call: InternalToolCall, result: InternalToolResult) => void,
 ): Promise<ProviderResult> {
   const provider = request.session.provider;
@@ -856,7 +856,7 @@ async function executeOpenAiNativeToolLoop(
   model: string | null,
   transport: ProviderTransportAdapter,
   invokeHttp: CodexInvoker,
-  turnRun: TurnRun,
+  turnRun: ToolCapableTurn,
   onToolResult?: (call: InternalToolCall, result: InternalToolResult) => void,
 ): Promise<ProviderResult> {
   let previousResponseId: string | undefined;
@@ -1299,7 +1299,7 @@ function createMissingRequiredEvidenceFailureIfAny(
   model: string | null,
   transport: ProviderFailure["transport"],
   adapter: ProviderFailure["adapter"],
-  turnRun: TurnRun,
+  turnRun: ToolCapableTurn,
   turnEventStart: number,
   toolTranscript: string[],
   output: string,
@@ -1891,7 +1891,7 @@ async function maybeSynthesizeAfterRepeatedGuidance(
   toolTranscript: string[],
   guidanceNudgeCount: number,
   turnEventStart: number,
-  turnRun: TurnRun,
+  turnRun: ToolCapableTurn,
   reason: string,
 ): Promise<ProviderResult | null> {
   if (toolTranscript.length === 0 || guidanceNudgeCount < MAX_GUIDANCE_NUDGES_BEFORE_SYNTHESIS) {

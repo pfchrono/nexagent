@@ -1,5 +1,5 @@
 import { recordRuntimeEvent, type RuntimeSession } from "../runtime/session.js";
-import type { MissingTurnEvidence } from "../runtime/turn-run.js";
+import type { MissingTurnEvidence } from "../runtime/tool-capable-turn.js";
 
 export const MAX_GUIDANCE_NUDGES_BEFORE_SYNTHESIS = 2;
 export const MAX_ACTIVE_SKILL_OUTPUT_NUDGES = 4;
