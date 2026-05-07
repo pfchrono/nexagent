@@ -71,6 +71,7 @@ import {
   recordTurnTelemetry,
   refreshInstructionState,
   requestRuntimeCancel,
+  grantRuntimeApprovalForSession,
   resolveRuntimeApproval,
   setRuntimeAction,
   syncRuntimeSession,
@@ -2797,10 +2798,10 @@ function handleCompactCommand(session: RuntimeSession, args: string[]): RuntimeC
 
 function handleApprovalCommand(session: RuntimeSession, args: string[]): RuntimeCommandResult {
   const arg = args.join(" ").trim().toLowerCase();
-  if (args.length > 1 || (arg.length > 0 && !ENABLE_ARGS.has(arg) && !DISABLE_ARGS.has(arg) && !STATUS_ARGS.has(arg) && arg !== "approve" && arg !== "reject")) {
+  if (args.length > 1 || (arg.length > 0 && !ENABLE_ARGS.has(arg) && !DISABLE_ARGS.has(arg) && !STATUS_ARGS.has(arg) && arg !== "approve" && arg !== "allow-session" && arg !== "session" && arg !== "reject")) {
     return {
       ok: false,
-      message: "usage: /approval [on|off|status|approve|reject]",
+      message: "usage: /approval [on|off|status|approve|allow-session|reject]",
       activity: "command failed · /approval usage",
     };
   }
@@ -2811,6 +2812,14 @@ function handleApprovalCommand(session: RuntimeSession, args: string[]): Runtime
     }
     savePersistedRuntimeState(session);
     return { ok: true, output: formatOperationControlsStatus(session), activity: "approval granted" };
+  }
+
+  if (arg === "allow-session" || arg === "session") {
+    if (!grantRuntimeApprovalForSession(session)) {
+      return { ok: false, message: "no pending approval", activity: "approval missing" };
+    }
+    savePersistedRuntimeState(session);
+    return { ok: true, output: formatOperationControlsStatus(session), activity: "approval granted · session" };
   }
 
   if (arg === "reject") {
@@ -3593,7 +3602,7 @@ function formatOperationControlsStatus(session: RuntimeSession): string {
       .map((entry) => `${entry.status}:${entry.message}${entry.detail ? ` (${entry.detail})` : ""}`)
       .join(" | ")
     : "none";
-  return [
+  const lines = [
     `approvalRequired: ${String(session.operationControls.requireApprovalForGuarded)}`,
     `yoloMode: ${String(session.operationControls.yoloMode)}`,
     `pendingApproval: ${pending}`,
@@ -3603,7 +3612,16 @@ function formatOperationControlsStatus(session: RuntimeSession): string {
     `steer: ${session.operationControls.steerMessage ?? "none"}`,
     `lastAppliedSteer: ${session.operationControls.lastAppliedSteer ?? "none"}`,
     `steerHistory: ${steerHistory}`,
-  ].join("\n");
+  ];
+  if (session.operationControls.pendingApproval) {
+    lines.push("approvalOptions: approve once | allow-session | reject");
+    lines.push(`approvalPattern: ${session.operationControls.pendingApproval.pattern ?? "none"}`);
+  }
+  const sessionApprovalCount = session.operationControls.approvalSessionGrants?.length ?? 0;
+  if (sessionApprovalCount > 0) {
+    lines.push(`sessionApprovals: ${String(sessionApprovalCount)}`);
+  }
+  return lines.join("\n");
 }
 
 function formatToolPolicyStatus(session: RuntimeSession, detailMode: DetailMode = "compact"): string {

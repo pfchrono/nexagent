@@ -737,9 +737,9 @@ export function OpenTuiApp({ view: initialView, session, keyboardSource, promptH
         <box
           flexDirection="column"
           width={paletteWidth}
-          height={5}
+          height={9}
           position="absolute"
-          top={Math.max(4, paletteTop - 6)}
+          top={Math.max(2, paletteTop - 10)}
           left={paletteMarginLeft + 1}
           zIndex={90}
           padding={1}
@@ -748,6 +748,10 @@ export function OpenTuiApp({ view: initialView, session, keyboardSource, promptH
         >
           <text width={paletteWidth} fg="#f9e2af">Approval required</text>
           <text width={paletteWidth} fg="#f38ba8">{fitLine(`tool ${view.cockpit.approval.pendingTool}`, paletteWidth)}</text>
+          <text width={paletteWidth} fg="#f9e2af">{fitLine(`risk ${view.cockpit.approval.pendingRisk ?? "guarded"} · ${view.cockpit.approval.outcome}`, paletteWidth)}</text>
+          <text width={paletteWidth} fg="#cdd6f4">{fitLine(`summary ${view.cockpit.approval.pendingSummary ?? "none"}`, paletteWidth)}</text>
+          <text width={paletteWidth} fg="#a6adc8">{fitLine("scope approve once or allow exact same call this session", paletteWidth)}</text>
+          <text width={paletteWidth} fg="#a6e3a1">{fitLine(view.cockpit.approval.options.join(" | "), paletteWidth)}</text>
           <text width={paletteWidth} fg="#a6adc8">{fitLine(view.cockpit.approval.hints.join(" | "), paletteWidth)}</text>
         </box>
       ) : null}
@@ -1317,6 +1321,10 @@ export function OpenTuiApp({ view: initialView, session, keyboardSource, promptH
     const keyValue = key.sequence.toLowerCase() || key.name.toLowerCase();
     if (key.name === "escape" || keyValue === "r" || key.name === "n") {
       submitPrompt("/approval reject");
+      return true;
+    }
+    if (keyValue === "s") {
+      submitPrompt("/approval allow-session");
       return true;
     }
     if (keyValue === "a" || key.name === "y" || key.name === "enter" || key.name === "return") {

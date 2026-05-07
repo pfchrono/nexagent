@@ -53,8 +53,14 @@ test("createOpenTuiRuntimeView maps runtime session without mutation", () => {
       approval: {
         mode: "open",
         pendingTool: null,
+        pendingRisk: null,
+        pendingSummary: null,
+        pendingPattern: null,
+        requestedAt: null,
         lastDecision: "none",
-        hints: ["A/Y approve", "R/N/Esc reject", "/approval status"],
+        hints: ["A/Y approve once", "S allow session", "R/N/Esc reject", "/approval status"],
+        options: ["/approval approve", "/approval allow-session", "/approval reject"],
+        outcome: "none",
       },
       warnings: [],
       ladder: {
@@ -773,6 +779,8 @@ test("OpenTUI cockpit view maps approval warnings ladder and memory split", () =
     tool: "write_file",
     risk: "guarded",
     summary: "write tmp/example.txt",
+    pattern: "write_file:{\"path\":\"tmp/example.txt\"}",
+    requestedAt: "2026-04-30T00:00:03.000Z",
   };
   session.operationControls.steerMessage = "use smaller patch";
   session.operationControls.steerState = "queued";
@@ -806,9 +814,14 @@ test("OpenTUI cockpit view maps approval warnings ladder and memory split", () =
 
   assert.equal(view.cockpit.approval.mode, "guarded");
   assert.equal(view.cockpit.approval.pendingTool, "write_file");
-  assert.deepEqual(view.cockpit.approval.hints, ["A/Y approve", "R/N/Esc reject", "/approval status"]);
+  assert.equal(view.cockpit.approval.pendingRisk, "guarded");
+  assert.equal(view.cockpit.approval.pendingSummary, "write tmp/example.txt");
+  assert.match(view.cockpit.approval.pendingPattern ?? "", /write_file/);
+  assert.equal(view.cockpit.approval.outcome, "waiting decision");
+  assert.deepEqual(view.cockpit.approval.hints, ["A/Y approve once", "S allow session", "R/N/Esc reject", "/approval status"]);
+  assert.deepEqual(view.cockpit.approval.options, ["/approval approve", "/approval allow-session", "/approval reject"]);
   assert.equal(view.cockpit.warnings[0]?.type, "approval");
-  assert.match(view.cockpit.warnings.map((warning) => warning.action).join("\n"), /approval approve/);
+  assert.match(view.cockpit.warnings.map((warning) => warning.action).join("\n"), /allow-session/);
   assert.equal(view.cockpit.ladder.intent, "build cockpit");
   assert.equal(view.cockpit.ladder.act, "tool write_file queued");
   assert.match(view.cockpit.memory.retrieved, /2 match/);

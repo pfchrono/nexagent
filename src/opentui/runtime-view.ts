@@ -24,8 +24,14 @@ export interface OpenTuiTranscriptBlock {
 export interface OpenTuiCockpitApprovalView {
   mode: string;
   pendingTool: string | null;
+  pendingRisk: string | null;
+  pendingSummary: string | null;
+  pendingPattern: string | null;
+  requestedAt: string | null;
   lastDecision: string;
   hints: string[];
+  options: string[];
+  outcome: string;
 }
 
 export interface OpenTuiCockpitWarningRow {
@@ -783,8 +789,18 @@ function createCockpitView(session: RuntimeSession, approval: string): OpenTuiCo
     approval: {
       mode: approval,
       pendingTool: session.operationControls.pendingApproval?.tool ?? null,
+      pendingRisk: session.operationControls.pendingApproval?.risk ?? null,
+      pendingSummary: session.operationControls.pendingApproval?.summary ?? null,
+      pendingPattern: session.operationControls.pendingApproval?.pattern ?? null,
+      requestedAt: session.operationControls.pendingApproval?.requestedAt ?? null,
       lastDecision: session.operationControls.lastDecision ?? "none",
-      hints: ["A/Y approve", "R/N/Esc reject", "/approval status"],
+      hints: ["A/Y approve once", "S allow session", "R/N/Esc reject", "/approval status"],
+      options: ["/approval approve", "/approval allow-session", "/approval reject"],
+      outcome: session.operationControls.pendingApproval
+        ? "waiting decision"
+        : session.operationControls.lastDecision
+          ? `last ${session.operationControls.lastDecision}`
+          : "none",
     },
     warnings: createCockpitWarnings(session),
     ladder: createCockpitLadder(session, turn.objective),
@@ -828,7 +844,7 @@ function createCockpitWarnings(session: RuntimeSession): OpenTuiCockpitWarningRo
       severity: "blocking",
       type: "approval",
       message: `waiting approval: ${session.operationControls.pendingApproval.tool}`,
-      action: "/approval approve or /approval reject",
+      action: "/approval approve | /approval allow-session | /approval reject",
     });
   }
   if (session.operationControls.cancelRequested) {

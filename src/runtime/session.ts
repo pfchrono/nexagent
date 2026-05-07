@@ -91,6 +91,15 @@ export interface RuntimeApprovalRequest {
   tool: string;
   risk: "guarded";
   summary: string;
+  pattern?: string;
+  requestedAt?: string;
+}
+
+export interface RuntimeApprovalGrant {
+  tool: string;
+  pattern: string;
+  summary: string;
+  grantedAt: string;
 }
 
 export interface RuntimeShellBlockReport {
@@ -114,6 +123,7 @@ export interface RuntimeOperationControlsState {
   requireApprovalForGuarded: boolean;
   yoloMode: boolean;
   pendingApproval: RuntimeApprovalRequest | null;
+  approvalSessionGrants: RuntimeApprovalGrant[];
   pendingQuestionnaire: RuntimeQuestionnaireRequest | null;
   lastDecision: "approved" | "rejected" | "canceled" | null;
   cancelRequested: boolean;
@@ -239,6 +249,7 @@ export function createRuntimeOperationControlsState(): RuntimeOperationControlsS
     requireApprovalForGuarded: false,
     yoloMode: false,
     pendingApproval: null,
+    approvalSessionGrants: [],
     pendingQuestionnaire: null,
     lastDecision: null,
     cancelRequested: false,
@@ -284,6 +295,28 @@ export function resolveRuntimeApproval(session: RuntimeSession, decision: "appro
   session.operationControls.lastDecision = decision;
   notifyRuntimeSessionChanged(session);
   return true;
+}
+
+export function grantRuntimeApprovalForSession(session: RuntimeSession): boolean {
+  const pending = session.operationControls.pendingApproval;
+  if (!pending?.pattern) {
+    return false;
+  }
+  session.operationControls.approvalSessionGrants = session.operationControls.approvalSessionGrants ?? [];
+  const existing = session.operationControls.approvalSessionGrants.some((grant) => grant.pattern === pending.pattern);
+  if (!existing) {
+    session.operationControls.approvalSessionGrants.push({
+      tool: pending.tool,
+      pattern: pending.pattern,
+      summary: pending.summary,
+      grantedAt: new Date().toISOString(),
+    });
+  }
+  return resolveRuntimeApproval(session, "approved");
+}
+
+export function hasRuntimeApprovalSessionGrant(session: RuntimeSession, pattern: string): boolean {
+  return (session.operationControls.approvalSessionGrants ?? []).some((grant) => grant.pattern === pattern);
 }
 
 export function requestRuntimeCancel(session: RuntimeSession): void {

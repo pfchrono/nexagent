@@ -1461,6 +1461,42 @@ test("runRuntimeCommand controls approval and operator steer state", async () =>
   });
 });
 
+test("runRuntimeCommand approves guarded requests once or for session pattern", async () => {
+  const { runRuntimeCommand } = await import("../src/cli.js");
+  const session = createSession();
+
+  session.operationControls.pendingApproval = {
+    tool: "write_file",
+    risk: "guarded",
+    summary: "{\"path\":\"tmp/example.txt\"}",
+    pattern: "write_file:{\"path\":\"tmp/example.txt\"}",
+    requestedAt: "2026-05-07T12:00:00.000Z",
+  };
+
+  const status = runRuntimeCommand(session, "/approval status");
+  assert.equal(status?.ok, true);
+  assert.match(status?.output ?? "", /approvalOptions: approve once \| allow-session \| reject/);
+  assert.match(status?.output ?? "", /approvalPattern: write_file/);
+
+  const sessionGrant = runRuntimeCommand(session, "/approval allow-session");
+  assert.equal(sessionGrant?.ok, true);
+  assert.equal(sessionGrant?.activity, "approval granted · session");
+  assert.equal(session.operationControls.pendingApproval, null);
+  assert.equal(session.operationControls.approvalSessionGrants.length, 1);
+  assert.match(sessionGrant?.output ?? "", /sessionApprovals: 1/);
+
+  session.operationControls.pendingApproval = {
+    tool: "shell_command",
+    risk: "guarded",
+    summary: "{\"command\":\"pwd\"}",
+    pattern: "shell_command:{\"command\":\"pwd\"}",
+  };
+  const once = runRuntimeCommand(session, "/approval approve");
+  assert.equal(once?.ok, true);
+  assert.equal(session.operationControls.approvalSessionGrants.length, 1);
+  assert.equal(session.operationControls.lastDecision, "approved");
+});
+
 test("runRuntimeCommand marks steer deferred while work is active", async () => {
   const { runRuntimeCommand } = await import("../src/cli.js");
   const session = createSession();

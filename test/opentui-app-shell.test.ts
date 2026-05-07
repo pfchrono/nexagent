@@ -135,7 +135,10 @@ test("OpenTUI app shell renders live view fields and Phase 66 command surfaces",
   assert.match(source, /handleAskKeyboardKey/);
   assert.match(source, /handleApprovalKeyboardKey/);
   assert.match(source, /submitPrompt\("\/approval approve"\)/);
+  assert.match(source, /submitPrompt\("\/approval allow-session"\)/);
   assert.match(source, /submitPrompt\("\/approval reject"\)/);
+  assert.match(source, /pendingSummary/);
+  assert.match(source, /same call this session/);
   assert.match(source, /submitAskOption/);
   assert.match(source, /handleAskOptionClick/);
   assert.match(source, /Up\/Down select · Enter choose · 1-4 quick · Esc cancel/);

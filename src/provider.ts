@@ -78,7 +78,7 @@ import { toDiagnosticRuntimeEvent, type RuntimeDiagnosticInput } from "./runtime
 import { emitRuntimeExtensionEvent } from "./runtime/extensions.js";
 import { savePersistedRuntimeState } from "./runtime/persistence.js";
 import { createQuestionnaireRequest, type RuntimeQuestionnaireQuestion } from "./runtime/questionnaire.js";
-import { consumeOperatorSteer, estimateTokenCount, recordRuntimeEvent, setRuntimeAction, subscribeRuntimeSession } from "./runtime/session.js";
+import { consumeOperatorSteer, estimateTokenCount, hasRuntimeApprovalSessionGrant, recordRuntimeEvent, setRuntimeAction, subscribeRuntimeSession } from "./runtime/session.js";
 import type { RuntimeApprovalRequest, RuntimeSession } from "./runtime/session.js";
 import { styleAssistantOutput } from "./runtime/style.js";
 import { recordToolMemory } from "./runtime/tool-memory.js";
@@ -1624,11 +1624,25 @@ async function maybeAwaitApproval(session: RuntimeSession, call: InternalToolCal
   if (risk !== "guarded" || !session.operationControls.requireApprovalForGuarded) {
     return true;
   }
+  const approvalPattern = formatApprovalPattern(call);
+  session.operationControls.approvalSessionGrants = session.operationControls.approvalSessionGrants ?? [];
+  if (hasRuntimeApprovalSessionGrant(session, approvalPattern)) {
+    session.operationControls.lastDecision = "approved";
+    recordRuntimeEvent(session, {
+      kind: "control",
+      status: "applied",
+      summary: `approval reused for ${call.name}`,
+      detail: "session pattern grant",
+    });
+    return true;
+  }
 
   const request: RuntimeApprovalRequest = {
     tool: call.name,
     risk,
-    summary: JSON.stringify(call.arguments ?? {}),
+    summary: summarizeApprovalArguments(call.arguments ?? {}),
+    pattern: approvalPattern,
+    requestedAt: new Date().toISOString(),
   };
   session.operationControls.pendingApproval = request;
   session.operationControls.lastDecision = null;
@@ -1661,6 +1675,28 @@ async function maybeAwaitApproval(session: RuntimeSession, call: InternalToolCal
     detail: risk,
   });
   return session.operationControls.lastDecision === "approved";
+}
+
+function formatApprovalPattern(call: InternalToolCall): string {
+  return `${call.name}:${stableStringify(call.arguments ?? {})}`;
+}
+
+function summarizeApprovalArguments(value: unknown): string {
+  const summary = stableStringify(value);
+  return summary.length > 240 ? `${summary.slice(0, 237)}...` : summary;
+}
+
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(stableStringify).join(",")}]`;
+  }
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => `${JSON.stringify(key)}:${stableStringify(entry)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
 }
 
 function waitForApprovalDecision(session: RuntimeSession): Promise<void> {

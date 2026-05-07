@@ -10,7 +10,7 @@ import { stripModelIntent } from "../src/provider/model-output.js";
 import { createDefaultProviderRegistry } from "../src/provider/registry.js";
 import { createRuntimeExtensionHost } from "../src/runtime/extensions.js";
 import { initializeRuntimeDebug } from "../src/runtime/debug.js";
-import { resolveRuntimeApproval, type RuntimeSession } from "../src/runtime/session.js";
+import { grantRuntimeApprovalForSession, resolveRuntimeApproval, type RuntimeSession } from "../src/runtime/session.js";
 
 function createSession(provider = "codex", model: string | null = "gpt-5.4"): RuntimeSession {
   return {
@@ -3631,6 +3631,66 @@ test("executeProviderRequest waits for guarded approval before tool execution", 
       fallbackApplied: false,
       output: cwd,
     });
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("executeProviderRequest reuses allow-session approval for same guarded pattern", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-provider-approval-session-"));
+
+  try {
+    const session = createSession();
+    session.cwd = cwd;
+    session.repo.root = cwd;
+    session.toolPolicy.allowedRoots = [cwd];
+    session.operationControls.requireApprovalForGuarded = true;
+    let turns = 0;
+
+    const pending = executeProviderRequest(
+      {
+        session,
+        prompt: "run same command twice after approval",
+      },
+      {
+        exec: async () => {
+          turns += 1;
+          if (turns === 1 || turns === 2) {
+            return {
+              exitCode: 0,
+              stdout: "",
+              stderr: "",
+              output: '<nexagent_tool_call>{"name":"shell_command","arguments":{"command":"pwd"}}</nexagent_tool_call>',
+            };
+          }
+          return {
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            output: "done",
+          };
+        },
+        http: async () => {
+          throw new Error("http should not be used");
+        },
+        codexHttp: async () => {
+          throw new Error("codex-http should not be used");
+        },
+      },
+    );
+
+    for (let index = 0; index < 20 && !session.operationControls.pendingApproval; index += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    assert.equal(session.operationControls.pendingApproval?.tool, "shell_command");
+    assert.equal(grantRuntimeApprovalForSession(session), true);
+
+    const result = await pending;
+    assert.equal(result.ok, true);
+    assert.equal(turns, 3);
+    assert.equal(session.operationControls.approvalSessionGrants.length, 1);
+    assert.equal(session.events.some((event) => event.summary === "approval reused for shell_command"), true);
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }

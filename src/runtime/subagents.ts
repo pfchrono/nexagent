@@ -257,6 +257,7 @@ function createChildSession(parent: RuntimeSession, agent: RuntimeSubagentRecord
     operationControls: {
       ...parent.operationControls,
       pendingApproval: null,
+      approvalSessionGrants: [],
       pendingQuestionnaire: null,
       activeAbortController: null,
       cancelRequested: false,

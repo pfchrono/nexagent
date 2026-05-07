@@ -302,7 +302,7 @@ Inside TUI:
 - `/attach <image-path>` — queue image attachment for HTTP transports
 - `/detach` — clear queued image attachments
 - `/mouse` — mouse mode status/config
-- `/approval` — approval gate controls
+- `/approval` — approval gate controls; `/approval approve` allows current guarded action once, `/approval allow-session` allows the exact guarded tool pattern for the current session, and `/approval reject` denies it
 - `/compact` — compaction status/manual compaction
 - `/diff`, `/rg`, `/find`, `/read`, `/ls`, `/pwd` — repo-local utility commands
 - `!<command>` — guarded shell command transcript output
