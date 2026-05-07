@@ -88,6 +88,7 @@ import type { RuntimeApprovalRequest, RuntimeSession } from "./runtime/session.j
 import { styleAssistantOutput } from "./runtime/style.js";
 import { recordToolMemory } from "./runtime/tool-memory.js";
 import { createInternalToolHost } from "./runtime/tool-host.js";
+import { createTurnCompletion, type TurnCompletion, type TurnCompletionStopReason } from "./runtime/turn-completion.js";
 import { type ToolCapableTurn, type MissingTurnEvidence } from "./runtime/tool-capable-turn.js";
 import { type classifyInternalToolRisk } from "./runtime/tool-risk.js";
 import { type InternalToolCall, type InternalToolResult } from "./runtime/tools.js";
@@ -119,6 +120,7 @@ export interface ProviderSuccess {
   adapter: "codex-cli-exec" | "openai-http-responses" | "codex-chatgpt-http";
   fallbackApplied: false;
   output: string;
+  completion?: TurnCompletion;
 }
 
 export interface ProviderFailure {
@@ -131,6 +133,7 @@ export interface ProviderFailure {
   code: "unsupported_provider" | "auth_unavailable" | "unsupported_model" | "transport_error";
   message: string;
   detail: string;
+  completion?: TurnCompletion;
 }
 
 export type ProviderResult = ProviderSuccess | ProviderFailure;
@@ -252,6 +255,7 @@ async function executeProviderRequestImpl(
       : undefined;
     const obligations = turnRun.getObligations();
     const toolTranscript: string[] = [];
+    let recoveredStopReason: TurnCompletionStopReason | null = null;
     if (obligations.requiresNexsightEvidence) {
       const preflight = await runRequiredNexsightPreflight(request, request.prompt, executeToolWithRuntimeActivity);
       toolTranscript.push(formatInternalToolExchange(0, preflight.call, preflight.result));
@@ -494,6 +498,9 @@ async function executeProviderRequestImpl(
           return createMissingRequiredToolEvidenceFailure(request, model, transport.transport, transport.id, missingClaimEvidence, output);
         }
         if (recoveryDecision.kind === "retry" && recoveryDecision.reason === "non_actionable_deferral") {
+          if (isResponseLaneBlocker(output)) {
+            recoveredStopReason = "recovered_response_lane_blocker";
+          }
           guidanceNudgeCount += 1;
           const earlyFinal = await maybeSynthesizeAfterRepeatedGuidance(
             request,
@@ -546,6 +553,16 @@ async function executeProviderRequestImpl(
           adapter: transport.id,
           fallbackApplied: false,
           output: styledOutput,
+          ...(recoveredStopReason
+            ? {
+              completion: createTurnCompletion({
+                ok: true,
+                stopReason: recoveredStopReason,
+                stepCount: step + 1,
+                toolCallCount: toolTranscript.length,
+              }),
+            }
+            : {}),
         };
       }
 
@@ -714,6 +731,14 @@ async function executeProviderRequestImpl(
       code: "transport_error",
       message: "turn stopped: tool loop ran too long",
       detail: `Model requested more than ${String(MAX_INTERNAL_TOOL_STEPS)} internal tool calls in one turn. Try tighter prompt, /cancel, or smaller task slice.`,
+      completion: createTurnCompletion({
+        ok: false,
+        stopReason: "tool_budget_exhausted",
+        stepCount: MAX_INTERNAL_TOOL_STEPS,
+        toolCallCount: toolTranscript.length,
+        errors: ["tool loop ran too long"],
+        partial: true,
+      }),
     };
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
@@ -1185,6 +1210,12 @@ function createMissingWriteEvidenceFailure(
       "Blocked assistant output:",
       output.slice(0, 1200),
     ].join("\n"),
+    completion: createTurnCompletion({
+      ok: false,
+      stopReason: "missing_evidence",
+      missingEvidence: ["write"],
+      errors: ["assistant claimed file mutation without write evidence"],
+    }),
   };
 }
 
@@ -1243,6 +1274,12 @@ function createMissingRequiredToolEvidenceFailure(
       "Blocked assistant output:",
       output.slice(0, 1200),
     ].join("\n"),
+    completion: createTurnCompletion({
+      ok: false,
+      stopReason: "missing_evidence",
+      missingEvidence: [requiredTool],
+      errors: [`assistant completed without required ${requiredTool} evidence`],
+    }),
   };
 }
 
@@ -1780,6 +1817,11 @@ function createOperationFailure(
     code: "transport_error",
     message: "operation halted",
     detail,
+    completion: createTurnCompletion({
+      ok: false,
+      stopReason: /cancel/i.test(detail) ? "operation_canceled" : "provider_error",
+      errors: [detail],
+    }),
   };
 }
 
@@ -1832,6 +1874,10 @@ function createUnsupportedTestClaimCorrection(
 function promptRequiresTestEvidence(prompt: string): boolean {
   return /\b(run|execute|perform|verify|validate|check)\b[\s\S]{0,80}\b(tests?|test suite|build|tsc|typecheck|lint)\b/i.test(prompt)
     || /\b(tests?|test suite|build|tsc|typecheck|lint)\b[\s\S]{0,80}\b(pass|green|verified|validate|check)\b/i.test(prompt);
+}
+
+function isResponseLaneBlocker(output: string): boolean {
+  return /\b(response lane|tool-enabled turn|tool enabled turn|no tool responses?|tool access|callable tool execution)\b/i.test(output);
 }
 
 function createToolBudgetContinuationPrompt(basePrompt: string, toolTranscript: string[], pendingToolName: string, cycleNumber: number): string {
@@ -2096,5 +2142,11 @@ function createToolBudgetPartialResult(
     adapter,
     fallbackApplied: false,
     output,
+    completion: createTurnCompletion({
+      ok: true,
+      stopReason: "tool_budget_exhausted",
+      toolCallCount: toolTranscript.length,
+      partial: true,
+    }),
   };
 }

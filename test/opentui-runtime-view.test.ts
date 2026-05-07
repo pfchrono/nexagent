@@ -34,6 +34,7 @@ test("createOpenTuiRuntimeView maps runtime session without mutation", () => {
     sessionLabel: "session session_test | turns 2",
     statusLabel: "ready - runtime baseline",
     cwdLabel: "/repo",
+    turnCompletion: null,
     transcriptLines: [],
     transcriptBlocks: [],
     composerHint: "",

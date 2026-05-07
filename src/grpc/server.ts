@@ -205,6 +205,7 @@ async function runQueuedPrompt(
         provider: result.provider,
         model: result.model ?? "",
         adapter: result.adapter,
+        completionJson: JSON.stringify(result.completion ?? null),
       });
       return;
     }
@@ -217,6 +218,7 @@ async function runQueuedPrompt(
       provider: result.provider,
       model: result.model ?? "",
       adapter: result.adapter,
+      completionJson: JSON.stringify(result.completion ?? null),
     });
   } catch (error) {
     if (isCancelled()) {

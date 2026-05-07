@@ -79,6 +79,11 @@ test("provider control helpers normalize usage and empty-output failures", () =>
     code: "transport_error",
     message: "provider returned empty output",
     detail: "provider finished with exit code 0 but produced no assistant text.",
+    completion: {
+      ok: false,
+      stopReason: "empty_output",
+      errors: ["provider returned empty output"],
+    },
   });
 });
 

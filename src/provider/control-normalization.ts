@@ -5,6 +5,7 @@ import { getCodexModelDefinition, normalizeCodexModel } from "../models.js";
 import { getProviderModelOptions } from "./registry.js";
 import type { ProviderFailure, ProviderRequest } from "../provider.js";
 import type { RuntimeSession } from "../runtime/session.js";
+import { createTurnCompletion } from "../runtime/turn-completion.js";
 
 export type ProviderTransportAdapter = typeof CODEX_HTTP_ADAPTER | typeof CODEX_CHATGPT_HTTP_ADAPTER | typeof CODEX_EXEC_ADAPTER;
 
@@ -94,6 +95,11 @@ export function createEmptyOutputFailure(
     code: "transport_error",
     message: "provider returned empty output",
     detail: "provider finished with exit code 0 but produced no assistant text.",
+    completion: createTurnCompletion({
+      ok: false,
+      stopReason: "empty_output",
+      errors: ["provider returned empty output"],
+    }),
   };
 }
 

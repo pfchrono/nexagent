@@ -8,6 +8,7 @@ import { detectKeybindingConflicts } from "../runtime/keybindings.js";
 import { getLspStatus } from "../runtime/lsp.js";
 import { deriveTurnCompletionState, getRemainingContextTokens, type RuntimeSession } from "../runtime/session.js";
 import { buildSessionTimeline } from "../runtime/session-timeline.js";
+import type { TurnCompletion } from "../runtime/turn-completion.js";
 
 const OPEN_BY_DEFAULT_LINE_CAP = 30;
 const TRANSCRIPT_BLOCK_LIMIT = 80;
@@ -133,6 +134,7 @@ export interface OpenTuiRuntimeView {
   sessionLabel: string;
   statusLabel: string;
   cwdLabel: string;
+  turnCompletion: TurnCompletion | null;
   transcriptLines: string[];
   transcriptBlocks: OpenTuiTranscriptBlock[];
   composerHint: string;
@@ -186,6 +188,7 @@ export function createOpenTuiRuntimeView(session: RuntimeSession): OpenTuiRuntim
     sessionLabel: `session ${session.id} | turns ${String(session.telemetry.turnCount)}`,
     statusLabel: `${session.action.status} - ${session.action.detail}`,
     cwdLabel: session.cwd,
+    turnCompletion: session.lastTurnCompletion ?? null,
     transcriptLines,
     transcriptBlocks,
     composerHint: "",

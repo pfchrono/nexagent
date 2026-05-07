@@ -79,6 +79,7 @@ export async function runProviderTurn(
         skillRun = recordSkillToolResult(skillRun, call, toolResult);
       });
       result = await applyMessageEndReplacement(request, result);
+      request.session.lastTurnCompletion = result.completion;
       if (result.ok) {
         completeSkillRun(skillRun, result.output);
       }

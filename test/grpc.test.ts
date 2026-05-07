@@ -306,6 +306,8 @@ test("gRPC RunPrompt recovers from fabricated response-lane tool blocker", async
 
     assert.equal(result.ok, true, String(result.error));
     assert.equal(result.output, "diagnosis completed from gRPC tool evidence");
+    const completion = JSON.parse(String(result.completionJson ?? "null")) as { stopReason?: string } | null;
+    assert.equal(completion?.stopReason, "recovered_response_lane_blocker");
     assert.equal(providerCalls, 3);
     assert.equal(
       session.events.some((event) => event.kind === "control" && event.summary === "continuation nudge applied"),

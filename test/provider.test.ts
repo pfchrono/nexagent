@@ -652,6 +652,7 @@ test("executeProviderRequest reports empty output after repeated intent-only res
 
   assert.equal(result.ok, false);
   assert.equal(result.ok ? "" : result.message, "provider returned empty output");
+  assert.equal(result.completion?.stopReason, "empty_output");
 });
 
 test("executeProviderRequest synthesizes from tool evidence after empty provider output", async () => {
@@ -1105,6 +1106,11 @@ test("executeProviderRequest fails when provider exits zero but assistant text i
     code: "transport_error",
     message: "provider returned empty output",
     detail: "provider finished with exit code 0 but produced no assistant text.",
+    completion: {
+      ok: false,
+      stopReason: "empty_output",
+      errors: ["provider returned empty output"],
+    },
   });
 });
 
@@ -1153,6 +1159,11 @@ test("executeProviderRequest fails when native transport exits zero but assistan
     code: "transport_error",
     message: "provider returned empty output",
     detail: "provider finished with exit code 0 but produced no assistant text.",
+    completion: {
+      ok: false,
+      stopReason: "empty_output",
+      errors: ["provider returned empty output"],
+    },
   });
 });
 
@@ -1513,6 +1524,8 @@ test("executeProviderRequest returns partial result when tool budget is exhauste
   assert.match(result.output, /Tool budget exhausted before final assistant answer/);
   assert.match(result.output, /Partial evidence from completed tools/);
   assert.match(result.output, /assistant output compacted/);
+  assert.equal(result.completion?.stopReason, "tool_budget_exhausted");
+  assert.equal(result.completion?.partial, true);
   assert.doesNotMatch(result.output, /Tool call: \{"name":"git_status","arguments":\{\}\}/);
   assert.equal(
     session.events.some((event) => event.kind === "control" && event.summary === "tool budget fallback returned partial result"),
@@ -2786,6 +2799,7 @@ test("executeProviderRequest nudges fabricated response-lane tool blockers to co
 
   assert.equal(result.ok, true);
   assert.equal(result.ok ? result.output : "", "diagnosis completed from tool evidence");
+  assert.equal(result.completion?.stopReason, "recovered_response_lane_blocker");
   assert.equal(prompts.length, 3);
   assert.equal(
     session.events.some((event) => event.kind === "control" && event.summary === "continuation nudge applied"),
@@ -3412,6 +3426,8 @@ test("executeProviderRequest blocks repeated file-change claims without write ev
     assert.equal(result.ok, false);
     assert.equal(result.code, "transport_error");
     assert.match(result.message, /required write evidence|without write evidence/);
+    assert.equal(result.completion?.stopReason, "missing_evidence");
+    assert.deepEqual(result.completion?.missingEvidence, ["write"]);
     assert.equal(
       session.events.some((event) => event.kind === "control" && event.summary === "write evidence gate blocked assistant response"),
       false,

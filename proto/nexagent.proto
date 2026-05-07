@@ -49,6 +49,7 @@ message PromptResponse {
   string provider = 4;
   string model = 5;
   string adapter = 6;
+  string completion_json = 7;
 }
 
 message StopRequest {}

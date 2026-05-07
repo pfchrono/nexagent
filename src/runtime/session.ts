@@ -12,6 +12,7 @@ import { formatTodoPromptSummary } from "./todos.js";
 import { formatToolMemoryPromptSummary } from "./tool-memory.js";
 import { formatSubagentPromptSummary } from "./subagents.js";
 import { formatGoalPromptSummary } from "./goal.js";
+import type { TurnCompletion } from "./turn-completion.js";
 
 export type RuntimeActionStatus = "ready" | "running" | "error";
 
@@ -154,6 +155,7 @@ export interface RuntimeSession extends RuntimeState {
   operationControls: RuntimeOperationControlsState;
   debug?: RuntimeDebugState;
   extensions?: RuntimeExtensionHost;
+  lastTurnCompletion?: TurnCompletion;
 }
 
 export type RuntimeSessionListener = () => void;
