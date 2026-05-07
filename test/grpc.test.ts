@@ -246,6 +246,84 @@ test("gRPC RunCommand executes improve-codebase-architecture through Spark provi
   }
 }, 30000);
 
+test("gRPC RunPrompt recovers from fabricated response-lane tool blocker", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-grpc-response-lane-blocker-"));
+  let handle: Awaited<ReturnType<typeof startNexagentGrpcServer>> | null = null;
+  try {
+    const session = await createGrpcTestSession(cwd);
+    session.cwd = cwd;
+    session.repo.root = cwd;
+    session.toolPolicy.allowedRoots = [cwd];
+    session.providerTransport.mode = "cli-exec";
+    session.providerTransport.adapter = "codex-cli-exec";
+    session.providerTransport.executor = "codex";
+    let providerCalls = 0;
+    handle = await startNexagentGrpcServer({
+      session,
+      host: "127.0.0.1",
+      port: 0,
+      providerExecutor: (request) => executeProviderRequest(request, {
+        exec: async () => {
+          providerCalls += 1;
+          if (providerCalls === 1) {
+            return {
+              exitCode: 0,
+              stdout: "",
+              stderr: "",
+              output: [
+                "I'm missing tool-call execution in this response lane, so here's the hard stop instead of pretending I scanned the code.",
+                "Blocker: current API turn did not expose callable tool execution after the required intent.",
+                "Unblocker: run me in a tool-enabled turn and I'll inspect current git/test/build state.",
+              ].join("\n"),
+            };
+          }
+          if (providerCalls === 2) {
+            return {
+              exitCode: 0,
+              stdout: "",
+              stderr: "",
+              output: '<nexagent_tool_call>{"name":"git_status","arguments":{}}</nexagent_tool_call>',
+            };
+          }
+          return {
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            output: "diagnosis completed from gRPC tool evidence",
+          };
+        },
+        http: async () => {
+          throw new Error("http should not be used");
+        },
+        codexHttp: async () => {
+          throw new Error("codex-http should not be used");
+        },
+      }),
+    });
+    const client = createGrpcClient(handle.address);
+
+    const result = await callGrpc(client, "runPrompt", { prompt: "diagnose current repo state" });
+
+    assert.equal(result.ok, true, String(result.error));
+    assert.equal(result.output, "diagnosis completed from gRPC tool evidence");
+    assert.equal(providerCalls, 3);
+    assert.equal(
+      session.events.some((event) => event.kind === "control" && event.summary === "continuation nudge applied"),
+      true,
+    );
+    assert.equal(
+      session.events.some((event) => event.kind === "tool" && event.summary === "tool git_status completed"),
+      true,
+    );
+
+    const stopped = await callGrpc(client, "stop", {});
+    assert.equal(stopped.ok, true);
+  } finally {
+    await handle?.stop();
+    await rm(cwd, { recursive: true, force: true });
+  }
+}, 30000);
+
 async function createGrpcTestSession(cwd: string): Promise<RuntimeSession> {
   const runtime = await bootstrapRuntime(cwd);
   const session = createRuntimeSession(runtime);

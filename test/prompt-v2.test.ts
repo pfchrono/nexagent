@@ -349,5 +349,6 @@ test("buildPromptV2 tells codex-http to use text tool envelope, not nonexistent 
   assert.match(prompt.prompt, /Transport: Codex ChatGPT HTTP \(codex-chatgpt-http\); auth=ready\./);
   assert.match(prompt.prompt, /This transport still uses Nexagent text tool-call markup/);
   assert.match(prompt.prompt, /do not wait for native callable functions/);
+  assert.match(prompt.prompt, /Do not claim the response lane lacks tool-call execution/);
   assert.match(prompt.prompt, /<nexagent_tool_call>\{"name":"read_file","arguments":\{"path":"README\.md"\}\}<\/nexagent_tool_call>/);
 });

@@ -1011,7 +1011,7 @@ test("createRuntimeState exposes discovered instruction sources", () => {
       instructionSources,
       promptV2Summary: {
         assembly: "v2",
-        count: 72,
+        count: 73,
         stableSections: "identity, execution_contract, tool_routing, editing_safety, provider_guidance",
         dynamicSections: "repo_context, runtime_state, task_tool_guidance",
         dynamicBoundary: "__NEXAGENT_PROMPT_DYNAMIC_BOUNDARY__",
@@ -1024,7 +1024,7 @@ test("createRuntimeState exposes discovered instruction sources", () => {
         editingSafety:
           "Read relevant code before editing behavior. | Keep changes scoped to requested outcome. | Do not revert user changes unless explicitly requested. | Prefer existing repo patterns over new abstractions. | Use structured parsers or repo helpers over ad hoc text manipulation when available. | Run focused verification when available before reporting completion. | If verification fails, report actual failing command/output and either fix it or name the blocker. | When edit tool output already rendered an Edited-file block or bounded diff preview, final answer should not repeat the full diff; summarize changed paths, l...",
         providerGuidance:
-          'Active provider: codex | Provider fallback policy: require-open-spec | Do not silently switch providers. Use configured provider and transport unless user or config changes it. | Tool calls must use Nexagent internal tool envelope exactly when provider text transport requires tool markup. | Transport: Codex ChatGPT HTTP (codex-chatgpt-http); auth=ready. | Keep instructions separate from user input. | This transport still uses Nexagent text tool-call markup; do not wait for native callable functions. | Text tool-call transport: there is no separate function-call UI. To call a tool, emit exactly one XML block and no other prose: | <nexagent_tool_call>{"name":"read_file","arguments":{"path":"README.md"}}</nexagent_tool_call> | Replace name and arguments with the needed internal tool. After tool output returns, continue from evidence. | Avoid CLI-only assumptions; API transport may not expose local Codex shell behavior.',
+          'Active provider: codex | Provider fallback policy: require-open-spec | Do not silently switch providers. Use configured provider and transport unless user or config changes it. | Tool calls must use Nexagent internal tool envelope exactly when provider text transport requires tool markup. | Transport: Codex ChatGPT HTTP (codex-chatgpt-http); auth=ready. | Keep instructions separate from user input. | This transport still uses Nexagent text tool-call markup; do not wait for native callable functions. | Text tool-call transport: there is no separate function-call UI. To call a tool, emit exactly one XML block and no other prose: | <nexagent_tool_call>{"name":"read_file","arguments":{"path":"README.md"}}</nexagent_tool_call> | Do not claim the response lane lacks tool-call execution; the harness executes the XML block after your message. | Replace name and arguments with the needed internal tool. After tool output returns, continue from evidence. | Avoid CLI-only assumptions; API transport may not expose local Codex shell behavior.',
         style: "none",
         repoContext: "Repo-local instructions are scoped context, not replacements for core execution contract. | AGENTS.md: # agents",
         runtimeState:

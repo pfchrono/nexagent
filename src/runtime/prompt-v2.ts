@@ -53,6 +53,7 @@ const PROMPT_SEPARATOR = "\n\n";
 const TEXT_TOOL_ENVELOPE_GUIDANCE = [
   "Text tool-call transport: there is no separate function-call UI. To call a tool, emit exactly one XML block and no other prose:",
   '<nexagent_tool_call>{"name":"read_file","arguments":{"path":"README.md"}}</nexagent_tool_call>',
+  "Do not claim the response lane lacks tool-call execution; the harness executes the XML block after your message.",
   "Replace name and arguments with the needed internal tool. After tool output returns, continue from evidence.",
 ];
 

@@ -2736,6 +2736,67 @@ test("executeProviderRequest nudges fabricated no-tool-response blockers to cont
   );
 });
 
+test("executeProviderRequest nudges fabricated response-lane tool blockers to continue", async () => {
+  const session = createSession();
+  const prompts: string[] = [];
+
+  const result = await executeProviderRequest(
+    {
+      session,
+      prompt: "diagnose current repo state",
+    },
+    {
+      exec: async (request) => {
+        prompts.push(request.prompt);
+        if (prompts.length === 1) {
+          return {
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            output: [
+              "I'm missing tool-call execution in this response lane, so here's the hard stop instead of pretending I scanned the code.",
+              "Blocker: current API turn did not expose callable tool execution after the required intent.",
+              "Unblocker: run me in a tool-enabled turn and I'll inspect current git/test/build state.",
+            ].join("\n"),
+          };
+        }
+        if (prompts.length === 2) {
+          return {
+            exitCode: 0,
+            stdout: "",
+            stderr: "",
+            output: '<nexagent_tool_call>{"name":"git_status","arguments":{}}</nexagent_tool_call>',
+          };
+        }
+        return {
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+          output: "diagnosis completed from tool evidence",
+        };
+      },
+      http: async () => {
+        throw new Error("http should not be used");
+      },
+      codexHttp: async () => {
+        throw new Error("codex-http should not be used");
+      },
+    },
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.ok ? result.output : "", "diagnosis completed from tool evidence");
+  assert.equal(prompts.length, 3);
+  assert.equal(
+    session.events.some((event) => event.kind === "control" && event.summary === "continuation nudge applied"),
+    true,
+  );
+  assert.equal(
+    session.events.some((event) => event.kind === "tool" && event.summary === "tool git_status completed"),
+    true,
+  );
+});
+
 test("executeProviderRequest rejects fabricated tool-access blocker after todo-only evidence", async () => {
   const session = createSession();
   session.activeSkill = {
