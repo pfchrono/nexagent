@@ -42,7 +42,7 @@ Canonical guidance for coding agents working in `nexagent`.
 - Pi-like runtime extension lifecycle shim with startup discovery from `.nexagent/extensions`, `.pi/extensions`, global `~/.nexagent/extensions`, and `~/.pi/agent/extensions`; supports `on(...)`, sync slash command registration, tool registration metadata, and lifecycle events
 - `--yolo` session mode that bypasses guarded approvals while preserving protected OS-root shell/tool blocks
 - provider-gated multi-image attachment flow for HTTP transports, with `Alt+V` clipboard image paste and `/attach` path attach
-- startup MCP hydration from `.nexagent/mcp.json`, global `~/.nexagent/mcp.json`, and legacy `.mcp.json` with deduped server names and bounded startup timeouts
+- startup MCP hydration from `.nexagent/mcp.json` and global `~/.nexagent/mcp.json`, with legacy `.mcp.json` migration compatibility, deduped server names, and bounded startup timeouts
 - tags-only Sentry diagnostics for command, provider, tool, compaction, OpenTUI, startup, and memory signal failures; raw prompts/output/tool/file/transcript content stays out of Sentry unless explicitly opted in for AI span content
 - configurable compaction thresholds, Archivist recurrence/dedupe, failure recovery playbooks, and memory signal counters
 - cockpit-style OpenTUI surfaces: paced assistant replies, turn metadata, warning/error lanes, turn blocks, token/duration badges, risk/outcome/action rows, navigation hints, capability panel
@@ -53,7 +53,7 @@ Canonical guidance for coding agents working in `nexagent`.
 - `AGENTS.md` is canonical agent guidance.
 - `CLAUDE.md` exists only as compatibility shim and should point here.
 - `README.md` is canonical user-facing project overview.
-- Archived historical docs live under `archive/`.
+- Historical planning, dogfood notes, and generated context docs are not tracked in this repo.
 
 Do not split durable agent instructions between `AGENTS.md` and `CLAUDE.md`.
 
@@ -91,7 +91,7 @@ If a slash command changes, update `src/cli/catalog.ts`, README command docs, an
 - Match existing TypeScript style.
 - Keep runtime behavior grounded in tests.
 - Do not refactor unrelated systems during feature work.
-- Do not mass-add local state directories such as `.bun/`, `.nexagent/`, `.codex/`, `.npm/`, `.opencode/`, `.rtk/`, or generated scratch files.
+- Do not mass-add local state directories or generated planning/context files such as `.bun/`, `.nexagent/`, `.codex/`, `.npm/`, `.opencode/`, `.rtk/`, `.planning/`, `dogfood-memory.md`, `CONTEXT.md`, or `docs/`.
 - Preserve protected OS-root safety. `--yolo` is not permission to mutate critical system roots.
 - Treat uncommitted changes as user work unless you made them.
 
@@ -125,7 +125,7 @@ When behavior is ambiguous:
 1. direct user request
 2. `AGENTS.md`
 3. `README.md`
-4. repo-local config (`.nexagent/`, `.claude/settings.json`, `.nexagent/mcp.json`, legacy `.mcp.json`)
+4. repo-local config (`.nexagent/`, `.claude/settings.json`, `.nexagent/mcp.json`)
 5. current code and tests
 6. donor/upstream references
 
@@ -140,3 +140,4 @@ Free-Code, Hermes, OpenCode, Codex-fresh, and other donor repos are reference ma
 - Update `README.md` for user-facing behavior changes.
 - Update `AGENTS.md` for durable agent behavior changes.
 - Keep `CLAUDE.md` as pointer-only compatibility file.
+- Keep `.planning/`, `dogfood-memory.md`, generated `CONTEXT*.md`, and stale planning docs out of Git.

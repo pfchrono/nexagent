@@ -10,6 +10,9 @@ dist/
 .agents/
 .omc/
 .planning/
+.mcp.json
+.mc.json
+dogfood-memory.md
 openspec/
 .compound-engineering/
 .compound-enginering/

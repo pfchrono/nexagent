@@ -18,7 +18,7 @@ Terminal-first AI coding harness for local operator-driven development.
 - Provides guarded web fetch/search and batch edit helpers for research and multi-file patch workflows.
 - Provides slash commands for status, usage, keymap help, persistent goals, Lean-style Nexsight compressed reads/search, Pi-compatible notify/emoji/color/safe-git/SCIP helpers, provider/model/effort control, tools, memory, config, LSP, skill routing, boomerang autonomous task handoffs, mouse behavior, approvals, compaction, file reads/searches, diffs, and image attachments.
 - Loads Pi-like extension modules from `.nexagent/extensions`, `.pi/extensions`, `~/.nexagent/extensions`, and `~/.pi/agent/extensions` with lifecycle events, sync slash-command registration, and tool metadata registration.
-- Hydrates stdio MCP servers at startup from `.nexagent/mcp.json` or legacy `.mcp.json`, with per-server startup timeouts and deduped server selection.
+- Hydrates stdio MCP servers at startup from `.nexagent/mcp.json`, with per-server startup timeouts and deduped server selection.
 - Supports `$skill` shorthand for skill routing.
 - Supports `!<command>` for guarded shell command transcript output.
 - Supports `--yolo` session mode for guarded approval bypass while preserving protected OS-root shell/tool blocks.
@@ -35,8 +35,8 @@ Terminal-first AI coding harness for local operator-driven development.
 - `src/tui/` — terminal primitives
 - `src/opentui/` — default interactive OpenTUI shell and runtime view adapter
 - `test/` — CLI, provider, runtime config, instructions, and tool tests
-- `.planning/` — project roadmap, state, requirements, phase artifacts, audits
-- `.nexagent/`, `.claude/`, `.nexagent/mcp.json`, legacy `.mcp.json` — repo-local runtime and assistant configuration
+- `.nexagent/mcp.json` — repo-local MCP configuration when needed
+- `.nexagent/`, `.claude/`, `.planning/`, and other local assistant state directories are ignored unless a specific source file is intentionally tracked
 - `~/.nexagent/` — global user settings, skills, and reusable Nexagent assets
 
 ## Commands
@@ -168,7 +168,7 @@ Runtime settings merge in this order:
 
 Repo settings win over global settings. Relative paths inside global settings resolve from `~/.nexagent/`; relative paths inside repo settings resolve from the repo root.
 
-MCP configuration is discovered separately from runtime settings. Nexagent prefers repo `.nexagent/mcp.json`, then legacy repo `.mcp.json`, then global `~/.nexagent/mcp.json`. Legacy `.mcp.json` entries are migrated into `.nexagent/mcp.json` when possible, and duplicate server names are not loaded twice. Stdio MCP servers hydrate during startup. Each server can set `startup_timeout_sec` or `startupTimeoutSec`; values are bounded to prevent a hung server from blocking the shell indefinitely. HTTP MCP definitions remain visible as configured status until an HTTP bridge is available.
+MCP configuration is discovered separately from runtime settings. Nexagent prefers repo `.nexagent/mcp.json`, then global `~/.nexagent/mcp.json`. Legacy repo `.mcp.json` is still recognized for migration compatibility, but it should stay untracked. Duplicate server names are not loaded twice. Stdio MCP servers hydrate during startup. Each server can set `startup_timeout_sec` or `startupTimeoutSec`; values are bounded to prevent a hung server from blocking the shell indefinitely. HTTP MCP definitions remain visible as configured status until an HTTP bridge is available.
 
 Provider registry config lives in `config.json` and currently supports JSON-first provider definitions. Repo `.nexagent/config.json` overrides global `~/.nexagent/config.json`; invalid provider entries are disabled with warnings instead of crashing startup.
 
@@ -306,8 +306,6 @@ Inside TUI:
 - `/diff`, `/rg`, `/find`, `/read`, `/ls`, `/pwd` — repo-local utility commands
 - `!<command>` — guarded shell command transcript output
 
-Roadmap notes for deeper config/LSP work live in `docs/config-menu-plan.md` and `docs/lsp-integration-plan.md`.
-
 ## Nexsight
 
 Nexsight is the built-in context/code intelligence helper inspired by `context-mode`.
@@ -349,17 +347,6 @@ Internal tools are repo-local and guarded. Shell output is bounded. Shell policy
 Do not treat `--yolo` as permission to run destructive commands.
 
 Readable reference paths may be broader than writable roots so the model can inspect nearby repositories for context. Writes remain guarded to configured write roots unless explicit yolo/session policy allows a broader write, and protected/system paths stay blocked.
-
-## Planning State
-
-Current planning truth lives under `.planning/`.
-
-Read these before major changes:
-
-- `.planning/PROJECT.md`
-- `.planning/ROADMAP.md`
-- `.planning/STATE.md`
-- `.planning/REQUIREMENTS.md`
 
 ## Development Notes
 
