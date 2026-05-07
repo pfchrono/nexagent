@@ -43,6 +43,7 @@ import { getProviderDefinition, getProviderModelOptions, type ProviderModelOptio
 import { ANSI, padLine, padVisibleLine, renderRule, renderScreen, resetScreenRenderer, tintLine, truncateLine, wrapText } from "./tui/primitives.js";
 import { autocompletePromptBuffer, describePromptHint, type PromptCompletionResult } from "./cli/autocomplete.js";
 import { COMMAND_CATALOG } from "./cli/catalog.js";
+import { toolResultToCommandResult, type RuntimeCommandFailure, type RuntimeCommandResult } from "./cli/command-result.js";
 import {
   discoverSkills,
   formatSkillList,
@@ -77,6 +78,7 @@ import {
 import { LAUNCH_SWITCHES, formatLaunchHelp, parseCommand, resolvePrompt, type CliCommand } from "./cli/launch.js";
 
 export { autocompletePromptBuffer, describePromptHint } from "./cli/autocomplete.js";
+export type { RuntimeCommandFailure, RuntimeCommandResult, RuntimeCommandSuccess } from "./cli/command-result.js";
 export { LAUNCH_SWITCHES, formatLaunchHelp, parseCommand, resolvePrompt } from "./cli/launch.js";
 export type { PromptCompletionResult, PromptCompletionSuggestion } from "./cli/autocomplete.js";
 
@@ -376,25 +378,7 @@ interface TerminalSize {
   rows: number;
 }
 
-interface RuntimeCommandSuccess {
-  ok: true;
-  output: string;
-  activity: string;
-  autoInvokeAfterSkill?: boolean;
-  invokePrompt?: string;
-  transcriptPrompt?: string;
-  promptSummary?: string;
-}
-
-interface RuntimeCommandFailure {
-  ok: false;
-  message: string;
-  activity: string;
-}
-
 type DiagnosticRow = readonly [string, string];
-
-export type RuntimeCommandResult = RuntimeCommandSuccess | RuntimeCommandFailure;
 
 async function main(): Promise<void> {
   const command = parseCommand(process.argv.slice(2));
@@ -3840,39 +3824,6 @@ function ensureReasoningEffortSupported(session: RuntimeSession, provider: strin
     return;
   }
   configuredEfforts![provider] = modelDefinition.defaultReasoningEffort;
-}
-
-function toolResultToCommandResult(command: string, detail: string, result: ReturnType<typeof executeInternalTool>): RuntimeCommandResult {
-  if (result.ok) {
-    return {
-      ok: true,
-      output: result.output,
-      activity: `${command} · ${detail}`,
-    };
-  }
-
-  if (result.output.startsWith("tool policy blocked ")) {
-    const blockedPath = result.output.replace(/^tool policy blocked\s+/, "").split(";")[0] ?? detail;
-    return {
-      ok: false,
-      message: result.output,
-      activity: `command blocked · ${blockedPath}`,
-    };
-  }
-
-  if (result.output.startsWith("shell policy blocked command")) {
-    return {
-      ok: false,
-      message: result.output,
-      activity: "command blocked · shell policy",
-    };
-  }
-
-  return {
-    ok: false,
-    message: result.output,
-    activity: `command failed · /${command} ${detail}`,
-  };
 }
 
 function resolveCommandPath(session: RuntimeSession, inputPath?: string): string {
