@@ -1,6 +1,6 @@
 import type { PromptCompletionResult } from "../cli/autocomplete.js";
 
-export type ComposerOverlayMode = "none" | "command" | "skill" | "history-search";
+export type ComposerOverlayMode = "none" | "command" | "command-palette" | "skill" | "history-search";
 
 export interface ComposerAttachmentState {
   label: string;
@@ -39,6 +39,7 @@ export type ComposerKeyEvent =
   | { kind: "accept-value"; value: string }
   | { kind: "escape" }
   | { kind: "history"; direction: -1 | 1; force?: boolean; history: string[] }
+  | { kind: "open-command-palette" }
   | { kind: "open-history-search" }
   | { kind: "clear-attachment" };
 
@@ -272,6 +273,17 @@ export function handleOpenTuiComposerEvent(
     }
     case "history":
       return browseHistory(state, event.history, event.direction, event.force === true);
+    case "open-command-palette":
+      return {
+        state: {
+          ...state,
+          overlayMode: "command-palette",
+          selectedIndex: 0,
+          historyQuery: "",
+          notice: "command palette",
+        },
+        intent: null,
+      };
     case "open-history-search":
       return {
         state: { ...state, overlayMode: "history-search", historyQuery: state.text, selectedIndex: 0, notice: "history search" },
@@ -341,6 +353,9 @@ function overlayForText(text: string, current: ComposerOverlayMode): ComposerOve
   const trimmed = text.trimStart();
   if (current === "history-search") {
     return "history-search";
+  }
+  if (current === "command-palette") {
+    return "command-palette";
   }
   if (trimmed.startsWith("$") || trimmed.startsWith("/skill") || hasTrailingSkillToken(text)) {
     return "skill";

@@ -1,3 +1,6 @@
+import { readdirSync } from "node:fs";
+import path from "node:path";
+
 import { autocompletePromptBuffer, describePromptHint, type PromptCompletionResult, type PromptCompletionSuggestion } from "../cli/autocomplete.js";
 import { COMMAND_CATALOG } from "../cli/catalog.js";
 import { CODEX_MODEL_CATALOG } from "../models.js";
@@ -36,13 +39,13 @@ export interface RuntimeCommandIntent {
   input: string;
 }
 
-export function createCommandSurface(cwd: string, input: string, selectedIndex = 0): CommandSurface {
+export function createCommandSurface(cwd: string, input: string, selectedIndex = 0, options: { global?: boolean } = {}): CommandSurface {
   const completion = autocompletePromptBuffer({ cwd }, input, selectedIndex);
   const hint = describePromptHint({ cwd }, input);
   const trimmed = input.trimStart();
-  const rows = rowsForInput(cwd, trimmed, completion, selectedIndex);
+  const rows = options.global ? globalCommandPaletteRows(cwd, trimmed, selectedIndex) : rowsForInput(cwd, trimmed, completion, selectedIndex);
   return {
-    title: surfaceTitle(trimmed, completion),
+    title: options.global ? "Command Palette" : surfaceTitle(trimmed, completion),
     query: trimmed,
     rows,
     completion,
@@ -196,6 +199,80 @@ function rowsForInput(
   }
 
   return completion.suggestions.map((suggestion, index) => suggestionToRow(suggestion, index, completion.selectedIndex));
+}
+
+function globalCommandPaletteRows(cwd: string, query: string, selectedIndex: number): CommandPaletteRow[] {
+  const coreActions = [
+    { label: "Status dashboard", hint: "session · show runtime, repo, auth, style, and Sentry status", value: "/status " },
+    { label: "Config dashboard", hint: "ui · open interactive runtime configuration", value: "/config " },
+    { label: "Keys", hint: "ui · show keyboard shortcuts and interaction modes", value: "/keys " },
+    { label: "Provider status", hint: "control · show provider transport and capabilities", value: "/provider status" },
+    { label: "Model picker", hint: "control · choose model", value: "/model " },
+    { label: "Effort picker", hint: "control · choose reasoning effort", value: "/effort " },
+    { label: "LSP status", hint: "context · inspect local code intelligence", value: "/lsp status" },
+    { label: "Memory status", hint: "memory · inspect archivist memory", value: "/memory status" },
+    { label: "Goal status", hint: "workflow · inspect persistent goal", value: "/goal status" },
+    { label: "Tools", hint: "context · show repo-local tool policy", value: "/tools " },
+    { label: "Attach image", hint: "ui · queue image attachment path", value: "/attach " },
+  ];
+  const commandRows = COMMAND_CATALOG.map((entry) => ({
+    label: entry.name,
+    hint: `${commandCategory(entry.name)} · ${entry.description}`,
+    value: `${entry.name} `,
+  }));
+  const skillRows = discoverSkills(cwd).map((skill) => ({
+    label: `$${skill.name}`,
+    hint: `skill · ${skillPaletteHint(skill)}`,
+    value: `/skill ${skill.name}`,
+  }));
+  const modelRows = CODEX_MODEL_CATALOG.map((entry) => ({
+    label: entry.id,
+    hint: `model · ${entry.description} · effort: ${entry.supportedReasoningEfforts.join("/")}`,
+    value: `/model ${entry.id} `,
+  }));
+  const effortRows = ["low", "medium", "high", "xhigh"].map((effort) => ({
+    label: `effort ${effort}`,
+    hint: `effort · ${effortHint(effort)}`,
+    value: `/effort ${effort}`,
+  }));
+  const fileRows = commonFileActionRows(cwd);
+  const matches = rankByQuery([...coreActions, ...commandRows, ...skillRows, ...modelRows, ...effortRows, ...fileRows], query, (entry) => `${entry.label} ${entry.hint} ${entry.value}`);
+  const selected = clampIndex(selectedIndex, matches.length);
+  return matches.map((entry, index) => ({
+    ...entry,
+    selected: index === selected,
+  }));
+}
+
+function commonFileActionRows(cwd: string): Array<{ label: string; hint: string; value: string }> {
+  const rows: Array<{ label: string; hint: string; value: string }> = [
+    { label: "List current directory", hint: "file · list cwd", value: "/ls " },
+    { label: "Find in files", hint: "file · search text in repo files", value: "/find " },
+    { label: "Read file", hint: "file · read a path", value: "/read " },
+  ];
+  const candidates = [
+    { root: cwd, prefix: "./" },
+    { root: process.env.HOME ? path.join(process.env.HOME, "code") : "", prefix: "~/code/" },
+  ];
+  for (const candidate of candidates) {
+    if (!candidate.root) {
+      continue;
+    }
+    try {
+      for (const entry of readdirSync(candidate.root, { withFileTypes: true }).slice(0, 12)) {
+        const suffix = entry.isDirectory() ? "/" : "";
+        const label = `${candidate.prefix}${entry.name}${suffix}`;
+        rows.push({
+          label,
+          hint: entry.isDirectory() ? "directory · open/list path" : "file · read path",
+          value: entry.isDirectory() ? `/ls ${label}` : `/read ${label}`,
+        });
+      }
+    } catch {
+      // File action rows are opportunistic; unavailable roots should not break palette rendering.
+    }
+  }
+  return rows;
 }
 
 function suggestionToRow(suggestion: PromptCompletionSuggestion, index: number, selectedIndex: number): CommandPaletteRow {

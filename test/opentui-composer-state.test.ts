@@ -134,6 +134,37 @@ test("OpenTUI composer overlay Up and Down move selected index", () => {
   assert.equal(clamped.state.selectedIndex, 1);
 });
 
+test("OpenTUI composer opens command palette and keeps plain search query active", () => {
+  const opened = handleOpenTuiComposerEvent(createOpenTuiComposerState(), { kind: "open-command-palette" });
+  const typed = handleOpenTuiComposerEvent(opened.state, { kind: "character", value: "status" });
+
+  assert.equal(opened.state.overlayMode, "command-palette");
+  assert.equal(opened.state.notice, "command palette");
+  assert.equal(typed.state.text, "status");
+  assert.equal(typed.state.overlayMode, "command-palette");
+});
+
+test("OpenTUI composer closes command palette on Escape", () => {
+  const state = { ...createOpenTuiComposerState(), overlayMode: "command-palette" as const, text: "stat", cursorIndex: 4 };
+  const result = handleOpenTuiComposerEvent(state, { kind: "escape" });
+
+  assert.equal(result.state.overlayMode, "none");
+  assert.equal(result.state.text, "stat");
+  assert.equal(result.state.notice, "palette closed");
+});
+
+test("OpenTUI composer accepts command palette selection into composer", () => {
+  const state = { ...createOpenTuiComposerState(), overlayMode: "command-palette" as const, selectedIndex: 1 };
+  const result = handleOpenTuiComposerEvent(state, {
+    kind: "accept-selection",
+    values: ["/status ", "/config "],
+  });
+
+  assert.equal(result.state.text, "/config ");
+  assert.equal(result.state.overlayMode, "none");
+  assert.deepEqual(result.intent, { kind: "accept-selection", value: "/config " });
+});
+
 test("OpenTUI composer history overlay selected row can load text", () => {
   const state = { ...createOpenTuiComposerState(), overlayMode: "history-search" as const, selectedIndex: 1 };
   const result = handleOpenTuiComposerEvent(state, {

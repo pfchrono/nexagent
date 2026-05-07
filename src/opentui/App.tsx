@@ -188,7 +188,7 @@ export function OpenTuiApp({ view: initialView, session, keyboardSource, promptH
   const view = runtimeView;
   composerRef.current = composer;
 
-  const commandSurface = createCommandSurface(view.cwd, composer.text, composer.selectedIndex);
+  const commandSurface = createCommandSurface(view.cwd, composer.text, composer.selectedIndex, { global: composer.overlayMode === "command-palette" });
   const skillPreview = resolveSkillPreview(view.cwd, composer.text, composer.selectedIndex);
   const paletteRows = rowsForOverlay(composer, commandSurface.rows, history);
   const visiblePaletteRows = visiblePaletteWindow(paletteRows, composer.selectedIndex, PALETTE_VISIBLE_ROWS);
@@ -370,6 +370,10 @@ export function OpenTuiApp({ view: initialView, session, keyboardSource, promptH
       return;
     }
     if (key.ctrl && key.name === "p") {
+      applyComposerEvent({ kind: "open-command-palette" });
+      return;
+    }
+    if (key.ctrl && key.name === "o") {
       setCockpitExpanded((current) => !current);
       setShellNotice(cockpitExpanded ? "cockpit hidden" : "cockpit shown");
       return;
@@ -655,7 +659,7 @@ export function OpenTuiApp({ view: initialView, session, keyboardSource, promptH
     previewLine,
     statusLine: modeStripLine,
   });
-  const keyLine = "Keys: ↵ send · Esc clear · Tab complete | 📋 Ctrl+V text · Alt+V image | ↕ history · PgUp/PgDn scroll | ⌘ Ctrl+P cockpit · Ctrl+G config · Ctrl+T trace · Ctrl+C copy · Ctrl+Y latest · /quit";
+  const keyLine = "Keys: ↵ send · Esc clear · Ctrl+P palette · Tab complete | 📋 Ctrl+V text · Alt+V image | ↕ history · PgUp/PgDn scroll | ⌘ Ctrl+O cockpit · Ctrl+G config · Ctrl+T trace · Ctrl+C copy · Ctrl+Y latest · /quit";
 
   useEffect(() => {
     setTranscriptState((current) => handleOpenTuiTranscriptEvent(current, {
@@ -2575,6 +2579,9 @@ function renderPalettePanelRows(options: {
 function paletteTitleForOverlay(composer: OpenTuiComposerState, commandSurfaceTitle: string): string {
   if (composer.overlayMode === "history-search") {
     return "History";
+  }
+  if (composer.overlayMode === "command-palette") {
+    return "Command Palette";
   }
   if (composer.overlayMode === "skill") {
     return "$ Skills";

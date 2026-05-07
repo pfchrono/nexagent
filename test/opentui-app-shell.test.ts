@@ -118,6 +118,7 @@ test("OpenTUI app shell renders live view fields and Phase 66 command surfaces",
   assert.match(source, /kind: "accept-value"/);
   assert.match(source, /onMouseUp=\{row\.value \? \(event\) => handlePaletteRowClick/);
   assert.match(source, /paletteTitleForOverlay/);
+  assert.match(source, /Command Palette/);
   assert.match(source, /\$ Skills/);
   assert.match(source, /History/);
   assert.match(source, /paletteFooterLine/);
@@ -142,6 +143,8 @@ test("OpenTUI app shell renders live view fields and Phase 66 command surfaces",
   assert.match(source, /cockpitWarningOverflow/);
   assert.match(source, /cockpitExpanded/);
   assert.match(source, /key\.ctrl && key\.name === "p"/);
+  assert.match(source, /kind: "open-command-palette"/);
+  assert.match(source, /key\.ctrl && key\.name === "o"/);
   assert.match(source, /configExpanded/);
   assert.match(source, /key\.ctrl && key\.name === "g"/);
   assert.match(source, /renderConfigPanelRows/);
@@ -152,6 +155,8 @@ test("OpenTUI app shell renders live view fields and Phase 66 command surfaces",
   assert.match(source, /lspProblemsPanelWidth/);
   assert.match(source, /renderLogoRows/);
   assert.match(source, /view\.logo\.frames/);
+  assert.match(source, /Ctrl\+P palette/);
+  assert.match(source, /Ctrl\+O cockpit/);
   assert.match(source, /Ctrl\+G config/);
   assert.match(source, /zIndex=\{94\}/);
   assert.match(source, /configSelectedIndex/);

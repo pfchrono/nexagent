@@ -18,6 +18,45 @@ test("OpenTUI command surface lists slash command palette rows", () => {
   assert.equal(emojiTestSurface.rows[0]?.value, "/emoji-test ");
 });
 
+test("OpenTUI command surface lists global command palette rows", () => {
+  const cwd = makeSkillWorkspace(["alpha"]);
+  const surface = createCommandSurface(cwd, "", 0, { global: true });
+
+  assert.equal(surface.title, "Command Palette");
+  assert.ok(surface.rows.some((row) => row.label === "Config dashboard" && row.value === "/config "));
+  assert.ok(surface.rows.some((row) => row.label === "LSP status" && row.value === "/lsp status"));
+  assert.ok(surface.rows.some((row) => row.label === "$alpha" && row.value === "/skill alpha"));
+  assert.ok(surface.rows.some((row) => row.label === "/status"));
+});
+
+test("OpenTUI global command palette searches actions commands models and efforts", () => {
+  const status = createCommandSurface(process.cwd(), "status", 0, { global: true });
+  const model = createCommandSurface(process.cwd(), "55", 0, { global: true });
+  const effort = createCommandSurface(process.cwd(), "xhigh", 0, { global: true });
+
+  assert.equal(status.rows[0]?.value, "/status ");
+  assert.equal(model.rows[0]?.value, "/model gpt-5.5 ");
+  assert.equal(effort.rows[0]?.value, "/effort xhigh");
+});
+
+test("OpenTUI global command palette includes common file actions and cwd rows", () => {
+  const cwd = mkdtempSync(path.join(tmpdir(), "nexagent-global-file-palette-"));
+  try {
+    mkdirSync(path.join(cwd, "src"));
+    writeFileSync(path.join(cwd, "README.md"), "# test\n", "utf8");
+
+    const list = createCommandSurface(cwd, "list", 0, { global: true });
+    const src = createCommandSurface(cwd, "src", 0, { global: true });
+    const readme = createCommandSurface(cwd, "readme", 0, { global: true });
+
+    assert.ok(list.rows.some((row) => row.value === "/ls "));
+    assert.ok(src.rows.some((row) => row.label === "./src/" && row.value === "/ls ./src/"));
+    assert.ok(readme.rows.some((row) => row.label === "./README.md" && row.value === "/read ./README.md"));
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("OpenTUI command surface fuzzy-ranks commands, models, effort, and skills", () => {
   const cwd = makeSkillWorkspace(["apricot-plan", "beta-review"]);
   const commandSurface = createCommandSurface(process.cwd(), "/sf");
