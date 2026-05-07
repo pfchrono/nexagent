@@ -32,8 +32,12 @@ import { resolveRepoPath, validateReadToolPath, validateRepoToolPath, validateWr
 import { executeTodoTool } from "./todos.js";
 import { executeAgentTool, executeGetSubagentResultTool, executeSteerSubagentTool } from "./subagents.js";
 import { executeGetGoalTool, executeUpdateGoalTool } from "./goal.js";
+import { fail, formatToolError, formatToolPath, ok, pending, toToolResult } from "./tool-results.js";
+import { classifyInternalToolRisk } from "./tool-risk.js";
 
 export { resolveRepoPath, validateReadToolPath, validateRepoToolPath, validateWriteToolPath } from "./tool-paths.js";
+export { fail, formatToolError, formatToolPath, ok, pending, toToolResult } from "./tool-results.js";
+export { classifyInternalToolRisk } from "./tool-risk.js";
 
 export type InternalToolName =
   | "read_file"
@@ -978,30 +982,6 @@ export async function executeInternalToolAsync(session: RuntimeSession, call: In
     default:
       return executeInternalTool(session, call);
   }
-}
-
-export function classifyInternalToolRisk(call: InternalToolCall): "low" | "guarded" {
-  if (call.name === "nexsight_execute") {
-    return isNexsightShellCall(call.arguments ?? {}) ? "guarded" : "low";
-  }
-
-  return call.name === "shell_command"
-    || call.name === "write_file"
-    || call.name === "apply_patch"
-    || call.name === "batch_edit"
-    || call.name === "preview_patch"
-    || call.name === "web_fetch"
-    || call.name === "web_search"
-    || call.name === "mcp_call"
-    || call.name === "nexsight_index"
-    || call.name === "nexsight_batch"
-    || call.name === "archivist_save"
-    || call.name === "archivist_checkpoint"
-    || call.name === "lsp_symbols"
-    || call.name === "lsp_diagnostics"
-    || call.name === "lsp_navigation"
-    ? "guarded"
-    : "low";
 }
 
 async function executeAskUserQuestionTool(session: RuntimeSession, args: Record<string, unknown>): Promise<InternalToolResult> {
@@ -2047,11 +2027,6 @@ function executeNexsightGatherTool(session: RuntimeSession, args: Record<string,
   }));
 }
 
-function isNexsightShellCall(args: Record<string, unknown>): boolean {
-  const language = normalizeNexsightLanguage(asOptionalString(args.language ?? args.lang));
-  return language === "shell" || Boolean(asOptionalString(args.command ?? args.cmd));
-}
-
 function normalizeNexsightLanguage(value?: string): string | undefined {
   const language = value?.trim().toLowerCase();
   if (!language) {
@@ -2464,37 +2439,8 @@ function decodeHtmlEntities(value: string): string {
     .replace(/&#x2F;/g, "/");
 }
 
-function ok(tool: InternalToolName, output: string): InternalToolResult {
-  return { ok: true, tool, output };
-}
-
-function fail(tool: InternalToolName, output: string): InternalToolResult {
-  return { ok: false, tool, output };
-}
-
-function toToolResult(tool: InternalToolName, result: { ok: boolean; output: string }): InternalToolResult {
-  return { ok: result.ok, tool, output: result.output };
-}
-
-function pending(tool: InternalToolName, detail: string): InternalToolResult {
-  return { ok: false, tool, output: `${tool} requires ${detail} execution path` };
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function formatToolError(targetPath: string, error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error);
-  return `${targetPath}: ${message}`;
-}
-
-function formatToolPath(session: RuntimeSession, targetPath: string): string {
-  const relativePath = path.relative(session.cwd, targetPath);
-  if (relativePath.length === 0) {
-    return ".";
-  }
-  return relativePath.length > 0 && !relativePath.startsWith("..") ? relativePath : targetPath;
 }
 
 function normalizeContentMatchLines(output: string, rootPath: string): string {
