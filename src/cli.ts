@@ -1065,7 +1065,7 @@ function dispatchRuntimeCommand(session: RuntimeSession, input: string): Runtime
     case "/deadpoolmode":
       return handleStyleToggleCommand(session, args, "deadpoolMode");
     case "/statusline":
-      return handleStyleToggleCommand(session, args, "statusline");
+      return handleStatuslineCommand(session, args);
     case "/approval":
       return handleApprovalCommand(session, args);
     case "/ask":
@@ -2126,6 +2126,31 @@ function handleStatusCommand(session: RuntimeSession, args: string[]): RuntimeCo
     output: formatRuntimeStatus(session, detailMode),
     activity: "status",
   };
+}
+
+function handleStatuslineCommand(session: RuntimeSession, args: string[]): RuntimeCommandResult {
+  const first = args[0]?.toLowerCase() ?? "";
+  if (first === "command") {
+    const command = args.slice(1).join(" ").trim();
+    session.ui = session.ui ?? { logoMode: "full" };
+    if (!command || DISABLE_ARGS.has(command.toLowerCase()) || command.toLowerCase() === "clear") {
+      session.ui.statuslineCommand = undefined;
+      savePersistedRuntimeState(session);
+      return {
+        ok: true,
+        output: "Statusline command cleared.",
+        activity: "statusline command cleared",
+      };
+    }
+    session.ui.statuslineCommand = command;
+    savePersistedRuntimeState(session);
+    return {
+      ok: true,
+      output: `Statusline command set. Preview: ${formatCustomStatusline(session) ?? "unavailable"}`,
+      activity: "statusline command set",
+    };
+  }
+  return handleStyleToggleCommand(session, args, "statusline");
 }
 
 function handleUsageCommand(session: RuntimeSession, args: string[]): RuntimeCommandResult {
@@ -3444,6 +3469,7 @@ function formatRuntimeDashboardStatus(session: RuntimeSession): string {
     `sessionEmoji: ${getSessionEmoji(session)}`,
     `sessionColor: ${String(getSessionColorCode(session))}`,
     `notify: ${session.ui?.notifyEnabled === true ? "on" : "off"} threshold=${String(notifyThresholdMs(session))}ms`,
+    `statuslineCommand: ${session.ui?.statuslineCommand ?? "none"}`,
     "memory",
     `archivist: ${session.archivist.enabled ? "on" : "off"}`,
     `storage: ${session.archivist.storagePath ?? "disabled"}`,
@@ -3729,6 +3755,10 @@ function formatOpenTuiKeymap(): string {
 }
 
 function formatStatusline(session: RuntimeSession): string {
+  const custom = formatCustomStatusline(session);
+  if (custom) {
+    return custom;
+  }
   return [
     `${getSessionEmoji(session)} color=${String(getSessionColorCode(session))}`,
     session.provider,
@@ -3741,6 +3771,44 @@ function formatStatusline(session: RuntimeSession): string {
     formatTurnTokens(session),
     formatContextMeter(getRemainingContextTokens(session), getContextWindowForSession(session)),
   ].join(" | ");
+}
+
+function formatCustomStatusline(session: RuntimeSession): string | null {
+  const command = session.ui?.statuslineCommand?.trim();
+  if (!command) {
+    return null;
+  }
+  try {
+    const output = execFileSync("bash", ["-lc", command], {
+      cwd: pathExists(session.cwd) ? session.cwd : process.cwd(),
+      encoding: "utf8",
+      timeout: 500,
+      maxBuffer: 4096,
+      env: {
+        ...process.env,
+        NEXAGENT_PROVIDER: session.provider,
+        NEXAGENT_MODEL: getCurrentProviderModel(session),
+        NEXAGENT_TRANSPORT: session.providerTransport.mode,
+        NEXAGENT_APPROVAL: formatApprovalSummary(session),
+        NEXAGENT_CONTEXT_LEFT: String(getRemainingContextTokens(session)),
+        NEXAGENT_CONTEXT_WINDOW: String(getContextWindowForSession(session)),
+        NEXAGENT_TURN_COUNT: String(session.telemetry.turnCount),
+        NEXAGENT_CWD: session.cwd,
+      },
+    }).split(/\r?\n/).find((line) => line.trim().length > 0)?.trim() ?? "";
+    return output.length > 0 ? truncateLine(output, 180) : null;
+  } catch {
+    return "statusline command failed";
+  }
+}
+
+function pathExists(target: string): boolean {
+  try {
+    statSync(target);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function getCurrentProviderModel(session: RuntimeSession): string {

@@ -86,7 +86,7 @@ test("createOpenTuiRuntimeView maps runtime session without mutation", () => {
     },
     {
       title: "ui",
-      rows: ["logo full", "mouse undefined", "statusline off"],
+      rows: ["logo full", "mouse undefined", "statusline off", "statuslineCommand none"],
       },
       {
         title: "memory",
@@ -136,6 +136,7 @@ test("createOpenTuiRuntimeView maps runtime session without mutation", () => {
       effort: "medium",
       transportMode: "cli-exec",
       approval: "open",
+      customLine: null,
       branch: "main",
       repoName: "repo",
       sessionAge: "0s",
@@ -187,6 +188,19 @@ test("createOpenTuiRuntimeView maps config sections and logo modes", () => {
   assert.match(view.configSections.find((section) => section.title === "memory")?.rows.join("\n") ?? "", /failure-playbook/);
   assert.match(view.configSections.find((section) => section.title === "context")?.rows.join("\n") ?? "", /^percent 0$/m);
   assert.match(view.configSections.find((section) => section.title === "tools")?.rows.join("\n") ?? "", /^mode repo-local-guarded$/m);
+});
+
+test("createOpenTuiRuntimeView runs bounded custom statusline command", () => {
+  const session = createSession();
+  session.ui = {
+    logoMode: "full",
+    statuslineCommand: "printf custom:$NEXAGENT_PROVIDER:$NEXAGENT_MODEL",
+  };
+
+  const view = createOpenTuiRuntimeView(session);
+
+  assert.equal(view.statusline.customLine, "custom:codex:gpt-5.4");
+  assert.match(view.configSections.find((section) => section.title === "ui")?.rows.join("\n") ?? "", /^statuslineCommand printf/m);
 });
 
 test("createOpenTuiRuntimeView exposes compact LSP problems panel data", async () => {

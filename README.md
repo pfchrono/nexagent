@@ -289,6 +289,7 @@ Inside TUI:
 - `/config` — open the interactive OpenTUI config side window; `/config status` prints provider, UI, memory, LSP, and diagnostics status
 - `/config [set] logo <full|condensed|off>` — persist startup logo mode
 - `/config [set] lsp <on|off>` and `/config [set] lsp-index <on|off>` — persist LSP/code-intel toggles
+- `/statusline command <shell>` and `/statusline command clear` — configure a bounded custom statusline script; the script receives `NEXAGENT_PROVIDER`, `NEXAGENT_MODEL`, `NEXAGENT_TRANSPORT`, `NEXAGENT_APPROVAL`, `NEXAGENT_CONTEXT_LEFT`, `NEXAGENT_CONTEXT_WINDOW`, `NEXAGENT_TURN_COUNT`, and `NEXAGENT_CWD`
 - `/lsp` — inspect local LSP status; enabled by default with no auto-downloads and bounded TypeScript/static fallback
 - `/lsp setup` — show configured LSP command, resolved binary path, readiness, and install hint
 - `/lsp symbols <path>` and `/lsp diagnostics <path>` — summarize local code intelligence for one project path

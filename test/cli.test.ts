@@ -906,6 +906,7 @@ test("runRuntimeCommand exposes and persists config and LSP settings", async () 
     assert.match(status?.output ?? "", /^tools$/m);
     assert.match(status?.output ?? "", /^context$/m);
     assert.match(status?.output ?? "", /^logoMode: full$/m);
+    assert.match(status?.output ?? "", /^statuslineCommand: none$/m);
     assert.match(status?.output ?? "", /^enabled: false$/m);
 
     const statusDashboard = runRuntimeCommand(session, "/status dashboard");
@@ -920,6 +921,15 @@ test("runRuntimeCommand exposes and persists config and LSP settings", async () 
     const directLogo = runRuntimeCommand(session, "/config logo full");
     assert.equal(directLogo?.ok, true);
     assert.equal(session.ui.logoMode, "full");
+
+    const statuslineCommand = runRuntimeCommand(session, "/statusline command printf custom:$NEXAGENT_MODEL");
+    assert.equal(statuslineCommand?.ok, true);
+    assert.match(statuslineCommand?.output ?? "", /Preview: custom:gpt-5.4/);
+    assert.equal(session.ui.statuslineCommand, "printf custom:$NEXAGENT_MODEL");
+
+    const statuslineClear = runRuntimeCommand(session, "/statusline command clear");
+    assert.equal(statuslineClear?.ok, true);
+    assert.equal(session.ui.statuslineCommand, undefined);
 
     const lsp = runRuntimeCommand(session, "/config set lsp on");
     assert.equal(lsp?.ok, true);
@@ -1573,6 +1583,23 @@ test("runRuntimeCommand toggles statusline", async () => {
     activity: "statusline on",
   });
   assert.equal(session.commandModes.statusline, true);
+});
+
+test("runRuntimeCommand uses bounded custom statusline command", async () => {
+  const { runRuntimeCommand } = await import("../src/cli.js");
+  const session = createSession();
+
+  const configured = runRuntimeCommand(session, "/statusline command printf custom:$NEXAGENT_PROVIDER:$NEXAGENT_CONTEXT_LEFT");
+  assert.equal(configured?.ok, true);
+  assert.match(configured?.output ?? "", /Preview: custom:codex:272000/);
+
+  const enabled = runRuntimeCommand(session, "/statusline on");
+  assert.equal(enabled?.ok, true);
+  assert.match(enabled?.output ?? "", /custom:codex:272000/);
+
+  const cleared = runRuntimeCommand(session, "/statusline command off");
+  assert.equal(cleared?.ok, true);
+  assert.equal(session.ui.statuslineCommand, undefined);
 });
 
 test("runRuntimeCommand switches transport mode", async () => {

@@ -1,3 +1,5 @@
+import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { freemem, totalmem } from "node:os";
 
 import { getCodexModelDefinition } from "../models.js";
@@ -79,6 +81,7 @@ export interface OpenTuiStatuslineView {
   effort: string;
   transportMode: string;
   approval: string;
+  customLine: string | null;
   branch: string;
   repoName: string;
   sessionAge: string;
@@ -181,6 +184,33 @@ export function createOpenTuiRuntimeView(session: RuntimeSession): OpenTuiRuntim
   };
 }
 
+function formatCustomStatusline(session: RuntimeSession, model: string): string | null {
+  const command = session.ui?.statuslineCommand?.trim();
+  if (!command) {
+    return null;
+  }
+  try {
+    const output = execFileSync("bash", ["-lc", command], {
+      cwd: existsSync(session.cwd) ? session.cwd : process.cwd(),
+      encoding: "utf8",
+      timeout: 500,
+      maxBuffer: 4096,
+      env: {
+        ...process.env,
+        NEXAGENT_PROVIDER: session.provider,
+        NEXAGENT_MODEL: model,
+        NEXAGENT_TRANSPORT: session.providerTransport.mode,
+        NEXAGENT_CONTEXT_LEFT: String(getRemainingContextTokens(session)),
+        NEXAGENT_TURN_COUNT: String(session.telemetry.turnCount),
+        NEXAGENT_CWD: session.cwd,
+      },
+    }).split(/\r?\n/).find((line) => line.trim().length > 0)?.trim() ?? "";
+    return output.length > 0 ? firstLine(output).slice(0, 180) : null;
+  } catch {
+    return "statusline command failed";
+  }
+}
+
 function createLogoView(session: RuntimeSession, provider: string, model: string): OpenTuiLogoView {
   const mode = session.ui?.logoMode ?? "full";
   const metadata = [
@@ -276,6 +306,7 @@ function createConfigSections(session: RuntimeSession, statusline: OpenTuiStatus
         `logo ${session.ui?.logoMode ?? "full"}`,
         `mouse ${session.commandModes.mouseMode}`,
         `statusline ${session.commandModes.statusline ? "on" : "off"}`,
+        `statuslineCommand ${session.ui?.statuslineCommand ?? "none"}`,
       ],
     },
     {
@@ -689,6 +720,7 @@ function createStatuslineView(session: RuntimeSession, provider: string, model: 
     effort: configuredEffort ?? defaultEffort ?? "default",
     transportMode: session.providerTransport.mode,
     approval,
+    customLine: formatCustomStatusline(session, model),
     branch: session.repo.branch ?? "detached",
     repoName: session.repo.name,
     sessionAge: formatSessionAge(session),

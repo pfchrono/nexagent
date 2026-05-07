@@ -51,6 +51,7 @@ export interface PersistedUiState {
   sessionColorIndex?: number;
   notifyEnabled?: boolean;
   notifyThresholdMs?: number;
+  statuslineCommand?: string;
 }
 
 export interface SavePersistedRuntimeStateOptions {
@@ -104,6 +105,7 @@ export function savePersistedRuntimeState(session: RuntimeSession, options: Save
         sessionColorIndex: session.ui?.sessionColorIndex,
         notifyEnabled: session.ui?.notifyEnabled === true,
         notifyThresholdMs: session.ui?.notifyThresholdMs,
+        statuslineCommand: session.ui?.statuslineCommand,
       },
       auth: session.auth,
       btw: createRuntimeBtwState(session.btw),
@@ -205,6 +207,7 @@ function normalizeUiState(value: unknown): PersistedUiState | undefined {
     sessionColorIndex: typeof state.sessionColorIndex === "number" && Number.isFinite(state.sessionColorIndex) ? state.sessionColorIndex : undefined,
     notifyEnabled: state.notifyEnabled === true,
     notifyThresholdMs: typeof state.notifyThresholdMs === "number" && Number.isFinite(state.notifyThresholdMs) ? state.notifyThresholdMs : undefined,
+    statuslineCommand: typeof state.statuslineCommand === "string" && state.statuslineCommand.trim().length > 0 ? state.statuslineCommand.trim() : undefined,
   };
 }
 

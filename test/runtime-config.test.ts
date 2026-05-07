@@ -1034,6 +1034,7 @@ test("createRuntimeState exposes discovered instruction sources", () => {
         sessionColorIndex: undefined,
         notifyEnabled: false,
         notifyThresholdMs: 2000,
+        statuslineCommand: undefined,
       },
       btw: {
         visible: false,

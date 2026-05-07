@@ -29,7 +29,7 @@ export const COMMAND_CATALOG = [
   { name: "/doctor", usage: "/doctor", description: "run compact runtime health checks and show concrete next actions" },
   { name: "/caveman-mode", usage: "/caveman-mode [on|off|status]", description: "toggle compressed caveman response style" },
   { name: "/deadpoolmode", usage: "/deadpoolmode [on|off|status]", description: "toggle Deadpool prose style overlay" },
-  { name: "/statusline", usage: "/statusline [on|off|status]", description: "toggle compact runtime statusline footer" },
+  { name: "/statusline", usage: "/statusline [on|off|status|command <shell>|command clear]", description: "toggle or customize compact runtime statusline footer" },
   { name: "/approval", usage: "/approval [on|off|status|approve|reject]", description: "control guarded-tool approval gate" },
   { name: "/ask", usage: "/ask [status|<option#|text>|answer <question#> <option#|1,2|text>|submit|cancel]", description: "answer pending ask_user_question prompt" },
   { name: "/cancel", usage: "/cancel", description: "request cancel for pending operation" },

@@ -175,6 +175,7 @@ export function createRuntimeState(runtime: RuntimeBootstrap): RuntimeState {
       sessionColorIndex: boot.persisted?.ui?.sessionColorIndex ?? boot.config.ui?.sessionColorIndex,
       notifyEnabled: boot.persisted?.ui?.notifyEnabled ?? boot.config.ui?.notifyEnabled ?? false,
       notifyThresholdMs: boot.persisted?.ui?.notifyThresholdMs ?? boot.config.ui?.notifyThresholdMs ?? 2000,
+      statuslineCommand: boot.persisted?.ui?.statuslineCommand ?? boot.config.ui?.statuslineCommand,
     },
     auth: boot.auth,
     btw: createRuntimeBtwState(boot.persisted?.btw),

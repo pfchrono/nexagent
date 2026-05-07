@@ -103,6 +103,7 @@ export interface UiConfig {
   sessionColorIndex?: number;
   notifyEnabled?: boolean;
   notifyThresholdMs?: number;
+  statuslineCommand?: string;
 }
 
 export interface ArchivistDiagnosticsState {
@@ -772,6 +773,7 @@ function resolveUiConfig(settings?: Partial<UiConfig>): UiConfig {
     sessionColorIndex: typeof settings?.sessionColorIndex === "number" ? settings.sessionColorIndex : undefined,
     notifyEnabled: settings?.notifyEnabled === true,
     notifyThresholdMs: typeof settings?.notifyThresholdMs === "number" ? settings.notifyThresholdMs : undefined,
+    statuslineCommand: typeof settings?.statuslineCommand === "string" && settings.statuslineCommand.trim().length > 0 ? settings.statuslineCommand.trim() : undefined,
   };
 }
 

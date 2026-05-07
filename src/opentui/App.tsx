@@ -2338,6 +2338,9 @@ function configActionForRow(section: string, line: string): string | null {
     if (normalized.startsWith("statusline ")) {
       return normalized.endsWith("on") ? "/statusline off" : "/statusline on";
     }
+    if (normalized.startsWith("statuslinecommand ")) {
+      return normalized.endsWith("none") ? "/statusline command " : "/statusline command clear";
+    }
   }
   if (section === "memory") {
     return "/memory status";
@@ -2388,9 +2391,10 @@ function renderStatuslineRows(options: {
   const activeTool = options.statusline.activeTool ? ` · active ${compactStatusToken(options.statusline.activeTool)}` : "";
   const warningPart = options.statusline.warningCount > 0 ? ` · warn ${String(options.statusline.warningCount)}` : "";
   const toolPart = `tools ${String(options.statusline.currentTurnToolCount)}${options.statusline.currentTurnFailureCount > 0 ? ` !${String(options.statusline.currentTurnFailureCount)}` : ""}`;
-  const row1 = narrow
+  const defaultRow1 = narrow
     ? `${progressPrefix}${formatModelLabel(options.statusline.model)} · ${options.statusline.effort} · ${options.statusline.approval} · ${clockLabel}`
     : `${progressPrefix}${options.statusline.provider}/${formatModelLabel(options.statusline.model)} · effort ${options.statusline.effort} · ${options.statusline.transportMode} · approval ${options.statusline.approval} · git ${gitLabel} · session ${options.statusline.sessionAge} · ${clockLabel}`;
+  const row1 = options.statusline.customLine ? `${progressPrefix}${options.statusline.customLine}` : defaultRow1;
   const row2 = narrow
     ? `phase ${options.phaseLabel} · ctx ${String(options.statusline.contextPercent)}% · tok ${formatCompactNumber(tokensTotal)} · ${toolPart}${warningPart} · ${options.transcriptPosition}`
     : `phase ${options.phaseLabel} · ctx ${contextBar} ${contextLabel} ${String(options.statusline.contextPercent)}% · tok ${formatCompactNumber(tokensTotal)} (${formatCompactNumber(options.statusline.lastInputTokens)}↓/${formatCompactNumber(options.statusline.lastOutputTokens)}↑) · ${toolPart}${activeTool}${warningPart} · ${options.transcriptPosition} · ${options.shellNotice}${attachmentPart} · mem ${memLabel}`;
