@@ -337,7 +337,7 @@ function fuzzyMatchScore(text: string, query: string): number | null {
 }
 
 function commandCategory(command: string): string {
-  if (["/help", "/reload", "/quit", "/continue", "/finish", "/status", "/usage", "/doctor", "/keys"].includes(command)) {
+  if (["/help", "/reload", "/quit", "/continue", "/finish", "/status", "/usage", "/sessions", "/doctor", "/keys"].includes(command)) {
     return "session";
   }
   if (["/provider", "/model", "/effort", "/codex", "/login", "/approval"].includes(command)) {

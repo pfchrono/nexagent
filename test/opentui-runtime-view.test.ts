@@ -99,6 +99,10 @@ test("createOpenTuiRuntimeView maps runtime session without mutation", () => {
         rows: ["archivist off", "storage disabled", "retrieval idle"],
       },
       {
+        title: "sessions",
+        rows: ["current session_test", "status ready", "entries 0", "latest none", "open /sessions timeline"],
+      },
+      {
       title: "mcp",
       rows: ["configured 0", "hydrated 0/0", "tools 0", "failed none"],
     },
@@ -125,6 +129,15 @@ test("createOpenTuiRuntimeView maps runtime session without mutation", () => {
       lastTouched: null,
       source: "disabled",
       rows: [],
+    },
+    sessionTimeline: {
+      rows: [
+        "current session_test",
+        "status ready",
+        "entries 0",
+        "latest none",
+        "open /sessions timeline",
+      ],
     },
     logo: {
       mode: "full",
@@ -179,7 +192,7 @@ test("createOpenTuiRuntimeView maps config sections and logo modes", () => {
   assert.equal(view.logo.mode, "condensed");
   assert.match(view.logo.frames[0] ?? "", /nexagent/);
   assert.match(view.logo.metadata, /cfg:condensed/);
-  assert.deepEqual(view.configSections.map((section) => section.title), ["provider", "model", "approval", "ui", "memory", "mcp", "tools", "lsp", "context", "diagnostics"]);
+  assert.deepEqual(view.configSections.map((section) => section.title), ["provider", "model", "approval", "ui", "memory", "sessions", "mcp", "tools", "lsp", "context", "diagnostics"]);
   const lspRows = view.configSections.find((section) => section.title === "lsp")?.rows ?? [];
   assert.match(lspRows.join("\n"), /^status (ready|fallback)$/m);
   assert.deepEqual(lspRows.slice(1, 4), [
@@ -192,6 +205,7 @@ test("createOpenTuiRuntimeView maps config sections and logo modes", () => {
   assert.match(lspRows.join("\n"), /^lastTouched none$/m);
   assert.match(lspRows.join("\n"), /^indexArchivist on$/m);
   assert.match(view.configSections.find((section) => section.title === "memory")?.rows.join("\n") ?? "", /failure-playbook/);
+  assert.match(view.configSections.find((section) => section.title === "sessions")?.rows.join("\n") ?? "", /^open \/sessions timeline$/m);
   assert.match(view.configSections.find((section) => section.title === "context")?.rows.join("\n") ?? "", /^percent 0$/m);
   assert.match(view.configSections.find((section) => section.title === "tools")?.rows.join("\n") ?? "", /^mode repo-local-guarded$/m);
 });

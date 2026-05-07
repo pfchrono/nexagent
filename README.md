@@ -16,7 +16,7 @@ Terminal-first AI coding harness for local operator-driven development.
 - Exposes guarded internal tools for repo reads, writes, diffs, searches, shell commands, and Archivist memory.
 - Exposes Nexsight tools for bounded code/data execution, local indexing, and context search with SQLite FTS when available.
 - Provides guarded web fetch/search and batch edit helpers for research and multi-file patch workflows.
-- Provides slash commands for status, usage, keymap help, persistent goals, Lean-style Nexsight compressed reads/search, Pi-compatible notify/emoji/color/safe-git/SCIP helpers, provider/model/effort control, tools, memory, config, LSP, skill routing, boomerang autonomous task handoffs, mouse behavior, approvals, compaction, file reads/searches, diffs, and image attachments.
+- Provides slash commands for status, usage, sessions/timeline, keymap help, persistent goals, Lean-style Nexsight compressed reads/search, Pi-compatible notify/emoji/color/safe-git/SCIP helpers, provider/model/effort control, tools, memory, config, LSP, skill routing, boomerang autonomous task handoffs, mouse behavior, approvals, compaction, file reads/searches, diffs, and image attachments.
 - Loads Pi-like extension modules from `.nexagent/extensions`, `.pi/extensions`, `~/.nexagent/extensions`, and `~/.pi/agent/extensions` with lifecycle events, sync slash-command registration, and tool metadata registration.
 - Hydrates stdio MCP servers at startup from `.nexagent/mcp.json`, with per-server startup timeouts and deduped server selection.
 - Supports `$skill` shorthand for skill routing.
@@ -274,6 +274,7 @@ Inside TUI:
 - `/memory` — Archivist memory status, safe signal counters, and commands
 - `/memory --maintenance` — merge duplicate Archivist entries into recurrence records and refresh memory diagnostics
 - `/usage` — current session provider/model usage table with token totals and cost availability note
+- `/sessions [list|timeline [entry-id]|select <session-id>]` — inspect recent sessions and current session timeline entries for goals, commits, issue refs, and last status
 - `/todos [pending|in_progress|completed|all|clear]` — show or clear model-managed visual task checklist; active rows also render above the prompt
 - `/goal [--tokens 50k] <objective>` — start a persistent autonomous goal with optional token budget; active goal renders above the prompt and can continue across turns
 - `/goal status`, `/goal pause`, `/goal resume`, `/goal clear`, and `/goal statusbar on|off` — inspect or manage persistent goal state

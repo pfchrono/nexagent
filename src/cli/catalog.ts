@@ -18,6 +18,7 @@ export const COMMAND_CATALOG = [
   { name: "/mouse", usage: "/mouse [status|mode <auto|scroll|select>]", description: "show or set transcript mouse interaction mode" },
   { name: "/status", usage: "/status [--verbose|--sentry [--send-test-event]]", description: "show runtime, repo, auth, style, and Sentry status" },
   { name: "/usage", usage: "/usage", description: "show current session usage statistics with provider/model token totals" },
+  { name: "/sessions", usage: "/sessions [list|timeline [entry-id]|select <session-id>]", description: "show recent sessions and current session timeline" },
   { name: "/todos", usage: "/todos [pending|in_progress|completed|all|clear]", description: "show or clear visual task checklist used by model planning" },
   { name: "/notify", usage: "/notify [on|off|status|threshold <ms>] | /notify-test", description: "control background terminal notifications for long turns" },
   { name: "/notify-test", usage: "/notify-test", description: "send a test terminal notification" },

@@ -537,6 +537,7 @@ test("runRuntimeCommand exposes command catalog through help", async () => {
     "/agents - show Claude-style subagent types, running agents, and recent results",
     "/mouse [status|mode <auto|scroll|select>] - show or set transcript mouse interaction mode",
     "/usage - show current session usage statistics with provider/model token totals",
+    "/sessions [list|timeline [entry-id]|select <session-id>] - show recent sessions and current session timeline",
     "/todos [pending|in_progress|completed|all|clear] - show or clear visual task checklist used by model planning",
     "/notify-test - send a test terminal notification",
     "/emoji-test - print available session emoji markers",
@@ -714,6 +715,88 @@ test("runRuntimeCommand reports current session usage", async () => {
   assert.match(result?.output ?? "", /100% share · 1,234 tokens/);
   assert.match(result?.output ?? "", /in 1,200 · out 34 · cache 0 · msgs 1 · cost n\/a/);
   assert.match(result?.output ?? "", /notes: local telemetry only; bars show token share, not provider quota/);
+});
+
+test("runRuntimeCommand reports session picker and timeline", async () => {
+  const { runRuntimeCommand } = await import("../src/cli.js");
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-sessions-command-"));
+  try {
+    const usageDir = path.join(cwd, ".nexagent", "usage", "sessions");
+    await mkdir(usageDir, { recursive: true });
+    await writeFile(path.join(usageDir, "old-session.jsonl"), [
+      JSON.stringify({ type: "session", id: "old-session", timestamp: "2026-05-01T00:00:00.000Z" }),
+      JSON.stringify({
+        type: "message",
+        timestamp: "2026-05-01T00:01:00.000Z",
+        message: {
+          role: "assistant",
+          provider: "codex",
+          model: "gpt-5.4",
+          timestamp: Date.parse("2026-05-01T00:01:00.000Z"),
+          usage: { input: 10, output: 20, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } },
+        },
+      }),
+      "",
+    ].join("\n"), "utf8");
+
+    const session = createSession();
+    session.id = "current-session";
+    session.cwd = cwd;
+    session.repo.root = cwd;
+    session.action = { status: "running", detail: "issue #13", pending: true, lastActivity: "2026-05-07T10:02:00.000Z" };
+    session.goal.goal = {
+      version: 1,
+      id: "goal-test",
+      objective: "finish UX issue #13",
+      status: "active",
+      tokenBudget: null,
+      tokensUsed: 0,
+      timeUsedSeconds: 0,
+      createdAt: Date.parse("2026-05-07T09:00:00.000Z"),
+      updatedAt: Date.parse("2026-05-07T09:30:00.000Z"),
+    };
+    session.events = [
+      { at: "2026-05-07T10:00:00.000Z", kind: "prompt", status: "queued", summary: "work issue #13", detail: "Start issue #13" },
+      { at: "2026-05-07T10:01:00.000Z", kind: "command", status: "completed", summary: "closed #12", detail: "commit 7b5c873" },
+    ];
+
+    const list = runRuntimeCommand(session, "/sessions");
+    assert.equal(list?.ok, true);
+    assert.equal(list?.activity, "sessions list");
+    assert.match(list?.output ?? "", /^sessions$/m);
+    assert.match(list?.output ?? "", /current current-session status=running/);
+    assert.match(list?.output ?? "", /old-session messages=1 tokens=30/);
+    assert.match(list?.output ?? "", /\/sessions timeline <entry-id>/);
+
+    const selected = runRuntimeCommand(session, "/sessions select old-session");
+    assert.equal(selected?.ok, true);
+    assert.match(selected?.output ?? "", /^session selected$/m);
+    assert.match(selected?.output ?? "", /id: old-session/);
+    assert.match(selected?.output ?? "", /status: historical usage only/);
+
+    const timeline = runRuntimeCommand(session, "/sessions timeline");
+    assert.equal(timeline?.ok, true);
+    assert.equal(timeline?.activity, "sessions timeline");
+    assert.match(timeline?.output ?? "", /^timeline$/m);
+    assert.match(timeline?.output ?? "", /goal 2026-05-07T09:30:00.000Z goal\/active finish UX issue #13 refs=#13/);
+    assert.match(timeline?.output ?? "", /e1 2026-05-07T10:00:00.000Z prompt\/queued work issue #13 refs=#13/);
+    assert.match(timeline?.output ?? "", /e2 2026-05-07T10:01:00.000Z command\/completed closed #12 refs=#12,7b5c873/);
+
+    const entry = runRuntimeCommand(session, "/sessions timeline e1");
+    assert.equal(entry?.ok, true);
+    assert.equal(entry?.activity, "sessions timeline entry");
+    assert.match(entry?.output ?? "", /^timeline entry$/m);
+    assert.match(entry?.output ?? "", /^id: e1$/m);
+    assert.match(entry?.output ?? "", /^refs: #13$/m);
+
+    assert.match(runRuntimeCommand(session, "/sessions timeline missing")?.output ?? "", /timeline entry not found: missing/);
+    assert.match(runRuntimeCommand(session, "/sessions select none")?.output ?? "", /session not found: none/);
+    const bad = runRuntimeCommand(session, "/sessions nope");
+    assert.equal(bad?.ok, false);
+    assert.match(bad?.message ?? "", /usage: \/sessions/);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
 });
 
 test("recordTurnTelemetry writes Pi-compatible usage JSONL consumed by /usage", async () => {

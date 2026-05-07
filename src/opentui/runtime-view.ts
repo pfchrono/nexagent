@@ -6,6 +6,7 @@ import { getCodexModelDefinition } from "../models.js";
 import { detectKeybindingConflicts } from "../runtime/keybindings.js";
 import { getLspStatus } from "../runtime/lsp.js";
 import { deriveTurnCompletionState, getRemainingContextTokens, type RuntimeSession } from "../runtime/session.js";
+import { buildSessionTimeline } from "../runtime/session-timeline.js";
 
 const OPEN_BY_DEFAULT_LINE_CAP = 30;
 const TRANSCRIPT_BLOCK_LIMIT = 80;
@@ -82,6 +83,10 @@ export interface OpenTuiLspProblemsView {
   rows: string[];
 }
 
+export interface OpenTuiSessionTimelineView {
+  rows: string[];
+}
+
 export interface OpenTuiStatuslineView {
   provider: string;
   model: string;
@@ -135,6 +140,7 @@ export interface OpenTuiRuntimeView {
   cockpit: OpenTuiCockpitView;
   configSections: OpenTuiConfigSectionView[];
   lspProblems: OpenTuiLspProblemsView;
+  sessionTimeline: OpenTuiSessionTimelineView;
   logo: OpenTuiLogoView;
   statusline: OpenTuiStatuslineView;
 }
@@ -186,8 +192,23 @@ export function createOpenTuiRuntimeView(session: RuntimeSession): OpenTuiRuntim
     cockpit,
     configSections: createConfigSections(session, statusline, approval),
     lspProblems: createLspProblemsView(session),
+    sessionTimeline: createSessionTimelineView(session),
     logo,
     statusline,
+  };
+}
+
+function createSessionTimelineView(session: RuntimeSession): OpenTuiSessionTimelineView {
+  const entries = buildSessionTimeline(session);
+  const latest = entries.at(-1);
+  return {
+    rows: [
+      `current ${session.id}`,
+      `status ${session.action.status}`,
+      `entries ${String(entries.length)}`,
+      latest ? `latest ${latest.id} ${latest.kind}/${latest.status} ${latest.summary}` : "latest none",
+      "open /sessions timeline",
+    ],
   };
 }
 
@@ -325,6 +346,10 @@ function createConfigSections(session: RuntimeSession, statusline: OpenTuiStatus
         `storage ${session.archivist.storagePath ?? "disabled"}`,
         `retrieval ${session.archivist.retrieval.sourceCategory ?? "idle"}`,
       ],
+    },
+    {
+      title: "sessions",
+      rows: createSessionTimelineView(session).rows,
     },
     {
       title: "mcp",

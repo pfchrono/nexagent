@@ -27,6 +27,7 @@ import { savePersistedRuntimeState } from "./runtime/persistence.js";
 import { executeInternalTool, getInternalToolDefinitions } from "./runtime/tools.js";
 import { clearRuntimeTodos, formatTodosCommandOutput } from "./runtime/todos.js";
 import { detectKeybindingConflicts, formatKeybindingDisplay, formatKeybindingRows, normalizeKeybindingAction, normalizeKeybindingKey } from "./runtime/keybindings.js";
+import { formatSelectedSession, formatSessionPicker, formatSessionTimeline } from "./runtime/session-timeline.js";
 import {
   beginGoalTurn,
   buildGoalContinuationPrompt,
@@ -1039,6 +1040,8 @@ function dispatchRuntimeCommand(session: RuntimeSession, input: string): Runtime
       return handleStatusCommand(session, args);
     case "/usage":
       return handleUsageCommand(session, args);
+    case "/sessions":
+      return handleSessionsCommand(session, args);
     case "/todos":
       return handleTodosCommand(session, args);
     case "/goal":
@@ -2209,6 +2212,50 @@ function handleUsageCommand(session: RuntimeSession, args: string[]): RuntimeCom
     ok: true,
     output: formatUsageStatus(session),
     activity: "usage",
+  };
+}
+
+function handleSessionsCommand(session: RuntimeSession, args: string[]): RuntimeCommandResult {
+  const [subcommand = "list", value] = args;
+  if (args.length > 2) {
+    return {
+      ok: false,
+      message: "usage: /sessions [list|timeline [entry-id]|select <session-id>]",
+      activity: "command failed · /sessions usage",
+    };
+  }
+  if (subcommand === "list" || subcommand === "status") {
+    if (value) {
+      return {
+        ok: false,
+        message: "usage: /sessions [list|timeline [entry-id]|select <session-id>]",
+        activity: "command failed · /sessions usage",
+      };
+    }
+    return {
+      ok: true,
+      output: formatSessionPicker(session),
+      activity: "sessions list",
+    };
+  }
+  if (subcommand === "timeline") {
+    return {
+      ok: true,
+      output: formatSessionTimeline(session, value),
+      activity: value ? "sessions timeline entry" : "sessions timeline",
+    };
+  }
+  if (subcommand === "select" && value) {
+    return {
+      ok: true,
+      output: formatSelectedSession(session, value),
+      activity: "sessions select",
+    };
+  }
+  return {
+    ok: false,
+    message: "usage: /sessions [list|timeline [entry-id]|select <session-id>]",
+    activity: "command failed · /sessions usage",
   };
 }
 

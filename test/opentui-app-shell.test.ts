@@ -152,7 +152,7 @@ test("OpenTUI app shell renders live view fields and Phase 66 command surfaces",
   assert.match(source, /keybindingAction === "toggle-config"/);
   assert.match(source, /renderConfigPanelRows/);
   assert.match(source, /frameTop\(" dashboard ", innerWidth\)/);
-  assert.match(source, /provider · model · tools · approvals · MCP · LSP · memory · context/);
+  assert.match(source, /provider · model · tools · approvals · sessions · MCP · LSP · memory · context/);
   assert.match(source, /section === "model"/);
   assert.match(source, /section === "approval"/);
   assert.match(source, /section === "context"/);
