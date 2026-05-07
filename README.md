@@ -135,7 +135,7 @@ Run the default interactive OpenTUI shell:
 bun run dev
 ```
 
-OpenTUI is the default interactive path after the v1.5 migration acceptance checks. Current shell work includes the live runtime shell, multiline composer, searchable command palette, slash/skill/model/effort command surfaces, bounded transcript review, collapsible trace blocks, cockpit warning/action/approval/memory/MCP/LSP surfaces, mouse wheel scrolling, clipboard text paste, multi-image paste/attach chips, edit-tool diff previews, and OSC52 copy feedback. Transcript review uses `PageUp`/`PageDown`, `Ctrl+Up`/`Ctrl+Down`, mouse wheel, `Ctrl+End` for latest output, `Ctrl+T` for trace, and `Ctrl+Y` to copy the selected block. `Ctrl+P` opens the command palette, `Ctrl+O` toggles cockpit, `Ctrl+G` opens config, `Ctrl+V` pastes clipboard text, `Alt+V` pastes clipboard images, and `Ctrl+Q` or `/quit` exits OpenTUI.
+OpenTUI is the default interactive path after the v1.5 migration acceptance checks. Current shell work includes the live runtime shell, multiline composer, searchable command palette, slash/skill/model/effort command surfaces, configurable keybinding registry, bounded transcript review, collapsible trace blocks, cockpit warning/action/approval/memory/MCP/LSP surfaces, mouse wheel scrolling, clipboard text paste, multi-image paste/attach chips, edit-tool diff previews, and OSC52 copy feedback. Transcript review uses `PageUp`/`PageDown`, `Ctrl+Up`/`Ctrl+Down`, mouse wheel, `Ctrl+End` for latest output, `Ctrl+T` for trace, and `Ctrl+Y` to copy the selected block. `Ctrl+P` opens the command palette, `Ctrl+O` toggles cockpit, `Ctrl+G` opens config, `Ctrl+V` pastes clipboard text, `Alt+V` pastes clipboard images, and `Ctrl+Q` or `/quit` exits OpenTUI. Use `/keys` to list registry action ids and `/config key <action> <key|clear>` to customize supported shortcuts with conflict checks.
 
 Show launch help:
 
@@ -286,7 +286,7 @@ Inside TUI:
 - `/safegit [status|patterns]` — high-risk git mutation guard for force push, hard reset, forced clean, stash deletion, forced branch delete, and reflog expiry
 - `/scip [status|symbols <path>|diagnostics <path>|check [path]]` — Pi SCIP compatibility aliases backed by local LSP/static analysis
 - `/extensions` — Pi-like extension lifecycle shim status, loaded sources, registered events, commands, tools, and load errors
-- `/config` — open the interactive OpenTUI config side window; `/config status` prints provider, UI, memory, LSP, and diagnostics status
+- `/config` — open the interactive OpenTUI config side window; `/config status` prints provider, UI, memory, LSP, and diagnostics status; `/config key <action> <key|clear>` customizes supported OpenTUI shortcuts
 - `/config [set] logo <full|condensed|off>` — persist startup logo mode
 - `/config [set] lsp <on|off>` and `/config [set] lsp-index <on|off>` — persist LSP/code-intel toggles
 - `/statusline command <shell>` and `/statusline command clear` — configure a bounded custom statusline script; the script receives `NEXAGENT_PROVIDER`, `NEXAGENT_MODEL`, `NEXAGENT_TRANSPORT`, `NEXAGENT_APPROVAL`, `NEXAGENT_CONTEXT_LEFT`, `NEXAGENT_CONTEXT_WINDOW`, `NEXAGENT_TURN_COUNT`, and `NEXAGENT_CWD`

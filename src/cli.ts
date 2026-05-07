@@ -26,6 +26,7 @@ import { toDiagnosticRuntimeEvent } from "./runtime/diagnostics.js";
 import { savePersistedRuntimeState } from "./runtime/persistence.js";
 import { executeInternalTool, getInternalToolDefinitions } from "./runtime/tools.js";
 import { clearRuntimeTodos, formatTodosCommandOutput } from "./runtime/todos.js";
+import { detectKeybindingConflicts, formatKeybindingDisplay, formatKeybindingRows, normalizeKeybindingAction, normalizeKeybindingKey } from "./runtime/keybindings.js";
 import {
   beginGoalTurn,
   buildGoalContinuationPrompt,
@@ -997,7 +998,7 @@ function dispatchRuntimeCommand(session: RuntimeSession, input: string): Runtime
     case "/help":
       return handleHelpCommand(args);
     case "/keys":
-      return handleKeysCommand(args);
+      return handleKeysCommand(session, args);
     case "/continue":
       return handleContinueCommand(session, args);
     case "/finish":
@@ -1652,7 +1653,7 @@ function handleHelpCommand(args: string[]): RuntimeCommandResult {
   };
 }
 
-function handleKeysCommand(args: string[]): RuntimeCommandResult {
+function handleKeysCommand(session: RuntimeSession, args: string[]): RuntimeCommandResult {
   if (args.length !== 0) {
     return {
       ok: false,
@@ -1663,7 +1664,7 @@ function handleKeysCommand(args: string[]): RuntimeCommandResult {
 
   return {
     ok: true,
-    output: formatOpenTuiKeymap(),
+    output: formatOpenTuiKeymap(session),
     activity: "keys",
   };
 }
@@ -1984,7 +1985,7 @@ function handleLspCommand(session: RuntimeSession, args: string[]): RuntimeComma
 
 const LSP_USAGE = "usage: /lsp [status|setup|health|warm|mode <on|off>|symbols <path>|diagnostics <path>|check [path]|nav <operation> [path] [line] [character]]";
 const SCIP_USAGE = "usage: /scip [status|symbols <path>|diagnostics <path>|check [path]]";
-const CONFIG_USAGE = "usage: /config [status] | /config [set] logo <full|condensed|off> | /config [set] lsp <on|off> | /config [set] lsp-index <on|off>";
+const CONFIG_USAGE = "usage: /config [status] | /config [set] logo <full|condensed|off> | /config [set] lsp <on|off> | /config [set] lsp-index <on|off> | /config [set] key <action> <key|clear>";
 
 function handleScipCommand(session: RuntimeSession, args: string[]): RuntimeCommandResult {
   if (args.length === 0 || (args.length === 1 && STATUS_ARGS.has(args[0]?.toLowerCase() ?? ""))) {
@@ -2013,6 +2014,47 @@ function handleConfigCommand(session: RuntimeSession, args: string[]): RuntimeCo
     };
   }
   const mutationArgs = args[0]?.toLowerCase() === "set" ? args.slice(1) : args;
+  if (mutationArgs.length === 3 && mutationArgs[0]?.toLowerCase() === "key") {
+    const action = normalizeKeybindingAction(mutationArgs[1] ?? "");
+    const rawKey = mutationArgs[2] ?? "";
+    if (!action) {
+      return {
+        ok: false,
+        message: CONFIG_USAGE,
+        activity: "command failed · /config usage",
+      };
+    }
+    session.ui = session.ui ?? { logoMode: "full" };
+    const overrides = { ...(session.ui.keybindings ?? {}) };
+    if (DISABLE_ARGS.has(rawKey.toLowerCase()) || rawKey.toLowerCase() === "clear") {
+      delete overrides[action];
+    } else {
+      const key = normalizeKeybindingKey(rawKey);
+      if (!key) {
+        return {
+          ok: false,
+          message: CONFIG_USAGE,
+          activity: "command failed · /config usage",
+        };
+      }
+      overrides[action] = key;
+      const conflicts = detectKeybindingConflicts(overrides);
+      if (conflicts.length > 0) {
+        return {
+          ok: false,
+          message: `keybinding conflict: ${conflicts[0]}`,
+          activity: "command failed · keybinding conflict",
+        };
+      }
+    }
+    session.ui.keybindings = Object.keys(overrides).length > 0 ? overrides : undefined;
+    savePersistedRuntimeState(session);
+    return {
+      ok: true,
+      output: formatConfigStatus(session),
+      activity: `config key · ${action}`,
+    };
+  }
   if (mutationArgs.length === 2) {
     const section = mutationArgs[0]?.toLowerCase();
     const value = mutationArgs[1]?.toLowerCase() ?? "";
@@ -3452,6 +3494,7 @@ function formatRuntimeDashboardStatus(session: RuntimeSession): string {
   const remainingContext = getRemainingContextTokens(session);
   const contextUsed = Math.max(0, contextWindow - remainingContext);
   const contextPercent = contextWindow > 0 ? Math.round((contextUsed / contextWindow) * 100) : 0;
+  const keyConflicts = detectKeybindingConflicts(session.ui?.keybindings);
   return [
     "dashboard",
     "provider",
@@ -3470,6 +3513,8 @@ function formatRuntimeDashboardStatus(session: RuntimeSession): string {
     `sessionColor: ${String(getSessionColorCode(session))}`,
     `notify: ${session.ui?.notifyEnabled === true ? "on" : "off"} threshold=${String(notifyThresholdMs(session))}ms`,
     `statuslineCommand: ${session.ui?.statuslineCommand ?? "none"}`,
+    `keybindings: ${String(Object.keys(session.ui?.keybindings ?? {}).length)} custom`,
+    `keyConflicts: ${keyConflicts.length > 0 ? keyConflicts.join("; ") : "none"}`,
     "memory",
     `archivist: ${session.archivist.enabled ? "on" : "off"}`,
     `storage: ${session.archivist.storagePath ?? "disabled"}`,
@@ -3729,28 +3774,24 @@ function formatCommandCatalog(): string {
   ].join("\n");
 }
 
-function formatOpenTuiKeymap(): string {
+function formatOpenTuiKeymap(session?: RuntimeSession): string {
   return [
-    "Composer",
+    "Composer basics",
     "  Enter - send prompt",
     "  Shift+Enter or Alt+Enter - insert newline",
     "  Tab - accept selected completion",
     "  Esc - clear input or close overlay",
-    "  Ctrl+V - paste clipboard text",
-    "  Alt+V - attach clipboard image",
     "",
-    "Transcript",
+    ...formatKeybindingRows(session?.ui?.keybindings),
+    "",
+    "Transcript extras",
     "  PageUp/PageDown - scroll transcript",
     "  Ctrl+Up/Ctrl+Down - scroll one line",
-    "  Ctrl+End or Ctrl+Y - jump/copy latest selected block",
-    "  Ctrl+C - copy selected terminal text or selected block",
+    "  Ctrl+End - jump to latest output",
     "",
-    "Panels",
-    "  Ctrl+P - open command palette",
-    "  Ctrl+O - toggle cockpit",
-    "  Ctrl+G - toggle config",
-    "  Ctrl+T - toggle trace",
-    "  Ctrl+Q or /quit - exit OpenTUI",
+    "Customize",
+    `  /config key command-palette ${formatKeybindingDisplay("ctrl+p")}`,
+    "  /config key command-palette clear",
   ].join("\n");
 }
 

@@ -176,6 +176,7 @@ export function createRuntimeState(runtime: RuntimeBootstrap): RuntimeState {
       notifyEnabled: boot.persisted?.ui?.notifyEnabled ?? boot.config.ui?.notifyEnabled ?? false,
       notifyThresholdMs: boot.persisted?.ui?.notifyThresholdMs ?? boot.config.ui?.notifyThresholdMs ?? 2000,
       statuslineCommand: boot.persisted?.ui?.statuslineCommand ?? boot.config.ui?.statuslineCommand,
+      keybindings: mergeRuntimeKeybindings(boot.config.ui?.keybindings, boot.persisted?.ui?.keybindings),
     },
     auth: boot.auth,
     btw: createRuntimeBtwState(boot.persisted?.btw),
@@ -185,6 +186,17 @@ export function createRuntimeState(runtime: RuntimeBootstrap): RuntimeState {
     goal: createRuntimeGoalState(boot.persisted?.goal, { pauseActiveOnLoad: Boolean(boot.persisted?.goal?.goal?.status === "active") }),
     extensions: boot.extensions,
   };
+}
+
+function mergeRuntimeKeybindings(
+  configured?: Record<string, string>,
+  persisted?: Record<string, string>,
+): Record<string, string> | undefined {
+  const merged = {
+    ...(configured ?? {}),
+    ...(persisted ?? {}),
+  };
+  return Object.keys(merged).length > 0 ? merged : undefined;
 }
 
 function normalizeRuntimeConfig(config: RuntimeBootstrap["config"]): HarnessConfig {

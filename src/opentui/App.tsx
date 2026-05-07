@@ -21,6 +21,7 @@ import {
   type RuntimeExtensionCustomComponent,
 } from "../runtime/extensions.js";
 import { checkpointNexsightSession } from "../runtime/nexsight.js";
+import { formatKeybindingDisplay, resolveKeybindingMap, resolveKeybindingAction } from "../runtime/keybindings.js";
 import type { RuntimeSession } from "../runtime/session.js";
 import { cancelBtwTurn, completeBtwTurn, formatBtwOverlayRows } from "../runtime/btw.js";
 import { savePersistedRuntimeState } from "../runtime/persistence.js";
@@ -340,7 +341,8 @@ export function OpenTuiApp({ view: initialView, session, keyboardSource, promptH
       setShellNotice(`pasted ${String(key.sequence.length)} chars`);
       return;
     }
-    if ((key.ctrl || key.meta || key.option) && key.name === "q") {
+    const keybindingAction = resolveKeybindingAction(key, session?.ui?.keybindings);
+    if (keybindingAction === "quit") {
       onExit();
       return;
     }
@@ -358,7 +360,7 @@ export function OpenTuiApp({ view: initialView, session, keyboardSource, promptH
         return;
       }
     }
-    if (key.ctrl && key.name === "t") {
+    if (keybindingAction === "toggle-trace") {
       setTraceExpanded((current) => {
         const next = !current;
         if (!next) {
@@ -369,16 +371,16 @@ export function OpenTuiApp({ view: initialView, session, keyboardSource, promptH
       });
       return;
     }
-    if (key.ctrl && key.name === "p") {
+    if (keybindingAction === "command-palette") {
       applyComposerEvent({ kind: "open-command-palette" });
       return;
     }
-    if (key.ctrl && key.name === "o") {
+    if (keybindingAction === "toggle-cockpit") {
       setCockpitExpanded((current) => !current);
       setShellNotice(cockpitExpanded ? "cockpit hidden" : "cockpit shown");
       return;
     }
-    if (key.ctrl && key.name === "g") {
+    if (keybindingAction === "toggle-config") {
       setConfigExpanded((current) => !current);
       setShellNotice(configExpanded ? "config hidden" : "config shown");
       return;
@@ -397,19 +399,19 @@ export function OpenTuiApp({ view: initialView, session, keyboardSource, promptH
       setExtensionWidgetRevision((current) => current + 1);
       return;
     }
-    if (key.ctrl && key.name === "r") {
+    if (keybindingAction === "history-search") {
       applyComposerEvent({ kind: "open-history-search" });
       return;
     }
-    if (key.ctrl && key.name === "v") {
+    if (keybindingAction === "paste-text") {
       scheduleTextPasteFromClipboard();
       return;
     }
-    if (key.ctrl && key.name === "c") {
+    if (keybindingAction === "copy-selection") {
       copySelectedText();
       return;
     }
-    if (key.ctrl && key.name === "y") {
+    if (keybindingAction === "copy-latest") {
       copyLatestResultBlock();
       return;
     }
@@ -442,7 +444,7 @@ export function OpenTuiApp({ view: initialView, session, keyboardSource, promptH
       applyConfigSelection();
       return;
     }
-    if ((key.name === "v" || key.sequence.toLowerCase() === "v") && (key.meta || key.option)) {
+    if (keybindingAction === "paste-image") {
       void pasteImageFromClipboard();
       return;
     }
@@ -659,7 +661,21 @@ export function OpenTuiApp({ view: initialView, session, keyboardSource, promptH
     previewLine,
     statusLine: modeStripLine,
   });
-  const keyLine = "Keys: ↵ send · Esc clear · Ctrl+P palette · Tab complete | 📋 Ctrl+V text · Alt+V image | ↕ history · PgUp/PgDn scroll | ⌘ Ctrl+O cockpit · Ctrl+G config · Ctrl+T trace · Ctrl+C copy · Ctrl+Y latest · /quit";
+  const activeKeybindings = resolveKeybindingMap(session?.ui?.keybindings);
+  const keyLine = [
+    "Keys: ↵ send · Esc clear",
+    `${formatKeybindingDisplay(activeKeybindings["command-palette"])} palette`,
+    "Tab complete",
+    `📋 ${formatKeybindingDisplay(activeKeybindings["paste-text"])} text`,
+    `${formatKeybindingDisplay(activeKeybindings["paste-image"])} image`,
+    "↕ history · PgUp/PgDn scroll",
+    `⌘ ${formatKeybindingDisplay(activeKeybindings["toggle-cockpit"])} cockpit`,
+    `${formatKeybindingDisplay(activeKeybindings["toggle-config"])} config`,
+    `${formatKeybindingDisplay(activeKeybindings["toggle-trace"])} trace`,
+    `${formatKeybindingDisplay(activeKeybindings["copy-selection"])} copy`,
+    `${formatKeybindingDisplay(activeKeybindings["copy-latest"])} latest`,
+    "/quit",
+  ].join(" · ");
 
   useEffect(() => {
     setTranscriptState((current) => handleOpenTuiTranscriptEvent(current, {

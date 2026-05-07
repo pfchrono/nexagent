@@ -23,6 +23,7 @@ import {
   normalizeRuntimeCwd,
 } from "./config-paths.js";
 import { parseJsonConfig } from "./jsonc.js";
+import { normalizeKeybindingOverrides } from "./keybindings.js";
 import { readMcpConfigFile, writeMcpConfigFile } from "./mcp.js";
 import { resolveNexagentHome, resolvePathFromBase } from "./paths.js";
 
@@ -104,6 +105,7 @@ export interface UiConfig {
   notifyEnabled?: boolean;
   notifyThresholdMs?: number;
   statuslineCommand?: string;
+  keybindings?: Record<string, string>;
 }
 
 export interface ArchivistDiagnosticsState {
@@ -753,6 +755,10 @@ function mergeUiSettings(resolved?: Partial<UiConfig>, source?: Partial<UiConfig
   return {
     ...resolved,
     ...source,
+    keybindings: {
+      ...(resolved?.keybindings ?? {}),
+      ...(source?.keybindings ?? {}),
+    },
   };
 }
 
@@ -774,7 +780,13 @@ function resolveUiConfig(settings?: Partial<UiConfig>): UiConfig {
     notifyEnabled: settings?.notifyEnabled === true,
     notifyThresholdMs: typeof settings?.notifyThresholdMs === "number" ? settings.notifyThresholdMs : undefined,
     statuslineCommand: typeof settings?.statuslineCommand === "string" && settings.statuslineCommand.trim().length > 0 ? settings.statuslineCommand.trim() : undefined,
+    keybindings: normalizeUiKeybindings(settings?.keybindings),
   };
+}
+
+function normalizeUiKeybindings(value: unknown): Record<string, string> | undefined {
+  const normalized = normalizeKeybindingOverrides(value);
+  return Object.keys(normalized).length > 0 ? normalized : undefined;
 }
 
 function resolveCompactionConfig(settings?: Partial<CompactionConfig>): CompactionConfig {

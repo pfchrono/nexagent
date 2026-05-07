@@ -559,7 +559,7 @@ test("runRuntimeCommand exposes OpenTUI keymap help", async () => {
 
   assert.equal(result?.ok, true);
   assert.match(result?.ok ? result.output : "", /Composer/);
-  assert.match(result?.ok ? result.output : "", /Ctrl\+T - toggle trace/);
+  assert.match(result?.ok ? result.output : "", /Ctrl\+T - toggle trace \[toggle-trace\]/);
   assert.equal(result?.activity, "keys");
 });
 
@@ -930,6 +930,20 @@ test("runRuntimeCommand exposes and persists config and LSP settings", async () 
     const statuslineClear = runRuntimeCommand(session, "/statusline command clear");
     assert.equal(statuslineClear?.ok, true);
     assert.equal(session.ui.statuslineCommand, undefined);
+
+    const keybinding = runRuntimeCommand(session, "/config key command-palette ctrl+k");
+    assert.equal(keybinding?.ok, true);
+    assert.equal(session.ui.keybindings?.["command-palette"], "ctrl+k");
+    assert.match(keybinding?.output ?? "", /^keybindings: 1 custom$/m);
+    assert.match(runRuntimeCommand(session, "/keys")?.output ?? "", /Ctrl\+K - open command palette \(custom\) \[command-palette\]/);
+
+    const keyConflict = runRuntimeCommand(session, "/config key toggle-trace ctrl+k");
+    assert.equal(keyConflict?.ok, false);
+    assert.match(keyConflict?.message ?? "", /keybinding conflict/);
+
+    const keyClear = runRuntimeCommand(session, "/config key command-palette clear");
+    assert.equal(keyClear?.ok, true);
+    assert.equal(session.ui.keybindings, undefined);
 
     const lsp = runRuntimeCommand(session, "/config set lsp on");
     assert.equal(lsp?.ok, true);

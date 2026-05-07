@@ -8,6 +8,7 @@ import { createRuntimeToolMemoryState, type RuntimeToolMemoryState } from "./too
 import { createRuntimeSubagentState, type RuntimeSubagentState } from "./subagents.js";
 import { createRuntimeTodoState, type RuntimeTodoState } from "./todos.js";
 import { createRuntimeGoalState, type RuntimeGoalState } from "./goal.js";
+import { normalizeKeybindingOverrides } from "./keybindings.js";
 
 export type PersistedTransportMode = "cli-exec" | "http-responses" | "codex-http";
 
@@ -52,6 +53,7 @@ export interface PersistedUiState {
   notifyEnabled?: boolean;
   notifyThresholdMs?: number;
   statuslineCommand?: string;
+  keybindings?: Record<string, string>;
 }
 
 export interface SavePersistedRuntimeStateOptions {
@@ -106,6 +108,7 @@ export function savePersistedRuntimeState(session: RuntimeSession, options: Save
         notifyEnabled: session.ui?.notifyEnabled === true,
         notifyThresholdMs: session.ui?.notifyThresholdMs,
         statuslineCommand: session.ui?.statuslineCommand,
+        keybindings: session.ui?.keybindings,
       },
       auth: session.auth,
       btw: createRuntimeBtwState(session.btw),
@@ -201,6 +204,7 @@ function normalizeUiState(value: unknown): PersistedUiState | undefined {
   }
   const state = value as Record<string, unknown>;
   const logoMode = state.logoMode;
+  const keybindings = normalizeKeybindingOverrides(state.keybindings);
   return {
     logoMode: logoMode === "condensed" || logoMode === "off" || logoMode === "full" ? logoMode : undefined,
     sessionEmoji: typeof state.sessionEmoji === "string" && state.sessionEmoji.trim().length > 0 ? state.sessionEmoji : undefined,
@@ -208,6 +212,7 @@ function normalizeUiState(value: unknown): PersistedUiState | undefined {
     notifyEnabled: state.notifyEnabled === true,
     notifyThresholdMs: typeof state.notifyThresholdMs === "number" && Number.isFinite(state.notifyThresholdMs) ? state.notifyThresholdMs : undefined,
     statuslineCommand: typeof state.statuslineCommand === "string" && state.statuslineCommand.trim().length > 0 ? state.statuslineCommand.trim() : undefined,
+    keybindings: Object.keys(keybindings).length > 0 ? keybindings : undefined,
   };
 }
 

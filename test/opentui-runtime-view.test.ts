@@ -86,7 +86,7 @@ test("createOpenTuiRuntimeView maps runtime session without mutation", () => {
     },
     {
       title: "ui",
-      rows: ["logo full", "mouse undefined", "statusline off", "statuslineCommand none"],
+      rows: ["logo full", "mouse undefined", "statusline off", "statuslineCommand none", "keybindings 0 custom", "keyConflicts none"],
       },
       {
         title: "memory",

@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { freemem, totalmem } from "node:os";
 
 import { getCodexModelDefinition } from "../models.js";
+import { detectKeybindingConflicts } from "../runtime/keybindings.js";
 import { getLspStatus } from "../runtime/lsp.js";
 import { deriveTurnCompletionState, getRemainingContextTokens, type RuntimeSession } from "../runtime/session.js";
 
@@ -307,6 +308,8 @@ function createConfigSections(session: RuntimeSession, statusline: OpenTuiStatus
         `mouse ${session.commandModes.mouseMode}`,
         `statusline ${session.commandModes.statusline ? "on" : "off"}`,
         `statuslineCommand ${session.ui?.statuslineCommand ?? "none"}`,
+        `keybindings ${String(Object.keys(session.ui?.keybindings ?? {}).length)} custom`,
+        `keyConflicts ${detectKeybindingConflicts(session.ui?.keybindings).length > 0 ? "yes" : "none"}`,
       ],
     },
     {

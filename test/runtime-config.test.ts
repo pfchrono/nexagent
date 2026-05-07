@@ -298,6 +298,35 @@ test("loadHarnessConfig resolves compaction settings with safe defaults and over
   }
 });
 
+test("loadHarnessConfig normalizes UI keybinding overrides", async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-keybinding-config-"));
+
+  try {
+    await mkdir(path.join(cwd, ".nexagent"));
+    await writeFile(
+      path.join(cwd, ".nexagent", "settings.json"),
+      JSON.stringify({
+        ui: {
+          keybindings: {
+            "command-palette": "Ctrl+K",
+            "toggle-trace": "bad key",
+            unknown: "ctrl+u",
+          },
+        },
+      }),
+      "utf8",
+    );
+
+    const config = await loadHarnessConfig(cwd);
+
+    assert.deepEqual(config.ui.keybindings, {
+      "command-palette": "ctrl+k",
+    });
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test("loadHarnessConfig merges global and repo provider registry JSON", async () => {
   const cwd = await mkdtemp(path.join(tmpdir(), "nexagent-provider-registry-"));
   const nexagentHome = await mkdtemp(path.join(tmpdir(), "nexagent-home-"));
@@ -1035,6 +1064,7 @@ test("createRuntimeState exposes discovered instruction sources", () => {
         notifyEnabled: false,
         notifyThresholdMs: 2000,
         statuslineCommand: undefined,
+        keybindings: undefined,
       },
       btw: {
         visible: false,
