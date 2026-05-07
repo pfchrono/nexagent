@@ -488,6 +488,7 @@ test("runRuntimeCommand reports provider status", async () => {
   assert.match(result?.output ?? "", /^provider: codex$/m);
   assert.match(result?.output ?? "", /^model: gpt-5.4$/m);
   assert.match(result?.output ?? "", /^transport: cli-exec$/m);
+  assert.match(result?.output ?? "", /^readiness: ready$/m);
   assert.match(result?.output ?? "", /^active: codex$/m);
   assert.match(result?.output ?? "", /^caveats: /m);
 });

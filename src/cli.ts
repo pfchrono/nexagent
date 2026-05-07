@@ -41,6 +41,7 @@ import {
 } from "./runtime/goal.js";
 import { loadPiUsageStats, type UsageStats } from "./runtime/usage.js";
 import { DEFAULT_CODEX_MODEL, DEFAULT_CODEX_REASONING_EFFORT, getCodexModelDefinition, normalizeCodexModel, normalizeCodexReasoningEffort, type CodexReasoningEffort } from "./models.js";
+import { getProviderReadiness } from "./provider/readiness.js";
 import { getProviderDefinition, getProviderModelOptions, type ProviderModelOption } from "./provider/registry.js";
 import { ANSI, padLine, padVisibleLine, renderRule, renderScreen, resetScreenRenderer, tintLine, truncateLine, wrapText } from "./tui/primitives.js";
 import { autocompletePromptBuffer, describePromptHint, type PromptCompletionResult } from "./cli/autocomplete.js";
@@ -3265,6 +3266,7 @@ function handleEffortCommand(session: RuntimeSession, args: string[]): RuntimeCo
 
 function formatProviderStatus(session: RuntimeSession, detailMode: DetailMode = "compact"): string {
   const definition = getProviderDefinition(session.providerRegistry, session.providerTransport.activeProvider);
+  const readiness = getProviderReadiness(session);
   const registryWarnings = [
     ...(session.providerRegistry.warnings ?? []),
     ...(definition?.warnings ?? []),
@@ -3275,6 +3277,7 @@ function formatProviderStatus(session: RuntimeSession, detailMode: DetailMode = 
     ["transport", session.providerTransport.mode],
     ["wire-api", definition?.wireApi ?? "unknown"],
     ["auth-gate", session.providerTransport.authGate],
+    ["readiness", readiness.status],
     ["active", session.providerTransport.activeProvider],
     ["caveats", formatTransportCaveat(session)],
   ];
@@ -3291,12 +3294,24 @@ function formatProviderStatus(session: RuntimeSession, detailMode: DetailMode = 
     ["base-url", definition?.baseUrl ?? "none"],
     ["auth-source", session.providerTransport.authSource],
     ["auth-gate", session.providerTransport.authGate],
+    ["readiness", readiness.status],
+    ["readiness-errors", readiness.errors.length > 0 ? readiness.errors.join(" | ") : "none"],
+    ["readiness-warnings", readiness.warnings.length > 0 ? readiness.warnings.join(" | ") : "none"],
+    ["error-journal", formatProviderErrorJournal(session)],
     ["registry", definition?.disabledReason ? `disabled · ${definition.disabledReason}` : "ready"],
     ["registry-warnings", registryWarnings.length > 0 ? registryWarnings.join(" | ") : "none"],
     ["capabilities", formatTransportCapabilities(session)],
     ["caveats", formatTransportCaveat(session)],
   ];
   return formatDiagnosticSection("provider", detailMode, compactRows, verboseRows).join("\n");
+}
+
+function formatProviderErrorJournal(session: RuntimeSession): string {
+  const latest = session.providerErrorJournal?.at(-1);
+  if (!latest) {
+    return "none";
+  }
+  return `${latest.category}: ${latest.message}`;
 }
 
 function formatModelStatus(session: RuntimeSession): string {

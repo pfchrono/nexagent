@@ -61,6 +61,7 @@ import {
   claimsFileMutation,
   isNonActionableDeferral,
 } from "./provider/recovery-policy.js";
+import { recordProviderErrorJournal } from "./provider/readiness.js";
 import {
   captureSentryDiagnostic,
   logSentryError,
@@ -206,11 +207,23 @@ async function executeProviderRequestImpl(
 
   const modelFailure = createUnavailableModelFailure(request.session, provider, model, transport);
   if (modelFailure) {
+    recordProviderErrorJournal(request.session, {
+      category: "model",
+      model,
+      message: modelFailure.message,
+      detail: modelFailure.detail,
+    });
     return modelFailure;
   }
 
   const attachmentFailure = validateAttachmentSupport(request, transport);
   if (attachmentFailure) {
+    recordProviderErrorJournal(request.session, {
+      category: "readiness",
+      model,
+      message: attachmentFailure.message,
+      detail: attachmentFailure.detail,
+    });
     return attachmentFailure;
   }
 
@@ -326,7 +339,9 @@ async function executeProviderRequestImpl(
       turnRun.onProviderStep(step + 1, invocation.metrics);
 
       if (invocation.exitCode !== 0) {
-        return createCodexFailure(provider, model, invocation.stderr, invocation.stdout, transport.id);
+        const failure = createCodexFailure(provider, model, invocation.stderr, invocation.stdout, transport.id);
+        recordProviderFailureJournal(request.session, failure);
+        return failure;
       }
 
       const intent = extractModelIntent(invocation.output);
@@ -604,7 +619,9 @@ async function executeProviderRequestImpl(
           }, { verboseOnly: true });
         }
         if (finalInvocation.exitCode !== 0) {
-          return createCodexFailure(provider, model, finalInvocation.stderr, finalInvocation.stdout, transport.id);
+          const failure = createCodexFailure(provider, model, finalInvocation.stderr, finalInvocation.stdout, transport.id);
+          recordProviderFailureJournal(request.session, failure);
+          return failure;
         }
         const finalIntent = extractModelIntent(finalInvocation.output);
         if (finalIntent) {
@@ -830,6 +847,22 @@ function createCodexFailure(
   };
 }
 
+function recordProviderFailureJournal(session: RuntimeSession, failure: ProviderFailure): void {
+  recordProviderErrorJournal(session, {
+    category: failure.code === "auth_unavailable"
+      ? "auth"
+      : failure.code === "unsupported_model"
+        ? "model"
+        : "transport",
+    provider: failure.provider,
+    transport: failure.transport,
+    adapter: failure.adapter,
+    model: failure.model,
+    message: failure.message,
+    detail: failure.detail,
+  });
+}
+
 async function invokeProviderWithSentrySpan(
   request: ProviderRequest,
   invoker: CodexInvoker,
@@ -957,7 +990,9 @@ async function executeOpenAiNativeToolLoop(
     turnRun.onProviderStep(step + 1, invocation.metrics);
 
     if (invocation.exitCode !== 0) {
-      return createCodexFailure(request.session.provider, model, invocation.stderr, invocation.stdout, transport.id);
+      const failure = createCodexFailure(request.session.provider, model, invocation.stderr, invocation.stdout, transport.id);
+      recordProviderFailureJournal(request.session, failure);
+      return failure;
     }
 
     const toolCall = parseNativeToolCall(invocation.raw);
@@ -1993,7 +2028,9 @@ async function maybeSynthesizeAfterRepeatedGuidance(
     ),
   );
   if (finalInvocation.exitCode !== 0) {
-    return createCodexFailure(request.session.provider, model, finalInvocation.stderr, finalInvocation.stdout, adapter);
+    const failure = createCodexFailure(request.session.provider, model, finalInvocation.stderr, finalInvocation.stdout, adapter);
+    recordProviderFailureJournal(request.session, failure);
+    return failure;
   }
 
   const finalIntent = extractModelIntent(finalInvocation.output);

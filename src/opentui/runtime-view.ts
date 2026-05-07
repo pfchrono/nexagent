@@ -948,6 +948,15 @@ function createCockpitWarnings(session: RuntimeSession): OpenTuiCockpitWarningRo
       action: "/extensions",
     });
   }
+  const latestProviderError = session.providerErrorJournal?.at(-1);
+  if (latestProviderError) {
+    warnings.push({
+      severity: "warning",
+      type: "provider",
+      message: `${latestProviderError.category}: ${latestProviderError.message}`,
+      action: "/provider --verbose",
+    });
+  }
   if (session.operationControls.steerMessage) {
     warnings.push({
       severity: "info",

@@ -49,6 +49,7 @@ Canonical guidance for coding agents working in `nexagent`.
 - Recovery Policy seam in `src/provider/recovery-policy.ts` for typed retry/block/correct/accept decisions around malformed tool output, unsupported write claims, missing evidence, and deferrals
 - Tool Host seam in `src/runtime/tool-host.ts` for shared internal tool list/describe/validate/authorize/execute/function-definition/prompt-guidance contracts
 - Turn Completion envelope in `src/runtime/turn-completion.ts` for typed stop reasons, missing evidence, partial status, and automation/UI diagnostics
+- Provider Readiness and error journal in `src/provider/readiness.ts` for pre-turn diagnostics and bounded provider failure history
 - cockpit-style OpenTUI surfaces: paced assistant replies, turn metadata, warning/error lanes, turn blocks, token/duration badges, risk/outcome/action rows, navigation hints, capability panel
 - default OpenTUI shell with multiline composer, command/skill/model/effort overlays, bounded transcript blocks, collapsible trace blocks, foreground approval panel, capped warning lane, action ladder, pilot override row, split memory summary, MCP/LSP panels, interactive config side window, clipboard text paste, rich edit review blocks, mouse wheel transcript scroll, and OSC52 selected-block copy feedback
 

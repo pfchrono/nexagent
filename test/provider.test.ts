@@ -4142,9 +4142,10 @@ test("executeProviderRequest prefers newer matching memory when scores tie", asy
 });
 
 test("executeProviderRequest maps codex auth failures", async () => {
+  const session = createSession();
   const result = await executeProviderRequest(
     {
-      session: createSession(),
+      session,
       prompt: "say hi",
     },
     {
@@ -4174,6 +4175,8 @@ test("executeProviderRequest maps codex auth failures", async () => {
     message: "codex credentials unavailable",
     detail: "Authentication failed. Please login.",
   });
+  assert.equal(session.providerErrorJournal?.at(-1)?.category, "auth");
+  assert.equal(session.providerErrorJournal?.at(-1)?.message, "codex credentials unavailable");
 });
 
 test("executeProviderRequest maps codex model failures", async () => {
