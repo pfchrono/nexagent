@@ -59,6 +59,14 @@ Test:
 bun run test
 ```
 
+Run deterministic OpenTUI visual smoke checks:
+
+```bash
+bun run test:opentui-visual
+```
+
+The visual smoke harness checks palette, config, approval, trace, attachment, and small-terminal captures for nonblank content, framing, width fit, and leaked placeholder text. If terminal rendering cannot be automated on a target machine, use the manual fallback: run `bun run dev:opentui`, open `Ctrl+P`, `Ctrl+G`, a pending approval, `Ctrl+T`, `/attach`, and a 60x14 terminal, then confirm the same states are visible without clipped or overlapping text.
+
 Run TypeScript entrypoint in development:
 
 ```bash

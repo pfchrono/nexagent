@@ -10,6 +10,7 @@
     "build": "tsc -p tsconfig.json",
     "lint": "eslint \"src/**/*.{ts,tsx}\" \"test/**/*.ts\"",
     "test": "bun test ./test/*.test.ts",
+    "test:opentui-visual": "bun test ./test/opentui-visual-smoke.test.ts",
     "start": "node --import ./dist/instrument.js dist/cli.js",
     "dev": "bun run src/cli.ts",
     "dev:opentui": "bun run src/cli.ts --opentui",
